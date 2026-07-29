@@ -1,0 +1,17 @@
+{
+  "ids": {
+    "Qwen3.5-27B": "Qwen/Qwen3.5-27B",
+    "Qwen3.5-122B": "Qwen/Qwen3.5-122B",
+    "Qwen3.5-397B": "Qwen/Qwen3.5-397B-A17B",
+    "Qwen3.5-397B-A17B": "Qwen/Qwen3.5-397B-A17B",
+    "Qwen3-32B": "Qwen/Qwen3-32B",
+    "Qwen3-8B": "Qwen/Qwen3-8B",
+    "DeepSeek-V3": "deepseek-ai/DeepSeek-V3",
+    "DeepSeek-V3.2": "deepseek-ai/DeepSeek-V3.2",
+    "DeepSeek-V4-flash": "deepseek-ai/DeepSeek-V4-Flash",
+    "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
+    "GLM-5.1": "ZhipuAI/GLM-5.1",
+    "GLM-5": "ZhipuAI/GLM-5",
+    "MiniMax-M2.5": "MiniMax/MiniMax-M2.5"
+  }
+}

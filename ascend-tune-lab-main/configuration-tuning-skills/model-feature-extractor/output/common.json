@@ -1,0 +1,74 @@
+{
+  "features": {
+    "vllm_ascend_balance_scheduling": "异步调度",
+    "enable_cpu_binding": "绑核",
+    "vllm_ascend_enable_nz": "weight_nz",
+    "enable_prefix_caching": "prefix-cache",
+    "enable_chunked_prefill": "chunked-prefill",
+    "vllm_ascend_enable_mlapo": "MLAPO",
+    "compilation_config.cudagraph_mode=PIECEWISE": "PIECEWISE",
+    "compilation_config.cudagraph_mode=FULL_DECODE_ONLY": "FULL_DECODE_ONLY",
+    "compilation_config.cudagraph_mode=FULL": "FULL",
+    "speculative_config.method=mtp": "mtp",
+    "speculative_config.method=eagle3": "eagle3",
+    "prefill_context_parallel_size": "pcp",
+    "decode_context_parallel_size": "dcp",
+    "enable_expert_parallel": "EP并行",
+    "vllm_ascend_enable_fused_mc2": "MoE大融合算子",
+    "multistream_overlap_shared_expert": "共享专家多流",
+    "enable_shared_expert_dp": "共享专家dp",
+    "dynamic_eplb": "EPLB",
+    "data_parallel_size_local": "DPLB",
+    "kv_transfer_config.connector=MooncakeConnectorV1": "mooncake池化",
+    "kv_transfer_config.connector=AscendStoreConnector": "kvcache池化",
+    "vllm_ascend_enable_flashcomm1": "flashcomm1",
+    "finegrained_tp_config.lmhead_tensor_parallel_size": "lm_head_dp",
+    "weight_prefetch_config": "权重预取"
+  },
+  "scenario_groups": {
+    "general_configs": {
+      "general": [
+        "vllm_ascend_balance_scheduling",
+        "enable_cpu_binding",
+        "vllm_ascend_enable_nz",
+        "enable_prefix_caching",
+        "enable_chunked_prefill",
+        "vllm_ascend_enable_mlapo",
+        "compilation_config.cudagraph_mode=PIECEWISE",
+        "compilation_config.cudagraph_mode=FULL_DECODE_ONLY",
+        "compilation_config.cudagraph_mode=FULL",
+        "speculative_config.method=mtp",
+        "speculative_config.method=eagle3",
+        "enable_expert_parallel",
+        "vllm_ascend_enable_fused_mc2",
+        "multistream_overlap_shared_expert",
+        "weight_prefetch_config"
+      ],
+      "long_sequence": [
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size"
+      ],
+      "high_concurrency": [
+        "enable_shared_expert_dp",
+        "dynamic_eplb",
+        "data_parallel_size_local",
+        "vllm_ascend_enable_flashcomm1",
+        "finegrained_tp_config.lmhead_tensor_parallel_size"
+      ]
+    },
+    "pd_disaggregated_only": [
+      "kv_transfer_config.connector=MooncakeConnectorV1",
+      "kv_transfer_config.connector=AscendStoreConnector"
+    ]
+  },
+  "scenario_thresholds": {
+    "high_concurrency": {
+      "min_concurrency": 16,
+      "description": "并发请求数 ≥16 时判定为高并发场景"
+    },
+    "long_sequence": {
+      "min_seq_length": 65536,
+      "description": "总上下文长度（输入+输出）≥64K tokens 时判定为长序列场景"
+    }
+  }
+}

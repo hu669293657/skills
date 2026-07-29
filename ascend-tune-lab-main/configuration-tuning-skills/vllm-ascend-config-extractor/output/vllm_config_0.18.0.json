@@ -1,0 +1,346 @@
+{
+  "metadata": {
+    "extraction_timestamp": "2026-06-16T13:20:00Z",
+    "vllm_version": "0.18.0"
+  },
+  "configs": [
+    {
+      "config_name": "use_modelscope",
+      "env_var_name": "VLLM_USE_MODELSCOPE",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["env_var"],
+      "description": "Whether to download model from ModelScope. When set to True, models will be fetched from ModelScope instead of HuggingFace."
+    },
+    {
+      "config_name": "engine_ready_timeout_s",
+      "env_var_name": "VLLM_ENGINE_READY_TIMEOUT_S",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "600",
+      "scope": ["env_var"],
+      "description": "Timeout in seconds for the engine to become ready. If the engine does not become ready within this time, the process will exit."
+    },
+    {
+      "config_name": "mooncake_abort_request_timeout",
+      "env_var_name": "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "480",
+      "scope": ["env_var"],
+      "description": "Timeout in seconds for Mooncake to automatically release prefilled KV cache entries."
+    },
+    {
+      "config_name": "use_v1",
+      "env_var_name": "VLLM_USE_V1",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "1 (implicit, v1 is default in 0.18.0)",
+      "scope": ["env_var"],
+      "description": "Enable vLLM V1 engine. In v0.18.0, V1 is the default engine and this env var has been removed from envs.py. Kept for backward compatibility reference.",
+      "notes": "CODE-MISSING: This env var is not defined in vllm/envs.py for v0.18.0. V1 is now the default engine."
+    },
+    {
+      "config_name": "torch_profiler_with_stack",
+      "env_var_name": "VLLM_TORCH_PROFILER_WITH_STACK",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "0",
+      "scope": ["env_var"],
+      "description": "Enable PyTorch profiler with stack trace collection. Set to 1 to enable. Helps with performance analysis but adds overhead.",
+      "notes": "CODE-MISSING: This env var is referenced in vllm/config/profiler.py comment but not defined in vllm/envs.py. It may be handled internally by PyTorch profiler."
+    },
+    {
+      "config_name": "rpc_timeout",
+      "env_var_name": "VLLM_RPC_TIMEOUT",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "10000",
+      "scope": ["env_var"],
+      "description": "Timeout in milliseconds for distributed RPC communication. Used in multi-node deployments."
+    },
+    {
+      "config_name": "execute_model_timeout_seconds",
+      "env_var_name": "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "300",
+      "scope": ["env_var"],
+      "description": "Timeout in seconds for model inference execution. If a single forward pass takes longer than this, the process will be terminated."
+    },
+    {
+      "config_name": "host",
+      "env_var_name": null,
+      "cli_arg": "--host",
+      "value_type": "str",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Host IP address for the API server to listen on. Common values: 0.0.0.0 (all interfaces) or a specific IP."
+    },
+    {
+      "config_name": "port",
+      "env_var_name": null,
+      "cli_arg": "--port",
+      "value_type": "int",
+      "default_value": "8000",
+      "scope": ["cli"],
+      "description": "Port number for the API server. Common values: 8000, 8005, 30050, 30060."
+    },
+    {
+      "config_name": "headless",
+      "env_var_name": null,
+      "cli_arg": "--headless",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["cli"],
+      "description": "Run in headless mode without interactive terminal. Useful for background/detached deployment."
+    },
+    {
+      "config_name": "data_parallel_size",
+      "env_var_name": null,
+      "cli_arg": "--data-parallel-size",
+      "value_type": "int",
+      "default_value": "1",
+      "scope": ["cli"],
+      "description": "Global data parallelism degree. Total number of data parallel replicas across all nodes. Common values: 1, 2, 4, 8, 16."
+    },
+    {
+      "config_name": "data_parallel_size_local",
+      "env_var_name": null,
+      "cli_arg": "--data-parallel-size-local",
+      "value_type": "int",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Number of data parallel replicas to run on this node. Used in multi-node deployments where each node runs a subset of total DP replicas."
+    },
+    {
+      "config_name": "data_parallel_start_rank",
+      "env_var_name": null,
+      "cli_arg": "--data-parallel-start-rank",
+      "value_type": "int",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Starting data parallel rank for secondary nodes. Used to assign rank offsets in multi-node DP deployments."
+    },
+    {
+      "config_name": "data_parallel_rank",
+      "env_var_name": null,
+      "cli_arg": "--data-parallel-rank",
+      "value_type": "int",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Data parallel rank of this instance. When set, enables external load balancer mode."
+    },
+    {
+      "config_name": "data_parallel_address",
+      "env_var_name": null,
+      "cli_arg": "--data-parallel-address",
+      "value_type": "str",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "IP address of the data parallel cluster head node. Used for inter-node DP communication."
+    },
+    {
+      "config_name": "data_parallel_rpc_port",
+      "env_var_name": null,
+      "cli_arg": "--data-parallel-rpc-port",
+      "value_type": "int",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Port for data parallel RPC communication between nodes. Common value: 13389."
+    },
+    {
+      "config_name": "api_server_count",
+      "env_var_name": null,
+      "cli_arg": "--api-server-count",
+      "value_type": "int",
+      "default_value": "None (auto-detected)",
+      "scope": ["cli"],
+      "description": "Number of API server processes. When data-parallel-size > 1, defaults to data-parallel-size. Set to 0 to disable built-in API server (for external LB mode)."
+    },
+    {
+      "config_name": "tensor_parallel_size",
+      "env_var_name": null,
+      "cli_arg": "--tensor-parallel-size",
+      "value_type": "int",
+      "default_value": "1",
+      "scope": ["cli"],
+      "description": "Tensor parallelism degree. Number of NPU devices used for tensor-parallel inference. Common values: 1, 2, 4, 8, 16."
+    },
+    {
+      "config_name": "enable_expert_parallel",
+      "env_var_name": null,
+      "cli_arg": "--enable-expert-parallel",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["cli"],
+      "description": "Enable expert parallelism for MoE models. When enabled, MoE experts are distributed across devices using EP instead of TP. Note: vLLM does not support mixed ETP and EP; MoE can use either pure EP or pure TP."
+    },
+    {
+      "config_name": "distributed_executor_backend",
+      "env_var_name": null,
+      "cli_arg": "--distributed-executor-backend",
+      "value_type": "str",
+      "default_value": "None (auto)",
+      "scope": ["cli"],
+      "description": "Backend for distributed execution. Options: 'mp' (multiprocessing), 'ray'. On Ascend NPU, 'mp' is commonly used."
+    },
+    {
+      "config_name": "seed",
+      "env_var_name": null,
+      "cli_arg": "--seed",
+      "value_type": "int",
+      "default_value": "0",
+      "scope": ["cli"],
+      "description": "Global random seed for reproducibility. Common value: 1024."
+    },
+    {
+      "config_name": "served_model_name",
+      "env_var_name": null,
+      "cli_arg": "--served-model-name",
+      "value_type": "str",
+      "default_value": "None (uses model name)",
+      "scope": ["cli"],
+      "description": "The model name used in the API. If not specified, the model name will be the same as --model argument."
+    },
+    {
+      "config_name": "max_num_seqs",
+      "env_var_name": null,
+      "cli_arg": "--max-num-seqs",
+      "value_type": "int",
+      "default_value": "128",
+      "scope": ["cli"],
+      "description": "Maximum number of sequences per iteration. Limits the concurrency of inference. For performance testing, max-num-seqs * data-parallel-size should be >= actual total concurrency."
+    },
+    {
+      "config_name": "max_model_len",
+      "env_var_name": null,
+      "cli_arg": "--max-model-len",
+      "value_type": "int",
+      "default_value": "None (auto from model)",
+      "scope": ["cli"],
+      "description": "Model maximum context length (sum of input + output tokens per request). Lower values reduce memory usage. Common values: 16384, 32768, 65536, 131072."
+    },
+    {
+      "config_name": "max_num_batched_tokens",
+      "env_var_name": null,
+      "cli_arg": "--max-num-batched-tokens",
+      "value_type": "int",
+      "default_value": "None (auto)",
+      "scope": ["cli"],
+      "description": "Maximum number of tokens the model can process in a single step. Controls chunked prefill behavior. Larger values reduce latency but increase memory pressure."
+    },
+    {
+      "config_name": "trust_remote_code",
+      "env_var_name": null,
+      "cli_arg": "--trust-remote-code",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["cli"],
+      "description": "Allow loading of remote custom model code from HuggingFace/ModelScope. Required for some models with custom implementations."
+    },
+    {
+      "config_name": "gpu_memory_utilization",
+      "env_var_name": null,
+      "cli_arg": "--gpu-memory-utilization",
+      "value_type": "float",
+      "default_value": "0.9",
+      "scope": ["cli"],
+      "description": "Proportion of NPU HBM memory that vLLM will use for inference. Higher values allocate more KV cache but risk OOM. Default: 0.9. Common values on Ascend: 0.85-0.96."
+    },
+    {
+      "config_name": "enable_prefix_caching",
+      "env_var_name": null,
+      "cli_arg": "--enable-prefix-caching",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["cli"],
+      "description": "Enable prefix caching for KV cache. Reuses KV cache for common prompt prefixes across requests."
+    },
+    {
+      "config_name": "no_enable_prefix_caching",
+      "env_var_name": null,
+      "cli_arg": "--no-enable-prefix-caching",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["cli"],
+      "description": "Explicitly disable prefix caching. Use this flag to ensure prefix caching is off when it might be enabled by default."
+    },
+    {
+      "config_name": "no_disable_hybrid_kv_cache_manager",
+      "env_var_name": null,
+      "cli_arg": "--no-disable-hybrid-kv-cache-manager",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["cli"],
+      "description": "Enable the hybrid KV cache manager. This manager optimizes KV cache allocation between different request types."
+    },
+    {
+      "config_name": "enforce_eager",
+      "env_var_name": null,
+      "cli_arg": "--enforce-eager",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["cli"],
+      "description": "Force eager execution mode, disabling graph compilation (ACL Graph on Ascend). Useful for debugging but reduces performance."
+    },
+    {
+      "config_name": "async_scheduling",
+      "env_var_name": null,
+      "cli_arg": "--async-scheduling",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["cli"],
+      "description": "Enable asynchronous scheduling. Allows non-blocking task scheduling to improve concurrency and throughput, especially for large-scale models."
+    },
+    {
+      "config_name": "chat_template",
+      "env_var_name": null,
+      "cli_arg": "--chat-template",
+      "value_type": "str",
+      "default_value": "None (auto from model)",
+      "scope": ["cli"],
+      "description": "Path to a custom Jinja2 chat template file. Overrides the default template from the model's tokenizer."
+    },
+    {
+      "config_name": "speculative_config",
+      "env_var_name": null,
+      "cli_arg": "--speculative-config",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Speculative decoding configuration JSON. Supports methods like 'mtp' (multi-token prediction) and 'eagle3'. Example: {\"num_speculative_tokens\": 3, \"method\": \"mtp\"}"
+    },
+    {
+      "config_name": "compilation_config",
+      "env_var_name": null,
+      "cli_arg": "--compilation-config",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Graph compilation configuration JSON. Key fields: 'cudagraph_mode' (PIECEWISE or FULL_DECODE_ONLY, recommended: FULL_DECODE_ONLY) and 'cudagraph_capture_sizes' (list of batch sizes for graph capture)."
+    },
+    {
+      "config_name": "kv_transfer_config",
+      "env_var_name": null,
+      "cli_arg": "--kv-transfer-config",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Mooncake distributed KV transfer configuration JSON. Used for PD disaggregation. Specifies connector type (MooncakeLayerwiseConnector/MooncakeConnectorV1) and kv_role (kv_producer/kv_consumer/kv_both)."
+    }
+  ],
+  "doc_code_consistency": [
+    {
+      "item": "VLLM_USE_V1",
+      "status": "code-missing",
+      "detail": "This env var is listed in extraction_targets but not defined in vllm/envs.py for v0.18.0. V1 is now the default engine and the env var has been removed."
+    },
+    {
+      "item": "VLLM_TORCH_PROFILER_WITH_STACK",
+      "status": "code-missing",
+      "detail": "This env var is listed in extraction_targets but not defined in vllm/envs.py. It is only referenced in a comment in vllm/config/profiler.py. It may be handled internally by PyTorch profiler."
+    }
+  ]
+}

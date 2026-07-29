@@ -1,0 +1,97 @@
+{
+  "_comment": "This file defines entry points for code-level config discovery. Key_files and sub_configs are starting references, not exhaustive lists — actual fields are discovered dynamically by parsing the source code.",
+  "vllm_config_sources": {
+    "env_vars": {
+      "file": "vllm/envs.py",
+      "dict_name": "environment_variables",
+      "discovery_method": "Parse all dict keys for env var names; extract lambda logic for defaults; extract TYPE_CHECKING block for type annotations",
+      "doc_file": "docs/configuration/env_vars.md"
+    },
+    "engine_args": {
+      "file": "vllm/engine/arg_utils.py",
+      "class_name": "EngineArgs",
+      "discovery_method": "Parse dataclass fields for config names and types; parse add_cli_args() for CLI argument names and mapping to config fields",
+      "doc_file": "docs/configuration/engine_args.md"
+    },
+    "config_classes": {
+      "dir": "vllm/config/",
+      "discovery_method": "Scan all .py files in dir for *Config classes; extract field names, types, defaults, and docstrings from each class; cross-reference with VllmConfig in vllm/config/vllm.py",
+      "key_files": [
+        "vllm/config/vllm.py",
+        "vllm/config/cache.py",
+        "vllm/config/model.py",
+        "vllm/config/scheduler.py",
+        "vllm/config/parallel.py",
+        "vllm/config/compilation.py",
+        "vllm/config/device.py",
+        "vllm/config/attention.py",
+        "vllm/config/speculative.py",
+        "vllm/config/lora.py",
+        "vllm/config/kv_transfer.py",
+        "vllm/config/load.py",
+        "vllm/config/offload.py",
+        "vllm/config/multimodal.py",
+        "vllm/config/observability.py",
+        "vllm/config/pooler.py",
+        "vllm/config/profiler.py",
+        "vllm/config/kernel.py",
+        "vllm/config/structured_outputs.py",
+        "vllm/config/weight_transfer.py",
+        "vllm/config/speech_to_text.py",
+        "vllm/config/kv_events.py",
+        "vllm/config/ec_transfer.py",
+        "vllm/config/model_arch.py"
+      ],
+      "doc_file": "docs/configuration/engine_args.md"
+    },
+    "serve_args": {
+      "doc_file": "docs/configuration/serve_args.md"
+    }
+  },
+  "vllm_ascend_config_sources": {
+    "env_vars": {
+      "file": "vllm_ascend/envs.py",
+      "dict_name": "env_variables",
+      "discovery_method": "Parse all dict keys for env var names; extract lambda logic for defaults; extract inline comments for documentation",
+      "doc_file": "docs/source/user_guide/configuration/env_vars.md"
+    },
+    "additional_config": {
+      "file": "vllm_ascend/ascend_config.py",
+      "class_name": "AscendConfig",
+      "discovery_method": "Parse __init__ for additional_config.get() calls to discover top-level fields; locate sub-config class instantiations to discover sub-config names; parse each sub-config __init__ for field names, types, and defaults",
+      "sub_configs": [
+        "XliteGraphConfig",
+        "AscendCompilationConfig",
+        "AscendFusionConfig",
+        "FinegrainedTPConfig",
+        "EplbConfig",
+        "WeightPrefetchConfig"
+      ],
+      "doc_file": "docs/source/user_guide/configuration/additional_config.md"
+    },
+    "platform_overrides": {
+      "file": "vllm_ascend/platform.py",
+      "class_name": "AscendPlatform",
+      "method": "check_and_update_config",
+      "discovery_method": "Parse method for config override logic that may modify defaults or add constraints"
+    },
+    "profiling_config": {
+      "file": "vllm_ascend/profiling_config.py",
+      "discovery_method": "Parse for profiling-related configuration definitions"
+    }
+  },
+  "version_mapping": {
+    "vllm_ascend_dockerfile_patterns": [
+      "Dockerfile",
+      "Dockerfile.a3",
+      "Dockerfile.310p",
+      "Dockerfile.openEuler",
+      "Dockerfile.a3.openEuler",
+      "Dockerfile.310p.openEuler",
+      ".github/workflows/dockerfiles/Dockerfile.*"
+    ],
+    "vllm_tag_pattern": "ARG VLLM_TAG=",
+    "vllm_version_file": "vllm/version.py",
+    "vllm_ascend_version_file": "vllm_ascend/version.py"
+  }
+}

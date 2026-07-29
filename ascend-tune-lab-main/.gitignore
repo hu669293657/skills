@@ -1,0 +1,16 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.tmp/
+
+# init.sh project install artifacts (Cursor / OpenCode / etc.)
+/.cursor/
+/AGENTS.md
+/workflows
+
+# Local optimization cases (baseline summary, tuning placeholder, progress)
+/optimization/
+/workspace/
+
+# Local Phase-0 config at repo root (workdir default is ./workspace)
+/deploy-config.md

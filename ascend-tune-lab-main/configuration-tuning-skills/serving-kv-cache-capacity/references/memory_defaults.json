@@ -1,0 +1,15 @@
+{
+  "npu_hbm_gb": 64,
+  "system_reserved_gb": 3,
+  "workspace_gb_base": 2.0,
+  "workspace_gb_per_1k_context": 0.05,
+  "hccl_buffsize_mb_default": 512,
+  "kv_dtype_bytes_default": 2,
+  "mla_kv_bytes_per_token_overrides": {
+    "deepseek-v3.2": 140544,
+    "deepseek-v3": 140544,
+    "deepseek-v4-flash": 110592,
+    "glm-5.1": 131072,
+    "glm-5": 131072
+  }
+}

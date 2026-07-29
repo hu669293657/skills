@@ -1,0 +1,507 @@
+{
+  "vllm": {
+    "env_vars": [
+      {
+        "name": "VLLM_USE_MODELSCOPE",
+        "value": "True",
+        "description": "从ModelScope拉取模型"
+      },
+      {
+        "name": "VLLM_ENGINE_READY_TIMEOUT_S",
+        "value": "30000",
+        "description": "引擎就绪超时(秒)"
+      },
+      {
+        "name": "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT",
+        "value": "480",
+        "description": "Mooncake预填充KV自动释放超时"
+      },
+      {
+        "name": "VLLM_USE_V1",
+        "value": "1",
+        "description": "启用vllm V1引擎"
+      },
+      {
+        "name": "VLLM_TORCH_PROFILER_WITH_STACK",
+        "value": "0",
+        "description": "关闭Profiler栈采集"
+      },
+      {
+        "name": "VLLM_RPC_TIMEOUT",
+        "value": "3600000",
+        "description": "分布式RPC超时"
+      },
+      {
+        "name": "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+        "value": "30000",
+        "description": "模型推理执行超时"
+      }
+    ],
+    "cli_args": [
+      {
+        "name": "--host",
+        "value": "0.0.0.0 / ${IP_ADDRESS}",
+        "description": "服务监听地址"
+      },
+      {
+        "name": "--port",
+        "value": "8000/8005/30050/30060 / $2",
+        "description": "API服务端口"
+      },
+      {
+        "name": "--headless",
+        "value": "布尔开关",
+        "description": "后台无交互启动"
+      },
+      {
+        "name": "--data-parallel-size",
+        "value": "1/2/8/16 / $3",
+        "description": "全局数据并行份数"
+      },
+      {
+        "name": "--data-parallel-size-local",
+        "value": "1/8",
+        "description": "单节点DP并行份数"
+      },
+      {
+        "name": "--data-parallel-start-rank",
+        "value": "0/1",
+        "description": "当前节点DP起始rank"
+      },
+      {
+        "name": "--data-parallel-rank",
+        "value": "$4",
+        "description": "指定当前DP rank编号"
+      },
+      {
+        "name": "--data-parallel-address",
+        "value": "$local_ip/$node0_ip/${MASTER_IP_ADDRESS}/$5",
+        "description": "DP主节点IP"
+      },
+      {
+        "name": "--data-parallel-rpc-port",
+        "value": "13389/6884 / $6",
+        "description": "DP RPC通信端口"
+      },
+      {
+        "name": "--api-server-count",
+        "value": "1/2",
+        "description": "API服务进程数量"
+      },
+      {
+        "name": "--tensor-parallel-size",
+        "value": "1/2/8/16 / $7",
+        "description": "张量并行份数"
+      },
+      {
+        "name": "--enable-expert-parallel",
+        "value": "布尔开关",
+        "description": "MoE专家并行开启"
+      },
+      {
+        "name": "--distributed-executor-backend",
+        "value": "mp",
+        "description": "多进程分布式执行后端"
+      },
+      {
+        "name": "--seed",
+        "value": "1024",
+        "description": "全局随机种子"
+      },
+      {
+        "name": "--served-model-name",
+        "value": "qwen3.5 / deepseek-v4-flash / deepseek_v4",
+        "description": "对外模型名称"
+      },
+      {
+        "name": "--max-num-seqs",
+        "value": "4/16/32/48/64/128",
+        "description": "最大并发推理序列"
+      },
+      {
+        "name": "--max-model-len",
+        "value": "16384/32768/65536/131072",
+        "description": "模型最大上下文长度"
+      },
+      {
+        "name": "--max-num-batched-tokens",
+        "value": "128/4096/8096/8192/16384/144",
+        "description": "单批次最大token"
+      },
+      {
+        "name": "--trust-remote-code",
+        "value": "布尔开关",
+        "description": "加载远端自定义模型代码"
+      },
+      {
+        "name": "--gpu-memory-utilization",
+        "value": "0.85/0.88/0.9/0.90/0.94/0.96",
+        "description": "NPU显存占用上限"
+      },
+      {
+        "name": "--enable-prefix-caching",
+        "value": "布尔开关",
+        "description": "开启前缀KV缓存"
+      },
+      {
+        "name": "--no-enable-prefix-caching",
+        "value": "布尔开关",
+        "description": "关闭前缀KV缓存"
+      },
+      {
+        "name": "--no-disable-hybrid-kv-cache-manager",
+        "value": "布尔开关",
+        "description": "启用混合KV缓存管理器"
+      },
+      {
+        "name": "--enforce-eager",
+        "value": "布尔开关",
+        "description": "强制Eager执行，禁用图编译"
+      },
+      {
+        "name": "--async-scheduling",
+        "value": "布尔开关",
+        "description": "开启异步调度"
+      },
+      {
+        "name": "--chat-template",
+        "value": "文件路径",
+        "description": "加载自定义jinja对话模板"
+      },
+      {
+        "name": "--speculative-config",
+        "value": "JSON",
+        "description": "投机解码配置；method支持qwen3_5_mtp/deepseek_mtp，spec token=1/2/3"
+      },
+      {
+        "name": "--compilation-config",
+        "value": "JSON",
+        "description": "Graph编译配置；cudagraph_mode=FULL_DECODE_ONLY，支持cudagraph_capture_sizes数组"
+      },
+      {
+        "name": "--kv-transfer-config",
+        "value": "JSON",
+        "description": "Mooncake分布式KV传输；连接器MooncakeLayerwiseConnector/MooncakeConnectorV1，区分kv_producer/kv_consumer"
+      }
+    ]
+  },
+  "vllm_ascend": {
+    "env_vars": [
+      {
+        "name": "VLLM_ASCEND_ENABLE_FUSED_MC2",
+        "value": "1/2",
+        "description": "昇腾MC2融合算子；1=dispatch_gmm_combine_decode等融合算子，2=不同MoE融合算子(EP32场景推荐)；仅decode节点启用"
+      },
+      {
+        "name": "VLLM_ASCEND_ENABLE_FLASHCOMM1",
+        "value": "1",
+        "description": "昇腾FlashComm通信算子开启；仅MoE场景tp_size>1时支持；长序列(≥16k)低并发(≤8)场景建议关闭"
+      },
+      {
+        "name": "VLLM_ASCEND_ENABLE_NZ",
+        "value": "0/1/2",
+        "description": "权重转FRACTAL_NZ格式；0=关闭，1=仅量化开启，2=尽可能开启"
+      },
+      {
+        "name": "VLLM_ASCEND_ENABLE_MLAPO",
+        "value": "1",
+        "description": "启用MLA预处理融合算子MlaPreprocessOperation，提升性能但消耗更多NPU显存；PD分离场景仅decode节点启用"
+      },
+      {
+        "name": "VLLM_ASCEND_BALANCE_SCHEDULING",
+        "value": "1",
+        "description": "增强prefill/decode间调度能力，提升吞吐降低TPOT但可能增加TTFT；PD分离场景不建议启用"
+      },
+      {
+        "name": "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE",
+        "value": "1",
+        "description": "启用TopK优化算子"
+      }
+    ],
+    "cli_args": [
+      {
+        "name": "--quantization",
+        "value": "ascend",
+        "description": "昇腾w8a8量化方案"
+      },
+      {
+        "name": "--additional-config",
+        "value": "JSON",
+        "description": "传递vllm-ascend额外配置的CLI入口；支持enable_cpu_binding/multistream_overlap_shared_expert/recompute_scheduler_enable/fuse_muls_add/layer_sharding/weight_prefetch_config/pa_shape_list/enable_shared_expert_dp/ascend_fusion_config/ascend_compilation_config/finegrained_tp_config等子项"
+      },
+      {
+        "name": "--mamba-cache-mode",
+        "value": "align",
+        "description": "Mamba类模型前缀缓存对齐模式，配合--enable-prefix-caching使用"
+      },
+      {
+        "name": "--runner",
+        "value": "pooling",
+        "description": "指定运行器类型；embedding/reranker模型使用pooling"
+      },
+      {
+        "name": "--hf-overrides",
+        "value": "JSON",
+        "description": "覆盖HuggingFace模型配置；如架构、分类器token、RoPE参数等"
+      },
+      {
+        "name": "--limit-mm-per-prompt",
+        "value": ".video 0 / .image N",
+        "description": "限制每个请求的多模态输入数量；仅处理图像时可设.video 0节省显存"
+      },
+      {
+        "name": "--dtype",
+        "value": "bfloat16/float16",
+        "description": "指定模型数据类型"
+      },
+      {
+        "name": "--prefill-context-parallel-size",
+        "value": "2",
+        "description": "Prefill阶段上下文并行份数"
+      },
+      {
+        "name": "--decode-context-parallel-size",
+        "value": "1",
+        "description": "Decode阶段上下文并行份数"
+      }
+    ],
+    "additional_config": [
+      {
+        "name": "enable_cpu_binding",
+        "value": "bool",
+        "description": "是否启用CPU绑定"
+      },
+      {
+        "name": "multistream_overlap_shared_expert",
+        "value": "bool",
+        "description": "是否启用多流共享专家重叠；TP=1或enable_shared_expert_dp=true时启用额外stream重叠共享专家计算"
+      },
+      {
+        "name": "multistream_dsa_preprocess",
+        "value": "bool",
+        "description": "是否启用多流DSA预处理"
+      },
+      {
+        "name": "recompute_scheduler_enable",
+        "value": "bool",
+        "description": "是否启用重计算调度器（仅PD分离模式）"
+      },
+      {
+        "name": "fuse_muls_add",
+        "value": "bool",
+        "description": "启用乘加融合算子"
+      },
+      {
+        "name": "ascend_compilation_config.enable_npugraph_ex",
+        "value": "bool",
+        "description": "启用NPU Graph扩展模式"
+      },
+      {
+        "name": "ascend_compilation_config.fuse_qknorm_rope",
+        "value": "bool",
+        "description": "控制QK-Norm与RoPE融合；某些模型(如DeepSeekOCR2)需设为false"
+      },
+      {
+        "name": "enable_shared_expert_dp",
+        "value": "bool",
+        "description": "启用共享专家数据并行"
+      },
+      {
+        "name": "ascend_fusion_config.fusion_ops_gmmswigluquant",
+        "value": "bool",
+        "description": "控制GmmSwigluQuant融合算子；NPU数≤16时建议设为false"
+      },
+      {
+        "name": "layer_sharding",
+        "value": "JSON数组",
+        "description": "指定层分片策略如[\"q_b_proj\", \"o_proj\"]，支持长上下文prefill；PD分离场景仅prefill节点启用；FlashComm开启时不能包含o_proj"
+      },
+      {
+        "name": "weight_prefetch_config",
+        "value": "JSON",
+        "description": "权重预取配置；替代已废弃的VLLM_ASCEND_ENABLE_PREFETCH_MLP等环境变量；如{\"enabled\":true,\"prefetch_ratio\":{\"mlp\":{\"gate_up\":1.0,\"down\":1.0}}}"
+      },
+      {
+        "name": "pa_shape_list",
+        "value": "JSON数组",
+        "description": "指定切换到PA算子的batch size列表(临时调优参数)；如[48,64,72,80]"
+      },
+      {
+        "name": "finegrained_tp_config.lmhead_tensor_parallel_size",
+        "value": "int",
+        "description": "细粒度TP配置中lm_head的TP并行度"
+      }
+    ],
+    "deprecated_env_vars": [
+      {
+        "name": "VLLM_ASCEND_ENABLE_PREFETCH_MLP",
+        "value": "-",
+        "description": "已废弃，由additional_config中weight_prefetch_config替代"
+      },
+      {
+        "name": "VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE",
+        "value": "-",
+        "description": "已废弃，由additional_config中weight_prefetch_config.prefetch_ratio.mlp.gate_up替代"
+      },
+      {
+        "name": "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE",
+        "value": "-",
+        "description": "已废弃，由additional_config中weight_prefetch_config.prefetch_ratio.mlp.down替代"
+      }
+    ]
+  },
+  "ascend_runtime": {
+    "hccl": [
+      {
+        "name": "HCCL_OP_EXPANSION_MODE",
+        "value": "AIV",
+        "description": "HCCL算子扩展模式"
+      },
+      {
+        "name": "HCCL_BUFFSIZE",
+        "value": "200/512/1024/1536/2560",
+        "description": "HCCL通信缓冲区大小"
+      },
+      {
+        "name": "HCCL_IF_IP",
+        "value": "节点通信IP",
+        "description": "绑定本机网卡IP"
+      },
+      {
+        "name": "HCCL_SOCKET_IFNAME",
+        "value": "网卡名",
+        "description": "分布式通信绑定网卡名"
+      },
+      {
+        "name": "GLOO_SOCKET_IFNAME",
+        "value": "网卡名",
+        "description": "Gloo后端绑定网卡名"
+      },
+      {
+        "name": "TP_SOCKET_IFNAME",
+        "value": "网卡名",
+        "description": "张量并行通信绑定网卡名"
+      },
+      {
+        "name": "HCCL_CONNECT_TIMEOUT",
+        "value": "120/1200",
+        "description": "HCCL连接建立超时"
+      },
+      {
+        "name": "HCCL_EXEC_TIMEOUT",
+        "value": "204/2000",
+        "description": "HCCL通信执行超时"
+      },
+      {
+        "name": "HCCL_INTRA_PCIE_ENABLE",
+        "value": "1",
+        "description": "开启节点内PCIE通信"
+      },
+      {
+        "name": "HCCL_INTRA_ROCE_ENABLE",
+        "value": "0",
+        "description": "关闭节点内ROCE通信"
+      }
+    ],
+    "npu": [
+      {
+        "name": "PYTORCH_NPU_ALLOC_CONF",
+        "value": "expandable_segments:True / max_split_size_mb:256",
+        "description": "NPU内存分配配置；expandable_segments:True=防碎片(大多数场景)，max_split_size_mb:256=VL/小模型场景"
+      },
+      {
+        "name": "ASCEND_RT_VISIBLE_DEVICES",
+        "value": "0~15卡号序列 / $1",
+        "description": "指定可见NPU设备"
+      },
+      {
+        "name": "ACL_OP_INIT_MODE",
+        "value": "1",
+        "description": "ACL算子初始化模式"
+      },
+      {
+        "name": "TRITON_ALL_BLOCKS_PARALLEL",
+        "value": "1",
+        "description": "Triton算子全Block并行编译"
+      },
+      {
+        "name": "USE_MULTI_BLOCK_POOL",
+        "value": "1",
+        "description": "启用多Block内存池"
+      },
+      {
+        "name": "ASCEND_BUFFER_POOL",
+        "value": "4:8",
+        "description": "昇腾缓冲区池配比"
+      },
+      {
+        "name": "TASK_QUEUE_ENABLE",
+        "value": "1",
+        "description": "开启内部任务队列"
+      }
+    ],
+    "omp": [
+      {
+        "name": "OMP_NUM_THREADS",
+        "value": "1/10",
+        "description": "OMP线程数量"
+      },
+      {
+        "name": "OMP_PROC_BIND",
+        "value": "false",
+        "description": "关闭OMP进程CPU绑定"
+      }
+    ]
+  },
+  "system": {
+    "kernel": [
+      {
+        "name": "cpu cpufreq scaling_governor",
+        "value": "performance",
+        "description": "CPU高性能调频策略"
+      },
+      {
+        "name": "vm.swappiness",
+        "value": "0",
+        "description": "关闭系统交换分区"
+      },
+      {
+        "name": "kernel.numa_balancing",
+        "value": "0",
+        "description": "关闭NUMA自动均衡"
+      },
+      {
+        "name": "kernel.sched_migration_cost_ns",
+        "value": "50000",
+        "description": "进程调度迁移阈值"
+      }
+    ],
+    "env": [
+      {
+        "name": "LD_PRELOAD",
+        "value": "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2",
+        "description": "预加载内存优化库"
+      },
+      {
+        "name": "LD_LIBRARY_PATH",
+        "value": "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages",
+        "description": "昇腾库路径"
+      },
+      {
+        "name": "unset ftp_proxy",
+        "value": "-",
+        "description": "清除ftp代理环境变量"
+      },
+      {
+        "name": "unset https_proxy",
+        "value": "-",
+        "description": "清除https代理环境变量"
+      },
+      {
+        "name": "unset http_proxy",
+        "value": "-",
+        "description": "清除http代理环境变量"
+      }
+    ]
+  }
+}

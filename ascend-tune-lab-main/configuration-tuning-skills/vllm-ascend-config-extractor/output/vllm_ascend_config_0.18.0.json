@@ -1,0 +1,781 @@
+{
+  "metadata": {
+    "extraction_timestamp": "2026-06-16T13:20:00Z",
+    "vllm_ascend_version": "0.18.0"
+  },
+  "configs": [
+    {
+      "config_name": "vllm_ascend_enable_fused_mc2",
+      "env_var_name": "VLLM_ASCEND_ENABLE_FUSED_MC2",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "0",
+      "scope": ["env_var"],
+      "description": "Whether to enable fused MC2 operators. 0 (or not set): default ALLTOALL and MC2 will be used. 1: ALLTOALL and MC2 might be replaced by dispatch_ffn_combine operator (only for MoE W8A8, EP<=32, non-mtp, non-dynamic-eplb). 2: MC2 might be replaced by dispatch_gmm_combine_decode operator (only for decode node MoE W8A8, MTP must also be W8A8)."
+    },
+    {
+      "config_name": "vllm_ascend_enable_flashcomm1",
+      "env_var_name": "VLLM_ASCEND_ENABLE_FLASHCOMM1",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["env_var"],
+      "description": "Whether to enable FlashComm1 communication optimization when tensor parallel is enabled. Only supported for MoE when tp_size > 1. Not recommended for long-sequence (>=16k) and low-concurrency (<=8 batch size) scenarios due to FIA FD feature invalidation by padding data."
+    },
+    {
+      "config_name": "vllm_ascend_enable_nz",
+      "env_var_name": "VLLM_ASCEND_ENABLE_NZ",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "1",
+      "scope": ["env_var"],
+      "description": "Whether to enable weight cast format to FRACTAL_NZ. 0: close NZ; 1: only quant case enable NZ; 2: enable NZ as long as possible."
+    },
+    {
+      "config_name": "vllm_ascend_enable_mlapo",
+      "env_var_name": "VLLM_ASCEND_ENABLE_MLAPO",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "True",
+      "scope": ["env_var"],
+      "description": "Whether to enable MLA preprocess fusion operator (MlaPreprocessOperation). Improves performance but consumes more NPU memory. In PD disaggregation, only enable on decode node. Disable if reducing NPU memory is higher priority for DeepSeek W8A8."
+    },
+    {
+      "config_name": "vllm_ascend_balance_scheduling",
+      "env_var_name": "VLLM_ASCEND_BALANCE_SCHEDULING",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["env_var"],
+      "description": "Whether to enable balance scheduling in the v1 scheduler. Enhances scheduling capacity between prefill and decode, increases throughput and reduces TPOT, but may increase TTFT. Only supported in PD-mixed mode (kv_both or no kv_transfer_config). Not recommended in PD-disaggregated mode."
+    },
+    {
+      "config_name": "vllm_ascend_enable_topk_optimize",
+      "env_var_name": "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["env_var"],
+      "description": "Whether to enable TopK optimization operator. Used in MoE models for optimized expert selection.",
+      "notes": "CODE-MISSING: This env var is used in docs (GLM4.x.md) and test configs but is NOT defined in vllm_ascend/envs.py. It may be defined elsewhere or handled by a different mechanism."
+    },
+    {
+      "config_name": "quantization",
+      "env_var_name": null,
+      "cli_arg": "--quantization",
+      "value_type": "str",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Quantization method. On Ascend NPU, 'ascend' enables the Ascend W8A8 quantization scheme. Other values: 'fp8', 'gptq', 'awq', etc."
+    },
+    {
+      "config_name": "additional_config",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["cli", "config_file"],
+      "description": "JSON object for vLLM-Ascend additional configuration. This is the primary entry point for Ascend-specific tuning. Supports sub-keys: enable_cpu_binding, multistream_overlap_shared_expert, recompute_scheduler_enable, fuse_muls_add, layer_sharding, weight_prefetch_config, pa_shape_list, enable_shared_expert_dp, ascend_fusion_config, ascend_compilation_config, finegrained_tp_config, etc."
+    },
+    {
+      "config_name": "mamba_cache_mode",
+      "env_var_name": null,
+      "cli_arg": "--mamba-cache-mode",
+      "value_type": "str",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Mamba model prefix cache alignment mode. Use 'align' with --enable-prefix-caching for Mamba-based models."
+    },
+    {
+      "config_name": "runner",
+      "env_var_name": null,
+      "cli_arg": "--runner",
+      "value_type": "str",
+      "default_value": "None (auto)",
+      "scope": ["cli"],
+      "description": "Specify the runner type. Use 'pooling' for embedding/reranker models."
+    },
+    {
+      "config_name": "hf_overrides",
+      "env_var_name": null,
+      "cli_arg": "--hf-overrides",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Override HuggingFace model configuration. Used for architecture, classifier token, RoPE parameters, etc. Example: {\"rope_parameters\": {\"rope_type\": \"yarn\", \"rope_theta\": 1000000, \"factor\": 4, \"original_max_position_embeddings\": 32768}}"
+    },
+    {
+      "config_name": "limit_mm_per_prompt",
+      "env_var_name": null,
+      "cli_arg": "--limit-mm-per-prompt",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["cli"],
+      "description": "Limit the number of multimodal inputs per prompt. Example: '.video 0' to disable video input and save memory when only processing images."
+    },
+    {
+      "config_name": "dtype",
+      "env_var_name": null,
+      "cli_arg": "--dtype",
+      "value_type": "str",
+      "default_value": "auto",
+      "scope": ["cli"],
+      "description": "Data type for model weights and activations. Options: 'auto', 'float16', 'bfloat16', 'float32'. On Ascend NPU, 'bfloat16' is commonly used."
+    },
+    {
+      "config_name": "prefill_context_parallel_size",
+      "env_var_name": null,
+      "cli_arg": "--prefill-context-parallel-size",
+      "value_type": "int",
+      "default_value": "1",
+      "scope": ["cli"],
+      "description": "Prefill phase context parallelism degree. Used for long-context prefill acceleration. When using FLASHCOMM1, max_num_batched_tokens must be divisible by tp_size * pcp_size."
+    },
+    {
+      "config_name": "decode_context_parallel_size",
+      "env_var_name": null,
+      "cli_arg": "--decode-context-parallel-size",
+      "value_type": "int",
+      "default_value": "1",
+      "scope": ["cli"],
+      "description": "Decode phase context parallelism degree. Used for long-context decode acceleration."
+    },
+    {
+      "config_name": "enable_cpu_binding",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "True",
+      "scope": ["config_file"],
+      "description": "Whether to enable CPU binding for NPU processes. Improves performance by pinning processes to specific CPU cores. Set via --additional-config '{\"enable_cpu_binding\": true}'."
+    },
+    {
+      "config_name": "multistream_overlap_shared_expert",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable multi-stream overlap for shared expert computation. When TP=1 or enable_shared_expert_dp=true, enables an additional stream to overlap shared expert computation with other operations."
+    },
+    {
+      "config_name": "multistream_dsa_preprocess",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable multi-stream DSA preprocess overlap.",
+      "notes": "DOC-MISSING: This config is listed in extraction_targets but not found in ascend_config.py source code or documentation."
+    },
+    {
+      "config_name": "recompute_scheduler_enable",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable recompute scheduler. Only applicable in PD-disaggregated mode (kv_producer/kv_consumer). Invalid in PD-mixed mode."
+    },
+    {
+      "config_name": "fuse_muls_add",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "True",
+      "scope": ["config_file"],
+      "description": "Whether to enable multiply-add fusion operator. Set via --additional-config or ascend_compilation_config.fuse_muls_add. Default is True."
+    },
+    {
+      "config_name": "ascend_compilation_config.enable_npugraph_ex",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "True",
+      "scope": ["config_file"],
+      "description": "Whether to enable NPU Graph Ex backend. When True, the Fx graph generated by Dynamo will be optimized and compiled by the npugraph_ex backend."
+    },
+    {
+      "config_name": "ascend_compilation_config.fuse_qknorm_rope",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "True",
+      "scope": ["config_file"],
+      "description": "Whether to enable QK-Norm and RoPE fusion optimization. Some models (e.g., DeepSeekOCR2) require this to be set to False."
+    },
+    {
+      "config_name": "ascend_compilation_config.fuse_norm_quant",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "True",
+      "scope": ["config_file"],
+      "description": "Whether to enable norm and quant fusion optimization. When True, the system will optimize norm and quant operations."
+    },
+    {
+      "config_name": "ascend_compilation_config.fuse_allreduce_rms",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable allreduce and AddRMSNorm fusion optimization. When True, allreduce and rmsnorm operations are fused for better performance."
+    },
+    {
+      "config_name": "ascend_compilation_config.enable_static_kernel",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable static kernel compilation. Suitable for purely static shapes or minimal shape changes. Compiles operator binaries for specific batch sizes during graph capture. Requires npugraph_ex to be enabled."
+    },
+    {
+      "config_name": "enable_shared_expert_dp",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable shared expert data parallelism. Only effective when enable_expert_parallel is True and tensor_parallel_size > 1. Distributes shared expert computation across DP replicas."
+    },
+    {
+      "config_name": "ascend_fusion_config.fusion_ops_gmmswigluquant",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "True",
+      "scope": ["config_file"],
+      "description": "Whether to use the fused operator GmmSwigluQuant. Performance tends to degrade when total number of NPUs <= 16. Set to False for such scenarios."
+    },
+    {
+      "config_name": "layer_sharding",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "list",
+      "default_value": "None",
+      "scope": ["config_file"],
+      "description": "Specifies layer sharding strategy as a JSON array of layer names. Example: [\"q_b_proj\", \"o_proj\"]. Supports long-context prefill. In PD disaggregation, only enable on prefill node. Cannot include 'o_proj' when FlashComm is enabled. Works optimally with FLASHCOMM2 and DSA-CP enabled."
+    },
+    {
+      "config_name": "weight_prefetch_config",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["config_file"],
+      "description": "Weight prefetch configuration. Replaces deprecated env vars VLLM_ASCEND_ENABLE_PREFETCH_MLP, VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE, VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE. Example: {\"enabled\": true, \"prefetch_ratio\": {\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}}}"
+    },
+    {
+      "config_name": "pa_shape_list",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "list",
+      "default_value": "[]",
+      "scope": ["config_file"],
+      "description": "Specifies the batch size list at which to switch to the PA (Paged Attention) operator instead of npu_fused_infer_attention_score. Temporary tuning parameter. Example: [48, 64, 72, 80]."
+    },
+    {
+      "config_name": "finegrained_tp_config.lmhead_tensor_parallel_size",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "int",
+      "default_value": "0",
+      "scope": ["config_file"],
+      "description": "Fine-grained TP configuration for lm_head tensor parallelism degree. When > 0, enables custom TP splitting for the language model head. Must divide data_parallel_size."
+    },
+    {
+      "config_name": "finegrained_tp_config.oproj_tensor_parallel_size",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "int",
+      "default_value": "0",
+      "scope": ["config_file"],
+      "description": "Fine-grained TP configuration for o_proj tensor parallelism degree. Only supported in graph mode (not enforce_eager) and PD scenario decode node. Must divide data_parallel_size."
+    },
+    {
+      "config_name": "finegrained_tp_config.embedding_tensor_parallel_size",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "int",
+      "default_value": "0",
+      "scope": ["config_file"],
+      "description": "Fine-grained TP configuration for embedding tensor parallelism degree. Must divide data_parallel_size."
+    },
+    {
+      "config_name": "finegrained_tp_config.mlp_tensor_parallel_size",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "int",
+      "default_value": "0",
+      "scope": ["config_file"],
+      "description": "Fine-grained TP configuration for MLP tensor parallelism degree. Must divide data_parallel_size."
+    },
+    {
+      "config_name": "vllm_ascend_enable_matmul_allreduce",
+      "env_var_name": "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["env_var"],
+      "description": "Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled. Supported on A2, and eager mode gets better performance."
+    },
+    {
+      "config_name": "vllm_ascend_flashcomm2_parallel_size",
+      "env_var_name": "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "0",
+      "scope": ["env_var"],
+      "description": "Whether to enable FLASHCOMM2. 0 disables the feature. Setting to 1 or above enables it, with the value used as the O-matrix TP group size for flashcomm2. See feature guide for differences between FLASHCOMM1 and FLASHCOMM2."
+    },
+    {
+      "config_name": "vllm_ascend_enable_context_parallel",
+      "env_var_name": "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["env_var"],
+      "description": "Whether to enable context parallelism."
+    },
+    {
+      "config_name": "vllm_ascend_fusion_op_transpose_kv_cache_by_block",
+      "env_var_name": "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "True",
+      "scope": ["env_var"],
+      "description": "Whether to use the fused operator transpose_kv_cache_by_block. Default is True."
+    },
+    {
+      "config_name": "dynamic_eplb",
+      "env_var_name": "DYNAMIC_EPLB",
+      "cli_arg": null,
+      "value_type": "str",
+      "default_value": "false",
+      "scope": ["env_var"],
+      "description": "Whether to enable dynamic Expert Parallel Load Balancing. Values: 'true' or 'false'."
+    },
+    {
+      "config_name": "enable_kv_nz",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable KV cache in NZ format. Only supported for MLA models in PD scenario decode node."
+    },
+    {
+      "config_name": "enable_sparse_c8",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable Sparse C8 optimization. Only for models with index_topk (sparse MoE). Not supported on A5 devices."
+    },
+    {
+      "config_name": "enable_mc2_hierarchy_comm",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable dispatch/combine op inter-node communication by ROCE for MC2."
+    },
+    {
+      "config_name": "enable_async_exponential",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable async exponential in AscendSampler. Disabled when batch_invariant mode is enabled."
+    },
+    {
+      "config_name": "xlite_graph_config",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["config_file"],
+      "description": "Xlite graph mode configuration. Sub-keys: 'enabled' (bool, default False), 'full_mode' (bool, default False). Not compatible with speculative decoding or pipeline parallelism. Requires block_size=128."
+    },
+    {
+      "config_name": "eplb_config",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "dict",
+      "default_value": "None",
+      "scope": ["config_file"],
+      "description": "Expert Parallel Load Balancing configuration. Sub-keys: dynamic_eplb (bool, default False), expert_map_path (str), expert_heat_collection_interval (int, default 400), algorithm_execution_interval (int, default 30), expert_map_record_path (str), num_redundant_experts (int, default 0), eplb_policy_type (int, default 1)."
+    },
+    {
+      "config_name": "SLO_limits_for_dynamic_batch",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "int",
+      "default_value": "-1",
+      "scope": ["config_file"],
+      "description": "SLO limits for dynamic batching. Default -1 means disabled."
+    },
+    {
+      "config_name": "dump_config_path",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "str",
+      "default_value": "None",
+      "scope": ["config_file"],
+      "description": "Path for dump/PrecisionDebugger configuration output."
+    },
+    {
+      "config_name": "multistream_overlap_gate",
+      "env_var_name": null,
+      "cli_arg": "--additional-config",
+      "value_type": "bool",
+      "default_value": "False",
+      "scope": ["config_file"],
+      "description": "Whether to enable multi-stream overlap for gate computation."
+    }
+  ],
+  "deprecated_env_vars": [
+    {
+      "config_name": "vllm_ascend_enable_prefetch_mlp",
+      "env_var_name": "VLLM_ASCEND_ENABLE_PREFETCH_MLP",
+      "cli_arg": null,
+      "value_type": "bool",
+      "default_value": "-",
+      "scope": ["env_var"],
+      "description": "DEPRECATED. Replaced by additional_config weight_prefetch_config.enabled."
+    },
+    {
+      "config_name": "vllm_ascend_mlp_gate_up_prefetch_size",
+      "env_var_name": "VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "-",
+      "scope": ["env_var"],
+      "description": "DEPRECATED. Replaced by additional_config weight_prefetch_config.prefetch_ratio.mlp.gate_up."
+    },
+    {
+      "config_name": "vllm_ascend_mlp_down_prefetch_size",
+      "env_var_name": "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE",
+      "cli_arg": null,
+      "value_type": "int",
+      "default_value": "-",
+      "scope": ["env_var"],
+      "description": "DEPRECATED. Replaced by additional_config weight_prefetch_config.prefetch_ratio.mlp.down."
+    }
+  ],
+  "ascend_runtime": {
+    "hccl": [
+      {
+        "config_name": "hccl_op_expansion_mode",
+        "env_var_name": "HCCL_OP_EXPANSION_MODE",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "HCCL operator expansion mode. Set to 'AIV' for Ascend Vector core acceleration. Commonly used in MoE model deployments."
+      },
+      {
+        "config_name": "hccl_buffsize",
+        "env_var_name": "HCCL_BUFFSIZE",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "HCCL communication buffer size in bytes. Common values: 200, 512, 1024, 1536, 2560. Larger values may improve multi-node communication throughput."
+      },
+      {
+        "config_name": "hccl_if_ip",
+        "env_var_name": "HCCL_IF_IP",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Bind HCCL communication to the specified local IP address. Must be set for multi-node deployments."
+      },
+      {
+        "config_name": "hccl_socket_ifname",
+        "env_var_name": "HCCL_SOCKET_IFNAME",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Network interface name for HCCL distributed communication binding."
+      },
+      {
+        "config_name": "gloo_socket_ifname",
+        "env_var_name": "GLOO_SOCKET_IFNAME",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Network interface name for Gloo backend communication binding."
+      },
+      {
+        "config_name": "tp_socket_ifname",
+        "env_var_name": "TP_SOCKET_IFNAME",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Network interface name for tensor parallel communication binding."
+      },
+      {
+        "config_name": "hccl_connect_timeout",
+        "env_var_name": "HCCL_CONNECT_TIMEOUT",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "HCCL connection establishment timeout in seconds. Common values: 120, 1200. Increase for large-scale clusters."
+      },
+      {
+        "config_name": "hccl_exec_timeout",
+        "env_var_name": "HCCL_EXEC_TIMEOUT",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "HCCL communication execution timeout in seconds. Common values: 204, 2000. Increase for long-context inference."
+      },
+      {
+        "config_name": "hccl_intra_pcie_enable",
+        "env_var_name": "HCCL_INTRA_PCIE_ENABLE",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Enable intra-node PCIe communication. Set to 1 for A2 dual-node deployments to optimize intra-node data transfer."
+      },
+      {
+        "config_name": "hccl_intra_roce_enable",
+        "env_var_name": "HCCL_INTRA_ROCE_ENABLE",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Enable intra-node RoCE communication. Set to 0 for A2 dual-node deployments when PCIe is preferred."
+      }
+    ],
+    "npu": [
+      {
+        "config_name": "pytorch_npu_alloc_conf",
+        "env_var_name": "PYTORCH_NPU_ALLOC_CONF",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "NPU memory allocation configuration. 'expandable_segments:True' prevents memory fragmentation (most scenarios). 'max_split_size_mb:256' for VL/small model scenarios."
+      },
+      {
+        "config_name": "ascend_rt_visible_devices",
+        "env_var_name": "ASCEND_RT_VISIBLE_DEVICES",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None (all devices)",
+        "scope": ["env_var"],
+        "description": "Specify visible NPU devices. Comma-separated device IDs. Example: '0,1,2,3,4,5,6,7' for 8-card A2, '0-15' for 16-card A3."
+      },
+      {
+        "config_name": "acl_op_init_mode",
+        "env_var_name": "ACL_OP_INIT_MODE",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "ACL operator initialization mode. Set to 1 for lazy initialization."
+      },
+      {
+        "config_name": "triton_all_blocks_parallel",
+        "env_var_name": "TRITON_ALL_BLOCKS_PARALLEL",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Enable Triton operator all-block parallel compilation. Set to 1 for faster compilation."
+      },
+      {
+        "config_name": "use_multi_block_pool",
+        "env_var_name": "USE_MULTI_BLOCK_POOL",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Enable multi-block memory pool. Set to 1 for better memory management."
+      },
+      {
+        "config_name": "ascend_buffer_pool",
+        "env_var_name": "ASCEND_BUFFER_POOL",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Ascend buffer pool ratio configuration. Example: '4:8'."
+      },
+      {
+        "config_name": "task_queue_enable",
+        "env_var_name": "TASK_QUEUE_ENABLE",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Enable internal task queue. Set to 1 for better task scheduling on Ascend NPU."
+      }
+    ],
+    "omp": [
+      {
+        "config_name": "omp_num_threads",
+        "env_var_name": "OMP_NUM_THREADS",
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Number of OpenMP threads. Set to 1 for most NPU inference scenarios to avoid CPU contention. Set to 10 for some CPU-heavy preprocessing."
+      },
+      {
+        "config_name": "omp_proc_bind",
+        "env_var_name": "OMP_PROC_BIND",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Disable OpenMP process CPU binding. Set to 'false' for NPU inference to allow flexible CPU scheduling."
+      }
+    ]
+  },
+  "system": {
+    "kernel": [
+      {
+        "config_name": "cpu_cpufreq_scaling_governor",
+        "env_var_name": null,
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["code_internal"],
+        "description": "CPU frequency scaling governor. Set to 'performance' for maximum CPU performance. Applied via: echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+      },
+      {
+        "config_name": "vm_swappiness",
+        "env_var_name": null,
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["code_internal"],
+        "description": "System swap aggressiveness. Set to 0 to disable swap. Applied via: sysctl -w vm.swappiness=0"
+      },
+      {
+        "config_name": "kernel_numa_balancing",
+        "env_var_name": null,
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["code_internal"],
+        "description": "NUMA auto-balancing. Set to 0 to disable. Applied via: sysctl -w kernel.numa_balancing=0"
+      },
+      {
+        "config_name": "kernel_sched_migration_cost_ns",
+        "env_var_name": null,
+        "cli_arg": null,
+        "value_type": "int",
+        "default_value": "None",
+        "scope": ["code_internal"],
+        "description": "Process scheduling migration cost threshold in nanoseconds. Set to 50000 to reduce unnecessary migration. Applied via: sysctl -w kernel.sched_migration_cost_ns=50000"
+      }
+    ],
+    "env": [
+      {
+        "config_name": "ld_preload",
+        "env_var_name": "LD_PRELOAD",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Preload memory optimization library. Common value: /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 for jemalloc."
+      },
+      {
+        "config_name": "ld_library_path",
+        "env_var_name": "LD_LIBRARY_PATH",
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "None",
+        "scope": ["env_var"],
+        "description": "Ascend toolkit library path. Common value: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages"
+      },
+      {
+        "config_name": "unset_ftp_proxy",
+        "env_var_name": null,
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "-",
+        "scope": ["code_internal"],
+        "description": "Clear FTP proxy environment variable to avoid network interference. Applied via: unset ftp_proxy"
+      },
+      {
+        "config_name": "unset_https_proxy",
+        "env_var_name": null,
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "-",
+        "scope": ["code_internal"],
+        "description": "Clear HTTPS proxy environment variable to avoid network interference. Applied via: unset https_proxy"
+      },
+      {
+        "config_name": "unset_http_proxy",
+        "env_var_name": null,
+        "cli_arg": null,
+        "value_type": "str",
+        "default_value": "-",
+        "scope": ["code_internal"],
+        "description": "Clear HTTP proxy environment variable to avoid network interference. Applied via: unset http_proxy"
+      }
+    ]
+  },
+  "doc_code_consistency": [
+    {
+      "item": "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE",
+      "status": "code-missing",
+      "detail": "This env var is used in docs (GLM4.x.md) and test configs (GLM-4.7.yaml) but is NOT defined in vllm_ascend/envs.py. It may be defined in a different module or handled by a custom mechanism."
+    },
+    {
+      "item": "multistream_dsa_preprocess",
+      "status": "code-missing",
+      "detail": "This additional_config key is listed in extraction_targets but NOT found in vllm_ascend/ascend_config.py source code. It may have been removed or renamed."
+    },
+    {
+      "item": "ASCEND_AGGREGATE_ENABLE",
+      "status": "doc-found",
+      "detail": "Found in model deployment docs (GLM5.md, GLM4.x.md, DeepSeek-V3.2.md) but not tracked in extraction_targets.json. This is a new config item discovered during Step 1.2 model doc scanning."
+    },
+    {
+      "item": "VLLM_ASCEND_ENABLE_FLASHCOMM1",
+      "status": "consistent",
+      "detail": "Documented in model docs and defined in vllm_ascend/envs.py with default 0 (False). Docs correctly show export VLLM_ASCEND_ENABLE_FLASHCOMM1=1 to enable."
+    },
+    {
+      "item": "VLLM_ASCEND_BALANCE_SCHEDULING",
+      "status": "consistent",
+      "detail": "Documented in model docs and defined in vllm_ascend/envs.py with default 0 (False). Docs correctly show export VLLM_ASCEND_BALANCE_SCHEDULING=1 to enable."
+    }
+  ],
+  "model_doc_discovered_configs": [
+    {
+      "name": "ASCEND_AGGREGATE_ENABLE",
+      "source_docs": ["GLM5.md", "GLM4.x.md", "DeepSeek-V3.2.md"],
+      "category": "ascend_runtime.npu",
+      "value_from_doc": "1",
+      "description": "Enable Ascend aggregate optimization. Found in multiple model deployment docs but not tracked in extraction_targets.json."
+    },
+    {
+      "name": "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE",
+      "source_docs": ["GLM4.x.md"],
+      "source_tests": ["tests/e2e/nightly/single_node/models/configs/GLM-4.7.yaml"],
+      "category": "vllm_ascend.env_vars",
+      "value_from_doc": "1",
+      "description": "Enable TopK optimization operator. Found in GLM4.x model doc and test config but NOT defined in vllm_ascend/envs.py."
+    }
+  ]
+}

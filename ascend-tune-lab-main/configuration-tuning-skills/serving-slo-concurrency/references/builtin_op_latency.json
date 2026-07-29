@@ -1,0 +1,60 @@
+{
+  "comment": "Builtin operator latency lookup (us). Keys: op|shape_bucket. Used when msmodeling DB unavailable.",
+  "default_mtp_accept_rate": 0.7,
+  "default_main_op_ratio": 0.7,
+  "main_op_ratio_note": "Placeholder share of decode step spent in main ops; ITL=(Σ main_op_decode×layers)/ratio. Replace with calibrated values later.",
+  "ops": {
+    "LI": {
+      "buckets": [
+        {"max_tokens": 128, "latency_us": 80},
+        {"max_tokens": 512, "latency_us": 200},
+        {"max_tokens": 2048, "latency_us": 600},
+        {"max_tokens": 8192, "latency_us": 1800},
+        {"max_tokens": 32768, "latency_us": 5000},
+        {"max_tokens": 131072, "latency_us": 15000}
+      ]
+    },
+    "SFA": {
+      "buckets": [
+        {"max_tokens": 128, "latency_us": 120},
+        {"max_tokens": 512, "latency_us": 350},
+        {"max_tokens": 2048, "latency_us": 900},
+        {"max_tokens": 8192, "latency_us": 2800},
+        {"max_tokens": 32768, "latency_us": 8000},
+        {"max_tokens": 131072, "latency_us": 22000}
+      ]
+    },
+    "HCCL_ALLREDUCE": {
+      "buckets": [
+        {"max_tokens": 128, "latency_us": 40},
+        {"max_tokens": 512, "latency_us": 60},
+        {"max_tokens": 2048, "latency_us": 100},
+        {"max_tokens": 8192, "latency_us": 200},
+        {"max_tokens": 32768, "latency_us": 400},
+        {"max_tokens": 131072, "latency_us": 800}
+      ]
+    },
+    "GENERIC_ATTN": {
+      "buckets": [
+        {"max_tokens": 128, "latency_us": 100},
+        {"max_tokens": 512, "latency_us": 280},
+        {"max_tokens": 2048, "latency_us": 750},
+        {"max_tokens": 8192, "latency_us": 2200},
+        {"max_tokens": 32768, "latency_us": 6500},
+        {"max_tokens": 131072, "latency_us": 18000}
+      ]
+    },
+    "GENERIC_FFN": {
+      "buckets": [
+        {"max_tokens": 128, "latency_us": 90},
+        {"max_tokens": 512, "latency_us": 250},
+        {"max_tokens": 2048, "latency_us": 700},
+        {"max_tokens": 8192, "latency_us": 2000},
+        {"max_tokens": 32768, "latency_us": 6000},
+        {"max_tokens": 131072, "latency_us": 16000}
+      ]
+    }
+  },
+  "prefill_scale": 1.5,
+  "decode_layers_factor": 1.0
+}
