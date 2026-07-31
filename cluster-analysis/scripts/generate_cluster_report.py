@@ -134,15 +134,23 @@ def generate_single_report(data, template_path, output_path):
         slow_rows += f'<tr><td class="p-3 font-bold text-white">{rid}</td><td class="text-right p-3 text-slate-300">{us_to_ms(rs["avg_stage"])}</td><td class="text-right p-3 text-slate-300">{us_to_ms(rs["avg_compute"])}</td><td class="text-right p-3 text-slate-300">{us_to_ms(rs["avg_comm"])}</td><td class="text-right p-3 text-slate-300">{us_to_ms(rs["avg_free"])}</td><td class="text-right p-3 {"text-red-400" if deviation>10 else "text-emerald-400" if deviation<-10 else "text-slate-400"} font-semibold">{fmt_signed(round(deviation, 1))}%</td><td class="text-center p-3">{badge}</td></tr>'
     r["{{SLOW_RANK_ROWS}}"] = slow_rows
 
-    # 通信算子
+    # 通信算子 — TEXT 模式时间单位为 ms，DB 模式为 μs 需转换
+    is_text_mode = data.get("format") == "text"
     comm_ops = data.get("comm_time_ops", [])
     if comm_ops:
         op_labels = [op.get("op_name", op.get("hccl_op_name", "?"))[:30] for op in comm_ops[:10]]
         r["{{COMM_HAS_DATA}}"] = "true"
         r["{{COMM_OP_LABELS}}"] = json.dumps(op_labels)
-        r["{{COMM_OP_ELAPSED}}"] = json.dumps([us_to_ms(op.get("avg_elapsed", op.get("avg_elapsed_time", 0))) for op in comm_ops[:10]])
-        r["{{COMM_OP_TRANSIT}}"] = json.dumps([us_to_ms(op.get("avg_transit", op.get("transit_time", 0))) for op in comm_ops[:10]])
-        r["{{COMM_OP_WAIT}}"] = json.dumps([us_to_ms(op.get("avg_wait", op.get("wait_time", 0))) for op in comm_ops[:10]])
+        # TEXT 模式已经是 ms，DB 模式需要 μs→ms 转换
+        def comm_time_val(op, keys):
+            for k in keys:
+                v = op.get(k)
+                if v is not None:
+                    return round(float(v) / US_TO_MS, 2) if not is_text_mode else round(float(v), 4)
+            return 0
+        r["{{COMM_OP_ELAPSED}}"] = json.dumps([comm_time_val(op, ["avg_elapsed", "avg_elapsed_time"]) for op in comm_ops[:10]])
+        r["{{COMM_OP_TRANSIT}}"] = json.dumps([comm_time_val(op, ["avg_transit", "transit_time"]) for op in comm_ops[:10]])
+        r["{{COMM_OP_WAIT}}"] = json.dumps([comm_time_val(op, ["avg_wait", "wait_time"]) for op in comm_ops[:10]])
     else:
         r["{{COMM_HAS_DATA}}"] = "false"
         r["{{COMM_OP_LABELS}}"] = "[]"
@@ -302,22 +310,27 @@ def generate_compare_report(data_a, data_b, template_path, output_path):
     ]
     r["{{WATERFALL_DATA}}"] = json.dumps(wf, ensure_ascii=False)
 
-    # 通信算子差异
+    # 通信算子差异 — 需要统一单位到 ms
+    is_a_text = data_a.get("format") == "text"
+    is_b_text = data_b.get("format") == "text"
     ops_a = {op.get("op_name", op.get("hccl_op_name", "?")): op for op in data_a.get("comm_time_ops", [])}
     ops_b = {op.get("op_name", op.get("hccl_op_name", "?")): op for op in data_b.get("comm_time_ops", [])}
     all_ops = set(list(ops_a.keys()) + list(ops_b.keys()))
     diff_list = []
     for op in all_ops:
-        ea = ops_a.get(op, {}).get("avg_elapsed", ops_a.get(op, {}).get("avg_elapsed_time", 0))
-        eb = ops_b.get(op, {}).get("avg_elapsed", ops_b.get(op, {}).get("avg_elapsed_time", 0))
-        diff = float(eb or 0) - float(ea or 0)
+        ea_raw = ops_a.get(op, {}).get("avg_elapsed", ops_a.get(op, {}).get("avg_elapsed_time", 0))
+        eb_raw = ops_b.get(op, {}).get("avg_elapsed", ops_b.get(op, {}).get("avg_elapsed_time", 0))
+        # 统一到 ms: TEXT 模式已经是 ms，DB 模式需要 μs→ms
+        ea = float(ea_raw or 0) if is_a_text else us_to_ms(float(ea_raw or 0))
+        eb = float(eb_raw or 0) if is_b_text else us_to_ms(float(eb_raw or 0))
+        diff = eb - ea
         diff_list.append((op, diff))
     diff_list.sort(key=lambda x: x[1], reverse=True)
     top_diff = diff_list[:10]
     if top_diff:
         r["{{COMM_DIFF_HAS_DATA}}"] = "true"
         r["{{COMM_DIFF_LABELS}}"] = json.dumps([d[0][:30] for d in top_diff])
-        r["{{COMM_DIFF_VALUES}}"] = json.dumps([round(us_to_ms(d[1]), 2) for d in top_diff])
+        r["{{COMM_DIFF_VALUES}}"] = json.dumps([round(d[1], 2) for d in top_diff])
     else:
         r["{{COMM_DIFF_HAS_DATA}}"] = "false"
         r["{{COMM_DIFF_LABELS}}"] = "[]"

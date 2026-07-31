@@ -68,8 +68,11 @@ SELECT COUNT(DISTINCT hostUid) FROM HostInfo;
 
 **TEXT 模式文件解析**（参考 `references/text_schema.md`）：
 - 读取 `cluster_step_trace_time.csv`：解析 Step/Type/Index/Computing/Communication/Free/Stage 等列
-- 读取 `communication_group.json`：解析 collective/p2p 通信组信息
-- 用 Python pandas 计算各 step 的 AVG/SUM 统计值
+- 读取 `communication_group.json`：解析 collective/p2p 通信组信息，提取 rank 列表作为基础信息
+- 读取 `cluster_communication.json`（如有）：解析通信算子耗时统计，提取 Top10 算子的 elapsed/transit/wait/sync 时间
+- 读取 `cluster_communication_matrix.json`（如有）：解析 4 层嵌套 JSON 通信矩阵，提取 src_rank/dst_rank/transport_type/bandwidth/transit_size，按传输类型（LOCAL/HCCS/RDMA）聚合带宽
+- **路径检测**：支持两种路径 — `data_dir/cluster_step_trace_time.csv`（直接是输出目录）或 `data_dir/cluster_analysis_output/cluster_step_trace_time.csv`（嵌套结构）
+- **单位注意**：TEXT 模式 JSON 中时间单位为 ms（毫秒），DB 模式为 μs（微秒），脚本需自动适配
 
 #### 步骤 1.3: 生成 MD 总结文件
 
@@ -146,16 +149,19 @@ MD 文件必须包含以下章节：
 
 | 维度 | DB 模式（旧格式） | DB 模式（新格式） | TEXT 模式 |
 |------|------------------|------------------|-----------|
+| **DB 文件名** | `cluster.db`（根目录） | `cluster_analysis.db`（cluster_analysis_output/ 下） | 无 DB 文件 |
 | **Step 时间表** | `step_statistic_info` | `ClusterStepTraceTime` | `cluster_step_trace_time.csv` |
-| **通信时间表** | `communication_time_info` | `ClusterCommunicationTime` | 无（需从 JSON 提取） |
-| **通信带宽表** | `communication_bandwidth_info` | `ClusterCommunicationBandwidth` | 无 |
-| **通信矩阵表** | `communication_matrix` | `ClusterCommunicationMatrix` | 无 |
+| **通信时间表** | `communication_time_info` | `ClusterCommunicationTime` | `cluster_communication.json` |
+| **通信带宽表** | `communication_bandwidth_info` | `ClusterCommunicationBandwidth` | `cluster_communication_matrix.json`（按传输类型聚合） |
+| **通信矩阵表** | `communication_matrix` | `ClusterCommunicationMatrix` | `cluster_communication_matrix.json`（4 层嵌套 JSON） |
 | **基础信息表** | `cluster_base_info` | `CommunicationGroupMapping` | `communication_group.json` |
 | **字段名差异** | `compute_time` | `computing` | `Computing` |
 | **字段名差异** | `communication_time` | `communication` | `Communication` |
 | **字段名差异** | `free_time` | `free` | `Free` |
 | **字段名差异** | `stage_time` | `stage` | `Stage` |
-| **单位** | μs | μs | μs |
+| **字段名差异** | `rank_id` | `index`（SQL 保留字，需双引号包裹） | `Index` |
+| **时间单位** | μs | μs | μs（CSV）/ ms（JSON 通信数据） |
+| **路径检测** | `data_dir/cluster.db` | `data_dir/cluster_analysis_output/cluster_analysis.db` | `data_dir/cluster_step_trace_time.csv` 或 `data_dir/cluster_analysis_output/cluster_step_trace_time.csv` |
 
 **字段映射策略**：提取数据时先检查表存在性和列名，自动适配对应字段名。
 
