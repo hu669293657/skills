@@ -10,6 +10,7 @@ skills/
 ├── ascend-tune-lab-main/          # vLLM-Ascend 调优实验室（含子 Skills 和 Agents）
 │   ├── configuration-tuning-skills/
 │   └── configuration-tuning-agents/
+├── cluster-analysis/              # Ascend 集群性能分析与比对
 ├── ibmc_analyzer/                 # iBMC 服务器日志分析与故障定位
 └── vllm-ascend-tuning/            # vLLM-Ascend 全链路性能调优
 ```
@@ -51,7 +52,19 @@ skills/
 |-------|------|
 | **serving-perf-optimization** | 两阶段性能优化编排 Agent，Phase 1 基线复现 + Phase 2 调优，串联上述 Skills |
 
-### 3. ibmc_analyzer
+### 3. cluster-analysis
+
+**Ascend 集群性能分析与比对工具**
+
+面向昇腾 NPU 集群 profiling 数据的性能分析工具，支持从 `cluster_analysis_output` 目录提取数据，生成全景总结和 HTML 可视化报告。
+
+- **数据格式**：支持 DB 模式（cluster.db）和 TEXT 模式（CSV + JSON），自动识别
+- **全景提取**：解析 Step 时间、通信时间、通信带宽、通信矩阵等核心维度，生成 MD 总结文件
+- **单集群分析**：计算时间分布、通信效率、Rank 均衡度，生成 HTML 分析报告
+- **双集群比对**：对比正常与异常集群，识别性能差异根因（慢卡定位、通信瓶颈等）
+- **HTML 报告**：内置单集群分析和双集群对比两套可视化模板
+
+### 4. ibmc_analyzer
 
 **iBMC 服务器日志分析与故障定位工具**
 
@@ -61,7 +74,7 @@ skills/
 - **性能排查**：检查 BIOS/OS 参数、降频诊断、温度异常分析
 - **集群对比**：多节点配置 Diff，识别网卡固件、PCIe 带宽等木桶效应
 
-### 4. vllm-ascend-tuning
+### 5. vllm-ascend-tuning
 
 **vLLM-Ascend 全链路性能调优技能**
 
