@@ -1,19 +1,25 @@
 ---
 name: "cluster-analysis"
-description: "Ascend cluster performance analysis and comparison tool. Invoke when user asks to analyze cluster profiling data (DB or TEXT format), generate cluster analysis reports, or compare two cluster datasets."
+description: "Ascend cluster and single-card performance analysis tool. Invoke when user asks to analyze cluster/single-card profiling data, generate analysis reports, or compare two datasets (cluster or card level)."
 ---
 
-# Ascend 集群性能分析与比对
+# Ascend 集群与单卡性能分析工具
 
-面向华为昇腾 NPU 集群 profiling 数据的性能分析工具。支持从 `cluster_analysis_output` 目录（DB 或 TEXT 格式）提取数据，生成全景数据总结 MD 文件，并根据用户需求生成**单集群整体分析**或**双集群比对分析** HTML 报告。
+面向华为昇腾 NPU profiling 数据的性能分析工具。支持四种分析模式：
+1. **集群整体分析** — 从 `cluster_analysis_output` 提取数据，生成集群级 HTML 报告
+2. **双集群比对** — 比对两个集群的性能差异，生成劣化根因报告
+3. **单卡详细分析** — 从单个 rank 目录提取算子/Kernel/API/通信数据，生成单卡 HTML 报告
+4. **双卡比对** — 比对两个 rank 的性能差异，定位单卡级劣化根因
 
 ## 触发场景
 
 当用户出现以下意图时触发：
 - "分析集群数据"、"集群性能报告"、"cluster analysis"
 - "比对两个集群"、"对比正常和异常集群"、"cluster compare"
-- 用户提供 `cluster_analysis_output` 目录路径或 `cluster.db` 文件路径
-- 用户提到 `ClusterStepTraceTime`、`ClusterCommunicationTime` 等表名
+- "分析单卡数据"、"单卡性能报告"、"rank 分析"
+- "比对两张卡"、"双卡对比"、"card compare"
+- 用户提供 `cluster_analysis_output` 目录、`cluster.db`、`*_ascend_pt` 目录路径
+- 用户提到 `ClusterStepTraceTime`、`kernel_details.csv`、`operator_details.csv` 等文件
 
 ## 核心工作流（必须严格遵循）
 
@@ -177,21 +183,74 @@ python scripts/cluster_data_extractor.py --data-dir <path> --output <output.json
 
 ### 报告生成脚本
 
-`scripts/generate_cluster_report.py`：基于提取的数据生成 HTML 报告。
+`scripts/generate_cluster_report.py`：基于提取的数据生成 HTML 报告，支持 4 种模式。
 
 ```bash
-# 单集群分析
+# 集群整体分析
 python scripts/generate_cluster_report.py --mode single --data <data.json> --output report.html
 
 # 双集群比对
 python scripts/generate_cluster_report.py --mode compare --data-a <a.json> --data-b <b.json> --output compare.html
+
+# 单卡详细分析
+python scripts/generate_cluster_report.py --mode single-card --data <card.json> --output card_report.html
+
+# 双卡比对
+python scripts/generate_cluster_report.py --mode card-compare --data-a <card_a.json> --data-b <card_b.json> --output card_compare.html
 ```
+
+### 单卡数据提取脚本
+
+`scripts/single_card_extractor.py`：从单个 rank 的 `*_ascend_pt` 目录提取算子/Kernel/API/通信数据，输出中间件 JSON。
+
+```bash
+python scripts/single_card_extractor.py --rank-dir <*_ascend_pt目录> --output <card.json>
+```
+
+**支持的数据源**：
+- `mindstudio_insight_data.db`（Insight DB，含 `kernel_detail`/`slice`/`counter` 表）
+- `ascend_pytorch_profiler_*.db`（Profiler DB，含 `COMPUTE_TASK_INFO`/`COMMUNICATION_OP` 表）
+- CSV 文件（`kernel_details.csv`、`operator_details.csv`、`step_trace_time.csv`、`api_statistic.csv`、`op_summary.csv`）
+- JSON 元数据（`profiler_info_*.json`、`profiler_metadata.json`）
+
+**提取的数据维度**：
+- Step 时间分解（Computing/Communication/Free/Stage）
+- Kernel Top20（按 Duration 降序）+ 按 Op Type 聚合统计
+- 算子 Top20（Host/Device 耗时）
+- API Top20（按 Level 分组：communication/acl）
+- 通信算子统计（从 DB slice 表或 JSON 提取）
+- 设备元数据（Rank ID、CANN 版本、PyTorch 版本、Profiler 级别）
 
 当脚本不可用时，按照上述工作流手动执行 SQL 查询、计算差异、参考 HTML 模板构造报告。
 
+### 双卡比对 CSV/Excel 输出件
+
+`scripts/generate_card_compare_csv.py`：参考 msprof-analyze compare_tools 的 ExcelView/WorkSheetCreator 设计，生成多 sheet Excel 比对结果。
+
+```bash
+python scripts/generate_card_compare_csv.py --data-a <card_a.json> --data-b <card_b.json> --output compare.xlsx
+```
+
+**输出的 Excel 包含 5 个 sheet**（参考 compare 的表结构）：
+
+| Sheet 名 | 对应 compare 表 | 内容 |
+|----------|----------------|------|
+| OverallMetrics | OverallMetrics | Step 时间拆解对比（E2E/计算/通信/空闲），含 Duration/Ratio/Number/Diff |
+| OperatorCompare | OperatorCompare | 算子级明细对比，按名称匹配，含 Host/Device 耗时 + Diff Ratio |
+| KernelCompare | KernelCompare | Kernel 类型级对比，按 Op Type 聚合，含 Total/Avg/Max/Min/Count + Diff Ratio |
+| ApiCompare | ApiCompare | API 级对比，按名称匹配，含 Total/Count/Avg + Diff Ratio |
+| CommCompare | CommunicationCompare | 通信算子对比（如有数据），含 Calls/Total/Avg + Diff Ratio |
+
+**Excel 格式设计**（参考 compare 的 ExcelConfig + WorkSheetCreator）：
+- 顶部合并行：Base 路径（绿色背景）+ Comparison 路径（黄色背景）
+- 表头行：Base 侧绿色、Comparison 侧黄色
+- Diff Ratio > 1 的单元格标红显示
+- inf 值显示为 "INF"（参考 compare 的 red_ratio_format 处理）
+- 当 xlsxwriter 不可用时，自动回退为多 CSV 文件输出
+
 ## HTML 报告设计要求
 
-两份 HTML 模板必须满足：
+四份 HTML 模板必须满足：
 1. **自包含**：单个 HTML 文件，内联 CSS/JS，无外部依赖（ECharts 通过 CDN 引入）
 2. **数据驱动**：模板中使用 `{{占位符}}` 标记数据插入点，脚本替换后生成最终报告
 3. **交互式图表**：使用 ECharts 渲染所有图表（柱状图/饼图/线图/热力图）

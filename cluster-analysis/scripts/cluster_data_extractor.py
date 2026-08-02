@@ -99,6 +99,20 @@ def quote_field(field_name):
     return field_name
 
 
+def create_safe_connection(db_path):
+    """创建安全的 SQLite 连接，处理路径中的非 UTF-8 字符（中文编码问题）
+
+    修复: sqlite3.OperationalError: Could not decode to UTF-8 column 'value' with text '...'
+    原因: cluster_base_info 表中的 file_path 等字段包含中文路径，可能因编码不一致导致解码失败
+    方案: 设置 text_factory 使用 errors='replace' 容错解码，用 \ufffd 替换无法解码的字节
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    # 关键修复: 容错解码，遇到非 UTF-8 字节时用替换字符而非抛异常
+    conn.text_factory = lambda x: x.decode('utf-8', errors='replace') if isinstance(x, bytes) else str(x)
+    return conn
+
+
 def query_to_dicts(conn, sql, params=None):
     cur = conn.cursor()
     if params:
@@ -224,8 +238,7 @@ def extract_db_old(db_path):
 
 def extract_db_new(db_path):
     data = {"format": "db_new", "tables_found": [], "tables_empty": []}
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = create_safe_connection(db_path)  # 修复: 使用安全连接处理中文编码
     tables = get_table_list(conn)
     data["tables_found"] = tables
 

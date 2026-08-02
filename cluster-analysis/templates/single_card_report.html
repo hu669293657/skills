@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>单卡性能分析报告 - Rank {{RANK_ID}}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+body { font-family: 'Inter', 'Microsoft YaHei', sans-serif; background-color: #0f172a; color: #f8fafc; }
+.card { background-color: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
+.text-gradient { background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-track { background: #0f172a; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+table th { background: #334155; color: #cbd5e1; } table td { border-bottom: 1px solid #334155; }
+table tr:hover { background: #334155; }
+</style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+<div class="max-w-7xl mx-auto space-y-6">
+
+<header class="flex flex-col md:flex-row justify-between items-start md:items-center pb-6 border-b border-slate-700">
+  <div>
+    <h1 class="text-3xl md:text-4xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 text-gradient">单卡性能分析报告</h1>
+    <p class="text-slate-400 mt-2 text-sm md:text-base">Rank {{RANK_ID}} — 算子/Kernel/通信/API 全景分析</p>
+  </div>
+  <div class="mt-4 md:mt-0 flex items-center space-x-2 bg-emerald-900/30 text-emerald-400 px-4 py-2 rounded-full border border-emerald-800">
+    <span class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span></span>
+    <span class="font-semibold text-sm">分析完成</span>
+  </div>
+</header>
+<div class="text-xs text-slate-500 -mt-4 mb-2">路径: {{RANK_DIR}} | 生成时间: {{GENERATE_TIME}} | CANN: {{CANN_VERSION}} | PyTorch: {{TORCH_VERSION}}</div>
+
+<!-- KPI -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+  <div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm font-medium mb-1">Step 数</div><div class="text-3xl font-bold text-blue-400">{{STEP_COUNT}}</div><div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">📊</div></div>
+  <div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm font-medium mb-1">Kernel 总数</div><div class="text-3xl font-bold text-emerald-400">{{KERNEL_TOTAL}}</div><div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">⚙️</div></div>
+  <div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm font-medium mb-1">算子总数</div><div class="text-3xl font-bold text-purple-400">{{OPERATOR_TOTAL}}</div><div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">🔧</div></div>
+  <div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm font-medium mb-1">平均 Stage 时间</div><div class="text-3xl font-bold text-orange-400">{{AVG_STAGE_MS}} <span class="text-lg text-slate-500">ms</span></div><div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">⏱️</div></div>
+</div>
+
+<!-- Step 时间分解 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">Step 时间分解 (ms)</h3>
+  <div id="chart-step" class="w-full h-80"></div>
+</div>
+
+<!-- 负载分布 + 时间占比 -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+  <div class="card p-6"><h3 class="text-lg font-semibold text-slate-200 mb-4">负载分布占比</h3><div id="chart-pie" class="w-full h-80"></div></div>
+  <div class="card p-6"><h3 class="text-lg font-semibold text-slate-200 mb-4">时间分解堆叠图 (ms)</h3><div id="chart-stack" class="w-full h-80"></div></div>
+</div>
+
+<!-- Kernel Top20 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">Kernel 耗时 Top20 (μs)</h3>
+  <div id="chart-kernel" class="w-full h-80"></div>
+</div>
+
+<!-- Kernel 类型分布 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">算子类型分布</h3>
+  <div id="chart-type" class="w-full h-72"></div>
+</div>
+
+<!-- 算子 Top20 表格 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">算子耗时 Top20</h3>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead><tr><th class="text-left p-3">#</th><th class="text-left p-3">算子名</th><th class="text-right p-3">Host 耗时(μs)</th><th class="text-right p-3">Device 耗时(μs)</th><th class="text-right p-3">Self 耗时(μs)</th><th class="text-left p-3">Input Shapes</th></tr></thead>
+      <tbody>{{OPERATOR_ROWS}}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- API Top20 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">API 耗时 Top20 (μs)</h3>
+  <div id="chart-api" class="w-full h-80"></div>
+  <div id="api-placeholder" style="display:none;text-align:center;padding:40px;color:#64748b;">无 API 统计数据</div>
+</div>
+
+<!-- 通信分析 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">通信算子分析</h3>
+  <div id="chart-comm" class="w-full h-80"></div>
+  <div id="comm-placeholder" style="display:none;text-align:center;padding:40px;color:#64748b;">无通信数据</div>
+</div>
+
+</div>
+<script>
+const ct = '#94a3b8'; const cg = '#334155';
+// Step 分解
+var c1 = echarts.init(document.getElementById('chart-step'));
+c1.setOption({tooltip:{trigger:'axis'},legend:{data:['计算','通信','空闲','Stage'],textStyle:{color:ct},top:5},grid:{left:'3%',right:'4%',bottom:'3%',top:'15%',containLabel:true},xAxis:{type:'category',data:{{STEP_LABELS}},axisLabel:{color:ct},axisLine:{lineStyle:{color:cg}}},yAxis:{type:'value',name:'ms',nameTextStyle:{color:ct},axisLabel:{color:ct},splitLine:{lineStyle:{color:cg,type:'dashed'}}},series:[{name:'计算',type:'bar',data:{{COMPUTE_BAR}},itemStyle:{color:'#34d399',borderRadius:[4,4,0,0]}},{name:'通信',type:'bar',data:{{COMM_BAR}},itemStyle:{color:'#fbbf24'}},{name:'空闲',type:'bar',data:{{FREE_BAR}},itemStyle:{color:'#f87171'}},{name:'Stage',type:'line',smooth:true,data:{{STAGE_LINE}},itemStyle:{color:'#818cf8'},lineStyle:{width:3}}]});
+// 饼图
+var c2 = echarts.init(document.getElementById('chart-pie'));
+c2.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ms ({d}%)'},legend:{bottom:10,textStyle:{color:ct}},color:['#34d399','#fbbf24','#f87171','#60a5fa'],series:[{type:'pie',radius:['40%','70%'],center:['50%','45%'],itemStyle:{borderRadius:5,borderColor:'#1e293b',borderWidth:2},label:{formatter:'{b}\n{d}%',color:'#cbd5e1',fontSize:12},data:[{name:'计算',value:{{PIE_COMPUTE}}},{name:'通信',value:{{PIE_COMM}}},{name:'空闲',value:{{PIE_FREE}}},{name:'重叠',value:{{PIE_OVERLAP}}}]}]});
+// 堆叠
+var c3 = echarts.init(document.getElementById('chart-stack'));
+c3.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'}},legend:{data:['计算','通信','空闲'],textStyle:{color:ct},top:5},grid:{left:'3%',right:'4%',bottom:'3%',top:'15%',containLabel:true},xAxis:{type:'category',data:{{STEP_LABELS}},axisLabel:{color:ct},axisLine:{lineStyle:{color:cg}}},yAxis:{type:'value',name:'ms',nameTextStyle:{color:ct},axisLabel:{color:ct},splitLine:{lineStyle:{color:cg,type:'dashed'}}},series:[{name:'计算',type:'bar',stack:'t',data:{{COMPUTE_BAR}},itemStyle:{color:'#34d399'}},{name:'通信',type:'bar',stack:'t',data:{{COMM_BAR}},itemStyle:{color:'#fbbf24'}},{name:'空闲',type:'bar',stack:'t',data:{{FREE_BAR}},itemStyle:{color:'#f87171',borderRadius:[4,4,0,0]}}]});
+// Kernel Top20
+var c4 = echarts.init(document.getElementById('chart-kernel'));
+c4.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},formatter:function(p){return p[0].name+'<br/>耗时: '+p[0].value+' μs';}},grid:{left:'3%',right:'4%',bottom:'20%',containLabel:true},xAxis:{type:'category',data:{{KERNEL_LABELS}},axisLabel:{color:ct,rotate:45,interval:0,fontSize:10},axisLine:{lineStyle:{color:cg}}},yAxis:{type:'value',name:'μs',nameTextStyle:{color:ct},axisLabel:{color:ct},splitLine:{lineStyle:{color:cg,type:'dashed'}}},series:[{type:'bar',data:{{KERNEL_DURATIONS}},itemStyle:{color:'#818cf8',borderRadius:[4,4,0,0]}}]});
+// 类型分布
+var c5 = echarts.init(document.getElementById('chart-type'));
+c5.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} μs ({d}%)'},legend:{type:'scroll',orient:'vertical',right:10,top:'middle',textStyle:{color:ct}},series:[{type:'pie',radius:['30%','65%'],center:['40%','50%'],itemStyle:{borderRadius:5,borderColor:'#1e293b',borderWidth:2},label:{formatter:'{b}\n{d}%',color:'#cbd5e1',fontSize:10},data:{{TYPE_PIE_DATA}}}]});
+// API Top20
+var c6 = echarts.init(document.getElementById('chart-api'));
+var apiHas = {{API_HAS_DATA}};
+if(apiHas){c6.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'}},grid:{left:'3%',right:'4%',bottom:'20%',containLabel:true},xAxis:{type:'category',data:{{API_LABELS}},axisLabel:{color:ct,rotate:45,interval:0,fontSize:10},axisLine:{lineStyle:{color:cg}}},yAxis:{type:'value',name:'μs',nameTextStyle:{color:ct},axisLabel:{color:ct},splitLine:{lineStyle:{color:cg,type:'dashed'}}},series:[{type:'bar',data:{{API_DURATIONS}},itemStyle:{color:'#34d399',borderRadius:[4,4,0,0]}}]});}else{document.getElementById('api-placeholder').style.display='block';document.getElementById('chart-api').style.display='none';}
+// 通信
+var c7 = echarts.init(document.getElementById('chart-comm'));
+var commHas = {{COMM_HAS_DATA}};
+if(commHas){c7.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'}},grid:{left:'3%',right:'4%',bottom:'20%',containLabel:true},xAxis:{type:'category',data:{{COMM_LABELS}},axisLabel:{color:ct,rotate:30,interval:0,fontSize:10},axisLine:{lineStyle:{color:cg}}},yAxis:{type:'value',name:'μs',nameTextStyle:{color:ct},axisLabel:{color:ct},splitLine:{lineStyle:{color:cg,type:'dashed'}}},series:[{type:'bar',data:{{COMM_DURATIONS}},itemStyle:{color:'#fbbf24',borderRadius:[4,4,0,0]}}]});}else{document.getElementById('comm-placeholder').style.display='block';document.getElementById('chart-comm').style.display='none';}
+window.addEventListener('resize',function(){c1.resize();c2.resize();c3.resize();c4.resize();c5.resize();c6.resize();c7.resize();});
+</script>
+</body>
+</html>
