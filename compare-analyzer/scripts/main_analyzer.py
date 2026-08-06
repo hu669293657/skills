@@ -130,7 +130,7 @@ def analyze(xlsx_path: str, output_dir: str = None) -> dict:
     generate_html_report(results, html_path)
     print(f"  HTML 报告已保存: {html_path}")
 
-    print(f"\n✅ 分析完成！输出目录: {output_dir}")
+    print(f"\n[完成] 分析完成！输出目录: {output_dir}")
     print(f"  - 中间件 JSON: {json_path}")
     print(f"  - HTML 报告: {html_path}")
     print(f"  - 中文 xlsx: {chinese_xlsx_path}")
@@ -201,7 +201,7 @@ def _generate_summary(results: dict) -> dict:
             desc = (f"通信改善亮点：{imp['comm_name']} 从 {imp['base_total']:.0f}us 降至 {imp['comp_total']:.0f}us"
                     f"（比率 {imp['diff_ratio']:.4f}）")
             if imp.get('is_extreme_improvement'):
-                desc += " ← 极端改善"
+                desc += " [极端改善]"
             summary['improvements'].append(desc)
 
     # === 算子统计 ===

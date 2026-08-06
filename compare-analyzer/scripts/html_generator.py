@@ -93,13 +93,12 @@ def generate_html_report(results: dict, output_path: str):
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ font-family: -apple-system, 'Segoe UI', 'Noto Sans CJK SC', sans-serif; background: #f0f2f5; color: #1a1d23; line-height: 1.6; }}
-.container {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
+.container {{ max-width: 1200px; margin: 0 auto; padding: 24px 24px 24px 200px; }}
 .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; padding: 40px 32px; border-radius: 16px; margin-bottom: 24px; box-shadow: 0 4px 20px rgba(102,126,234,0.3); }}
 .header h1 {{ font-size: 28px; margin-bottom: 8px; }}
 .header .meta {{ font-size: 14px; opacity: 0.85; }}
 .section {{ background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
-.section-title {{ font-size: 20px; font-weight: 700; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #e2e5ea; display: flex; align-items: center; gap: 8px; }}
-.section-title .icon {{ width: 24px; height: 24px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; }}
+.section-title {{ font-size: 20px; font-weight: 700; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #e2e5ea; }}
 .kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px; }}
 .kpi-card {{ background: #f8f9fb; border: 1px solid #e2e5ea; border-radius: 10px; padding: 16px; }}
 .kpi-card .label {{ font-size: 13px; color: #6b7280; margin-bottom: 4px; }}
@@ -128,10 +127,48 @@ tr:hover td {{ background: #f8f9fb; }}
 .footer {{ text-align: center; padding: 24px; color: #9ca3af; font-size: 13px; }}
 .dim-card {{ display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #e2e5ea; }}
 .dim-card.primary {{ border-color: #7c3aed; background: #f5f3ff; }}
+/* 悬浮侧边导航 */
+.nav-sidebar {{ position: fixed; top: 24px; left: 24px; width: 168px; max-height: calc(100vh - 48px); overflow-y: auto; background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); font-size: 13px; }}
+.nav-sidebar .nav-title {{ font-weight: 700; font-size: 14px; margin-bottom: 10px; color: #1a1d23; }}
+.nav-sidebar a {{ display: block; padding: 4px 0 4px 12px; color: #374151; text-decoration: none; border-left: 2px solid #e2e5ea; margin-bottom: 2px; }}
+.nav-sidebar a:hover {{ color: #7c3aed; border-left-color: #7c3aed; }}
+.nav-sidebar a.nav-sub {{ font-size: 12px; color: #6b7280; padding-left: 24px; }}
+.nav-sidebar .nav-sep {{ height: 1px; background: #e2e5ea; margin: 8px 0; }}
+/* Excel 样式表 */
+.excel-table {{ width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'Segoe UI', sans-serif; }}
+.excel-table th {{ background: #7c3aed; color: #fff; padding: 6px 10px; text-align: center; font-weight: 600; border: 1px solid #5b3fae; white-space: nowrap; font-size: 11px; }}
+.excel-table td {{ padding: 5px 10px; border: 1px solid #e2e5ea; text-align: center; }}
+.excel-table td.col-label {{ text-align: left; font-weight: 500; background: #f8f9fb; }}
+.excel-table tr:nth-child(even) td {{ background: #fafafa; }}
+.excel-table tr:nth-child(even) td.col-label {{ background: #f3f4f6; }}
+.excel-table td.bad {{ color: #dc2626; font-weight: 600; }}
+.excel-table td.good {{ color: #16a34a; font-weight: 600; }}
+.excel-table td.indent {{ padding-left: 24px; }}
+.excel-table td.indent2 {{ padding-left: 40px; }}
+.excel-table tr.row-key td {{ background: #ede9fe; font-weight: 600; }}
+.excel-table tr.row-key td.col-label-bold {{ background: #ddd6fe; font-weight: 700; color: #5b21b6; }}
 </style>
 </head>
 <body>
 <div class="container">
+
+<!-- 悬浮侧边导航 -->
+<div class="nav-sidebar">
+  <div class="nav-title">目录导航</div>
+  <a href="#overall">1. 总体性能比对</a>
+  <a href="#conclusion">2. 分析结论</a>
+  <div class="nav-sep"></div>
+  <a href="#operator">3. 算子统计</a>
+  <a href="#module">4. 模块统计</a>
+  <a href="#communication">5. 通信比对</a>
+  <a href="#memory">6. 内存统计</a>
+  <a href="#kernel">7. Kernel比对</a>
+  <a href="#kernel-data" class="nav-sub">- 两卡数据量比对</a>
+  <a href="#kernel-top10" class="nav-sub">- Top10计算算子</a>
+  <a href="#kernel-imbalance" class="nav-sub">- 负载不均预警</a>
+  <a href="#api">8. API比对</a>
+  <a href="#sheets">9. Sheet可用性</a>
+</div>
 
 <!-- 头部 -->
 <div class="header">
@@ -142,18 +179,24 @@ tr:hover td {{ background: #f8f9fb; }}
   </div>
 </div>
 
+<!-- 总体性能 -->
+<div class="section" id="overall">
+  <div class="section-title">1. 总体性能比对 (OverallMetrics)</div>
+  {_render_overall_metrics(om, e2e, dims, sub_cats) if om.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
+</div>
+
 <!-- 分析结论 -->
-<div class="section">
-  <div class="section-title"><span class="icon">📋</span> 分析结论（基于"先定界方向，再定位瓶颈，最后下钻根因"三步法）</div>
+<div class="section" id="conclusion">
+  <div class="section-title">2. 分析结论</div>
   <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
     <div>
-      <h4 style="color: #16a34a; margin-bottom: 8px;">✅ 改善亮点</h4>
+      <h4 style="color: #16a34a; margin-bottom: 8px;">[改善] 改善亮点</h4>
       <ul class="findings" style="list-style: none;">
         {''.join(f'<li style="background:#dcfce7;border-left-color:#16a34a;">{f}</li>' for f in summary.get('improvements', [])) if summary.get('improvements') else '<li style="background:#f3f4f6;border-left-color:#9ca3af;">暂无改善项</li>'}
       </ul>
     </div>
     <div>
-      <h4 style="color: #dc2626; margin-bottom: 8px;">⚠️ 劣化风险</h4>
+      <h4 style="color: #dc2626; margin-bottom: 8px;">[风险] 劣化风险</h4>
       <ul class="findings" style="list-style: none;">
         {''.join(f'<li style="background:#fee2e2;border-left-color:#dc2626;">{f}</li>' for f in summary.get('risks', [])) if summary.get('risks') else '<li style="background:#f3f4f6;border-left-color:#9ca3af;">暂无劣化项</li>'}
       </ul>
@@ -161,51 +204,45 @@ tr:hover td {{ background: #f8f9fb; }}
   </div>
 </div>
 
-<!-- 总体性能 -->
-<div class="section">
-  <div class="section-title"><span class="icon">📊</span> 总体性能比对 (OverallMetrics)</div>
-  {_render_overall_metrics(om, e2e, dims, sub_cats) if om.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
-</div>
-
 <!-- 算子统计 -->
-<div class="section">
-  <div class="section-title"><span class="icon">⚙️</span> 算子统计比对 (OperatorCompareStatistic)</div>
+<div class="section" id="operator">
+  <div class="section-title">3. 算子统计比对 (OperatorCompareStatistic)</div>
   {_render_operator_statistic(op_stat) if op_stat.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
 </div>
 
 <!-- 模块统计 -->
-<div class="section">
-  <div class="section-title"><span class="icon">📦</span> 模块统计比对 (ModuleCompareStatistic)</div>
+<div class="section" id="module">
+  <div class="section-title">4. 模块统计比对 (ModuleCompareStatistic)</div>
   {_render_module_statistic(mod_stat) if mod_stat.get('available') else '<div class="unavailable">该 Sheet 不存在或为空（需采集 Python Function 事件）</div>'}
 </div>
 
 <!-- 通信比对 -->
-<div class="section">
-  <div class="section-title"><span class="icon">📡</span> 通信比对 (CommunicationCompare)</div>
+<div class="section" id="communication">
+  <div class="section-title">5. 通信比对 (CommunicationCompare)</div>
   {_render_communication(comm) if comm.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
 </div>
 
 <!-- 内存统计 -->
-<div class="section">
-  <div class="section-title"><span class="icon">💾</span> 内存统计比对 (MemoryCompareStatistic)</div>
+<div class="section" id="memory">
+  <div class="section-title">6. 内存统计比对 (MemoryCompareStatistic)</div>
   {_render_memory_statistic(mem_stat) if mem_stat.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
 </div>
 
 <!-- Kernel 比对 -->
-<div class="section">
-  <div class="section-title"><span class="icon">🔧</span> Kernel 比对 (KernelCompare)</div>
+<div class="section" id="kernel">
+  <div class="section-title">7. Kernel 比对 (KernelCompare)</div>
   {_render_kernel_compare(kc) if kc.get('available') else '<div class="unavailable">该 Sheet 不存在或为空（仅 NPU vs NPU 场景）</div>'}
 </div>
 
 <!-- API 比对 -->
-<div class="section">
-  <div class="section-title"><span class="icon">🔗</span> API 比对 (ApiCompare)</div>
+<div class="section" id="api">
+  <div class="section-title">8. API 比对 (ApiCompare)</div>
   {_render_api_compare(api) if api.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
 </div>
 
 <!-- Sheet 可用性 -->
-<div class="section">
-  <div class="section-title"><span class="icon">📑</span> Sheet 可用性总览</div>
+<div class="section" id="sheets">
+  <div class="section-title">9. Sheet 可用性总览</div>
   <table>
     <tr><th>状态</th><th>Sheet 名称</th></tr>
     {''.join(f'<tr><td><span class="tag tag-good">可用</span></td><td>{s}</td></tr>' for s in available)}
@@ -256,21 +293,19 @@ def _render_overall_metrics(om, e2e, dims, sub_cats):
 
     # 维度拆解（区分改善/劣化）
     if dims:
-        parts.append('<div style="margin-top:16px;"><h4 style="margin-bottom:12px;">维度拆解</h4>')
+        parts.append('<div style="margin-top:16px;"><h4 style="margin-bottom:4px;">维度拆解</h4>')
+        parts.append('<div style="font-size:12px;color:#6b7280;margin-bottom:12px;">比率 = 比对值/基准值（>1劣化，<1改善）。贡献占比仅对劣化维度计算，分母为所有劣化维度差异之和。</div>')
         for d in dims:
             is_imp = d.get('is_improved')
             is_deg = d.get('is_degraded')
             if is_imp:
-                cls = 'dim-card'
                 tag = '<span class="tag tag-good" style="margin-left:8px;">改善</span>'
             elif is_deg:
-                cls = 'dim-card'
                 tag = '<span class="tag tag-bad" style="margin-left:8px;">劣化</span>'
             else:
-                cls = 'dim-card'
                 tag = ''
             parts.append(f"""
-            <div class="{cls}">
+            <div class="dim-card">
               <div>
                 <strong>{d['name']}</strong> ({d['label']})
                 {tag}
@@ -278,7 +313,7 @@ def _render_overall_metrics(om, e2e, dims, sub_cats):
               <div style="text-align:right;">
                 <span class="{_diff_color(d['diff_duration'])}">{_fmt(d['diff_duration'], 'ms')}</span>
                 <span class="neutral" style="margin-left:12px;">比率 {_fmt(d['diff_ratio'])}</span>
-                <span class="neutral" style="margin-left:12px;">贡献 {_fmt(d['contribution'], '%', 1)}</span>
+                <span class="neutral" style="margin-left:12px;">劣化贡献 {d.get('contribution_str', '-')}</span>
               </div>
             </div>""")
         parts.append('</div>')
@@ -300,7 +335,33 @@ def _render_overall_metrics(om, e2e, dims, sub_cats):
 
     # Not minimal profiling 警告
     if om.get('has_minimal_warning'):
-        parts.append('<div style="margin-top:12px;padding:12px;background:#fef3c7;border-radius:8px;color:#92400e;font-size:13px;">⚠️ 检测到 Not minimal profiling，E2E 时间可能存在性能膨胀，影响通信和调度耗时判断。</div>')
+        parts.append('<div style="margin-top:12px;padding:12px;background:#fef3c7;border-radius:8px;color:#92400e;font-size:13px;">[警告] 检测到 Not minimal profiling，E2E 时间可能存在性能膨胀，影响通信和调度耗时判断。</div>')
+
+    # OverallMetrics 原始数据表（Excel 样式 + 中文翻译）
+    raw_metrics = om.get('raw_metrics', [])
+    if raw_metrics:
+        parts.append('<h4 style="margin:16px 0 8px;">总体性能原始数据</h4>')
+        parts.append('<div class="table-wrap"><table class="excel-table">')
+        parts.append('<tr><th>指标</th><th>基准耗时(ms)</th><th>基准占比</th><th>基准数量</th><th>比对耗时(ms)</th><th>比对占比</th><th>比对数量</th><th>差异(ms)</th><th>差异比率</th></tr>')
+        for m in raw_metrics:
+            idx = m['index']
+            # 缩进处理：一级 \t 用 indent，二级 \t\t 用 indent2
+            indent_cls = ''
+            clean_idx = idx
+            if idx.startswith('\t\t'):
+                indent_cls = 'indent2'
+                clean_idx = idx.strip()
+            elif idx.startswith('\t'):
+                indent_cls = 'indent'
+                clean_idx = idx.strip()
+            diff_cls = 'bad' if m['diff_duration'] > 0 else 'good' if m['diff_duration'] < 0 else ''
+            ratio_cls = 'bad' if m['diff_ratio'] > 1.05 else 'good' if m['diff_ratio'] < 0.95 else ''
+            # 四大核心维度行强调
+            key_metrics = ('Computing Time', 'Uncovered Communication Time', 'Free Time', 'E2E Time')
+            row_cls = ' class="row-key"' if clean_idx in key_metrics else ''
+            label_cls = 'col-label-bold' if clean_idx in key_metrics else 'col-label'
+            parts.append(f'<tr{row_cls}><td class="{label_cls} {indent_cls}">{clean_idx}</td><td>{_fmt(m["base_duration"])}</td><td>{_fmt(m["base_ratio"])}</td><td>{m["base_number"]}</td><td>{_fmt(m["comp_duration"])}</td><td>{_fmt(m["comp_ratio"])}</td><td>{m["comp_number"]}</td><td class="{diff_cls}">{_fmt(m["diff_duration"])}</td><td class="{ratio_cls}">{_fmt(m["diff_ratio"])}</td></tr>')
+        parts.append('</table></div>')
 
     return ''.join(parts)
 
@@ -390,7 +451,7 @@ def _render_memory_statistic(mem_stat):
           <div class="value">{mem_stat.get('total_operators', 0)}</div>
         </div>
         <div style="padding:16px;background:#fef3c7;border-radius:8px;color:#92400e;font-size:14px;">
-          ℹ️ {mem_stat.get('zero_memory_note', '所有算子内存无差异')}
+          [说明] {mem_stat.get('zero_memory_note', '所有算子内存无差异')}
         </div>""")
         return ''.join(parts)
 
@@ -442,7 +503,7 @@ def _render_kernel_compare(kc):
         calls_changed = dvc.get('calls_changed', False)
         balance_tag = '<span class="tag tag-good">负载均衡</span>' if not elements_changed and not calls_changed else '<span class="tag tag-bad">负载变化</span>'
         parts.append(f"""
-        <h4 style="margin:16px 0 8px;color:#2563eb;">两卡输入数据量比对分析 {balance_tag}</h4>
+        <h4 id="kernel-data" style="margin:16px 0 8px;color:#2563eb;">两卡输入数据量比对分析 {balance_tag}</h4>
         <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">总数据量 = 各算子单次数据量 × calls 之和。若两卡总数据量和总 calls 完全一致，说明计算负载均衡；若不一致，说明模型结构或执行路径发生变化。</div>
         <table>
         <tr><th>指标</th><th class="col-num">基准卡</th><th class="col-num">比对卡</th><th class="col-num">差异</th></tr>
@@ -455,7 +516,7 @@ def _render_kernel_compare(kc):
         # Top10 计算算子的数据量明细对比
         top10_data = kc.get('top10_data_compare', [])
         if top10_data:
-            parts.append('<h4 style="margin:12px 0 8px;color:#2563eb;">Top 10 计算算子数据量明细</h4>')
+            parts.append('<h4 id="kernel-top10" style="margin:12px 0 8px;color:#2563eb;">Top 10 计算算子数据量明细</h4>')
             parts.append('<div class="table-wrap"><table>')
             parts.append('<tr><th>排名</th><th>算子名</th><th>单次数据量</th><th class="col-num">calls(基准/比对)</th><th class="col-num">总数据量(基准/比对)</th><th class="col-num">耗时(us)(基准/比对)</th></tr>')
             for i, k in enumerate(top10_data, 1):
@@ -495,15 +556,17 @@ def _render_kernel_compare(kc):
     # === 计算算子负载均衡分析（仅calls>10的计算算子） ===
     imbalance = kc.get('load_imbalance', [])
     if imbalance:
-        parts.append(f'<h4 style="margin:16px 0 8px;color:#dc2626;">⚠️ 计算算子负载不均预警（max/min > 2x，共 {kc.get("load_imbalance_count", 0)} 个）</h4><table>')
-        parts.append('<tr><th>Kernel名称</th><th>输入Shape</th><th class="col-num">输入数据量</th><th class="col-num">平均(us)</th><th class="col-num">最大(us)</th><th class="col-num">最小(us)</th><th class="col-num">方差倍数</th><th class="col-num">调用次数</th><th>严重程度</th></tr>')
+        parts.append(f'<h4 id="kernel-imbalance" style="margin:16px 0 4px;color:#dc2626;">[预警] 计算算子负载不均预警（max/min > 2x，共 {kc.get("load_imbalance_count", 0)} 个）</h4>')
+        parts.append('<div style="font-size:12px;color:#6b7280;margin-bottom:8px;">负载不均 = 同一 Kernel 在多次调用中耗时差异大（最大值/最小值 > 2x）。通常由输入数据量不均匀（如 MoE 专家路由不均衡）或系统调度抖动导致。方差倍数越高，说明部分调用的耗时远超平均水平。</div>')
+        parts.append('<div class="table-wrap"><table>')
+        parts.append('<tr><th>Kernel名称</th><th class="col-num">输入数据量</th><th class="col-num">平均(us)</th><th class="col-num">最大(us)</th><th class="col-num">最小(us)</th><th class="col-num">方差倍数</th><th class="col-num">调用次数</th><th>严重程度</th></tr>')
         for k in imbalance:
             sev = k.get('imbalance_severity', '')
             sev_tag = f'<span class="tag tag-bad">{sev}</span>' if sev in ('严重', '显著') else f'<span class="tag tag-neutral">{sev}</span>'
-            parts.append(f'<tr><td style="font-family:monospace;font-size:12px;">{k["kernel"]}</td><td style="font-size:11px;">{k["input_shape"][:30]}</td><td class="col-num">{k.get("total_elements_fmt", "-")}</td><td class="col-num">{_fmt(k["comp_avg"])}</td><td class="col-num bad">{_fmt(k["comp_max"])}</td><td class="col-num good">{_fmt(k["comp_min"])}</td><td class="col-num bad">{k.get("variance_ratio", 0)}x</td><td class="col-num">{k["comp_calls"]}</td><td>{sev_tag}</td></tr>')
-        parts.append('</table>')
+            parts.append(f'<tr><td style="font-family:monospace;font-size:12px;" title="{k["input_shape"]}">{k["kernel"]}</td><td class="col-num">{k.get("total_elements_fmt", "-")}</td><td class="col-num">{_fmt(k["comp_avg"])}</td><td class="col-num bad">{_fmt(k["comp_max"])}</td><td class="col-num good">{_fmt(k["comp_min"])}</td><td class="col-num bad">{k.get("variance_ratio", 0)}x</td><td class="col-num">{k["comp_calls"]}</td><td>{sev_tag}</td></tr>')
+        parts.append('</table></div>')
     else:
-        parts.append('<div style="margin:16px 0;padding:12px;background:#dcfce7;border-radius:8px;color:#16a34a;font-size:14px;">✅ 计算算子未检测到负载不均（所有 calls>10 的计算 Kernel 的 max/min 比值 < 2x）</div>')
+        parts.append('<div style="margin:16px 0;padding:12px;background:#dcfce7;border-radius:8px;color:#16a34a;font-size:14px;">[正常] 计算算子未检测到负载不均（所有 calls>10 的计算 Kernel 的 max/min 比值 < 2x）</div>')
 
     # === 多 Shape 计算算子分布 ===
     multi_shape = kc.get('multi_shape_kernels', {})

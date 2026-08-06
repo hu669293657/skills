@@ -122,14 +122,16 @@ def parse_compare(wb) -> dict:
     for k in kernels:
         k['diff_total'] = k['comp_total'] - k['base_total']
 
-    # === 全局统计（含通信算子） ===
-    degraded = [k for k in kernels if k['diff_total'] > 0]
-    improved = [k for k in kernels if k['diff_total'] < 0]
+    # === 全局统计（含通信算子，排除基准或比对为0的inf比率项） ===
+    valid_kernels = [k for k in kernels if k['base_total'] > 0 and k['comp_total'] > 0]
+    degraded = [k for k in valid_kernels if k['diff_total'] > 0]
+    improved = [k for k in valid_kernels if k['diff_total'] < 0]
     total_degraded = sum(k['diff_total'] for k in degraded)
     total_improved = sum(abs(k['diff_total']) for k in improved)
 
-    kernels.sort(key=lambda x: x['diff_total'], reverse=True)
-    top10 = kernels[:10]
+    # Top 10 变化最大：仅包含基准和比对都非空的 Kernel
+    valid_kernels.sort(key=lambda x: x['diff_total'], reverse=True)
+    top10 = valid_kernels[:10]
 
     for k in top10:
         calls_changed = k['base_calls'] != k['comp_calls']
@@ -143,7 +145,20 @@ def parse_compare(wb) -> dict:
         else:
             k['degradation_type'] = '轻微变化'
 
-    significant_degraded = [k for k in degraded if k['total_ratio'] > 1.05]
+    # 显著劣化：也排除inf比率，并为每个元素添加 degradation_type
+    significant_degraded = [k for k in degraded if k['total_ratio'] > 1.05 and k['total_ratio'] != float('inf')]
+    for k in significant_degraded:
+        if 'degradation_type' not in k:
+            calls_changed = k['base_calls'] != k['comp_calls']
+            avg_changed = k['avg_ratio'] > 1.05 if k['avg_ratio'] > 0 else False
+            if calls_changed and avg_changed:
+                k['degradation_type'] = '耗时和调用次数均增加'
+            elif calls_changed:
+                k['degradation_type'] = '调用次数增加'
+            elif avg_changed:
+                k['degradation_type'] = '单次耗时显著增加'
+            else:
+                k['degradation_type'] = '轻微变化'
 
     # === 分离通信算子和计算算子 ===
     comm_kernels = [k for k in kernels if k['is_comm']]

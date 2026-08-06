@@ -223,7 +223,7 @@ def translate_to_chinese(wb_src, output_dir: str):
     output_path = os.path.join(output_dir, output_filename)
     wb_out.save(output_path)
 
-    print(f"\n  ✅ 中文 xlsx 已生成: {output_path}")
+    print(f"\n  [完成] 中文 xlsx 已生成: {output_path}")
     print(f"  共 {sheet_count} 个 Sheet, {total_rows} 行数据")
     print(f"  CSV 已同步导出到: {csv_dir}/")
 

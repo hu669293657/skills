@@ -65,7 +65,15 @@ def parse(wb) -> dict:
         ('调度', free_time, 'Free Time'),
     ]:
         if metric:
-            contribution = abs(metric['diff_duration']) / abs(e2e_diff) * 100 if e2e_diff != 0 else 0
+            is_degraded = metric['diff_duration'] > 0
+            is_improved = metric['diff_duration'] < 0
+            # 贡献占比：仅劣化维度参与百分比计算，分母为所有劣化维度差异之和
+            # 改善维度不计算百分比，显示为 "-"
+            if is_degraded:
+                total_degraded = sum(m['diff_duration'] for m in [computing, communication, free_time] if m and m['diff_duration'] > 0)
+                contribution = abs(metric['diff_duration']) / total_degraded * 100 if total_degraded > 0 else 0
+            else:
+                contribution = None  # 改善维度不显示百分比
             dimensions.append({
                 'name': name,
                 'label': label,
@@ -73,9 +81,10 @@ def parse(wb) -> dict:
                 'comp_duration': metric['comp_duration'],
                 'diff_duration': metric['diff_duration'],
                 'diff_ratio': metric['diff_ratio'],
-                'contribution': round(contribution, 1),
-                'is_improved': metric['diff_duration'] < 0,
-                'is_degraded': metric['diff_duration'] > 0,
+                'contribution': round(contribution, 1) if contribution is not None else None,
+                'contribution_str': f'{contribution:.1f}%' if contribution is not None else '-',
+                'is_improved': is_improved,
+                'is_degraded': is_degraded,
             })
 
     # 分别找出改善最大和劣化最大的维度
@@ -135,4 +144,5 @@ def parse(wb) -> dict:
         'top_improved_subs': improved_subs,
         'top_degraded_subs': degraded_subs,
         'total_metrics_count': len(metric_list),
+        'raw_metrics': metric_list,
     }
