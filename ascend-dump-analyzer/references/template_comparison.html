@@ -3,571 +3,460 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ascend 环境对比分析报告</title>
+<title>Ascend 环境对比分析报告 — {{HOST_A}} vs {{HOST_B}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700;800&family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {
-  --ok: #22c55e;
-  --ok-bg: #f0fdf4;
+  --bg-base: #0a0e1a;
+  --bg-surface: #111827;
+  --bg-card: rgba(17, 24, 39, 0.8);
+  --bg-elevated: #1e293b;
+  --ink: #e2e8f0;
+  --ink-bright: #f1f5f9;
+  --ink-muted: #94a3b8;
+  --ink-dim: #64748b;
+  --border: rgba(148, 163, 184, 0.12);
+  --border-bright: rgba(148, 163, 184, 0.25);
+  --accent: #06b6d4;
+  --accent-glow: rgba(6, 182, 212, 0.15);
+  --accent-2: #8b5cf6;
+  --ok: #10b981;
+  --ok-bg: rgba(16, 185, 129, 0.08);
+  --ok-border: rgba(16, 185, 129, 0.3);
   --warn: #f59e0b;
-  --warn-bg: #fffbeb;
+  --warn-bg: rgba(245, 158, 11, 0.08);
+  --warn-border: rgba(245, 158, 11, 0.3);
   --fail: #ef4444;
-  --fail-bg: #fef2f2;
-  --added: #22c55e;
-  --added-bg: #f0fdf4;
-  --removed: #ef4444;
-  --removed-bg: #fef2f2;
-  --modified: #f59e0b;
-  --modified-bg: #fffbeb;
+  --fail-bg: rgba(239, 68, 68, 0.08);
+  --fail-border: rgba(239, 68, 68, 0.3);
   --info: #3b82f6;
-  --info-bg: #eff6ff;
-  --ink: #1e293b;
-  --muted: #64748b;
-  --border: #e2e8f0;
-  --bg: #f8fafc;
-  --card: #ffffff;
-  --radius: 10px;
-  --shadow: 0 1px 3px rgba(0,0,0,0.08);
-  --mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  --info-bg: rgba(59, 130, 246, 0.08);
+  --info-border: rgba(59, 130, 246, 0.3);
+  --font-display: 'Sora', sans-serif;
+  --font-body: 'DM Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --sidebar-w: 240px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
-
+html { scroll-behavior: smooth; scroll-padding-top: 2rem; }
 body {
-  font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  background: var(--bg);
+  font-family: var(--font-body);
+  background: var(--bg-base);
   color: var(--ink);
-  line-height: 1.6;
+  line-height: 1.65;
   font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
-.container { max-width: 1100px; margin: 0 auto; padding: 2rem; }
-
-/* ===== Header ===== */
-.header {
-  background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%);
-  color: #fff;
-  border-radius: var(--radius);
-  padding: 2.5rem;
-  margin-bottom: 1.5rem;
-  box-shadow: var(--shadow);
+/* Background atmosphere */
+body::before {
+  content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background:
+    radial-gradient(ellipse 600px 400px at 15% 10%, rgba(6,182,212,0.06), transparent),
+    radial-gradient(ellipse 500px 300px at 85% 90%, rgba(139,92,246,0.05), transparent),
+    linear-gradient(180deg, #0a0e1a 0%, #0d1320 100%);
+  z-index: -2;
 }
-.header h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.3rem; }
-.header .subtitle { opacity: 0.85; font-size: 0.95rem; margin-bottom: 1.5rem; }
-
-/* File Info Columns */
-.file-info-grid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: center; }
-.file-card {
-  background: rgba(255,255,255,0.1);
-  border: 1px solid rgba(255,255,255,0.2);
-  border-radius: 8px;
-  padding: 1rem 1.2rem;
-  backdrop-filter: blur(10px);
-}
-.file-card .f-label { font-size: 0.72rem; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
-.file-card .f-host { font-size: 1.1rem; font-weight: 700; }
-.file-card .f-meta { font-size: 0.8rem; opacity: 0.8; margin-top: 0.2rem; }
-.vs-badge {
-  width: 50px; height: 50px; border-radius: 50%;
-  background: rgba(255,255,255,0.15);
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: 0.85rem; flex-shrink: 0;
+body::after {
+  content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background-image:
+    linear-gradient(rgba(148,163,184,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148,163,184,0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+  z-index: -1; pointer-events: none;
 }
 
-/* Similarity Score */
-.similarity-bar {
-  margin-top: 1.5rem;
-  background: rgba(255,255,255,0.1);
-  border-radius: 8px;
-  padding: 1rem 1.2rem;
+/* ===== Sidebar ===== */
+.sidebar {
+  position: fixed; top: 0; left: 0; width: var(--sidebar-w); height: 100vh;
+  background: rgba(10,14,26,0.85); backdrop-filter: blur(20px);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; z-index: 100;
+  transition: transform 0.3s ease;
 }
-.similarity-bar .sim-label { font-size: 0.82rem; opacity: 0.85; margin-bottom: 0.4rem; display: flex; justify-content: space-between; }
-.similarity-track {
-  height: 8px; background: rgba(255,255,255,0.2); border-radius: 4px; overflow: hidden;
-}
-.similarity-fill {
-  height: 100%; border-radius: 4px;
-  background: linear-gradient(90deg, var(--fail) 0%, var(--warn) 50%, var(--ok) 100%);
-  transition: width 0.6s;
-}
+.sidebar-header { padding: 1.5rem 1.25rem 1rem; border-bottom: 1px solid var(--border); }
+.sidebar-logo { display: flex; align-items: center; gap: 0.6rem; font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; color: var(--ink-bright); }
+.sidebar-logo .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.6;transform:scale(0.85)} }
+.sidebar-logo .sub { font-size: 0.65rem; font-weight: 400; color: var(--ink-dim); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 0.15rem; }
+.sidebar-nav { flex: 1; overflow-y: auto; padding: 0.75rem 0.5rem; scrollbar-width: thin; scrollbar-color: var(--border-bright) transparent; }
+.sidebar-nav::-webkit-scrollbar { width: 4px; }
+.sidebar-nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 4px; }
+.nav-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.75rem; border-radius: var(--radius-sm); color: var(--ink-muted); text-decoration: none; font-size: 0.84rem; font-weight: 500; margin-bottom: 0.15rem; transition: all 0.2s ease; position: relative; }
+.nav-item:hover { background: var(--bg-elevated); color: var(--ink); }
+.nav-item.active { background: var(--accent-glow); color: var(--accent); }
+.nav-item.active::before { content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 60%; background: var(--accent); border-radius: 0 3px 3px 0; }
+.nav-item .nav-icon { font-size: 0.9rem; width: 18px; text-align: center; flex-shrink: 0; }
+.nav-item .nav-badge { margin-left: auto; font-size: 0.68rem; font-weight: 700; padding: 0.1em 0.45em; border-radius: 6px; background: var(--bg-elevated); color: var(--ink-dim); }
+.nav-item.active .nav-badge { background: var(--accent-glow); color: var(--accent); }
+.nav-section-label { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-dim); padding: 1rem 0.75rem 0.4rem; }
+.sidebar-footer { padding: 0.75rem 1rem; border-top: 1px solid var(--border); font-size: 0.7rem; color: var(--ink-dim); }
 
-/* ===== Stats Cards ===== */
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1.5rem;
-}
-.stat-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.2rem;
-  box-shadow: var(--shadow);
-  text-align: center;
-}
-.stat-card .stat-num { font-size: 2rem; font-weight: 700; }
-.stat-card .stat-label { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.2rem; }
-.stat-card.version .stat-num { color: var(--info); }
-.stat-card.env .stat-num { color: var(--warn); }
-.stat-card.system .stat-num { color: var(--fail); }
-.stat-card.other .stat-num { color: var(--muted); }
-.stat-card.identical .stat-num { color: var(--ok); }
+/* ===== Main ===== */
+.main { margin-left: var(--sidebar-w); padding: 2rem 2.5rem; max-width: 1100px; }
+
+/* ===== Hero ===== */
+.hero { background: var(--bg-card); backdrop-filter: blur(20px); border: 1px solid var(--border-bright); border-radius: var(--radius); padding: 2rem; margin-bottom: 1.5rem; position: relative; overflow: hidden; animation: fadeUp 0.5s ease; }
+.hero::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent); }
+.hero-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
+.hero h1 { font-family: var(--font-display); font-size: 1.65rem; font-weight: 700; color: var(--ink-bright); letter-spacing: -0.02em; line-height: 1.2; }
+.hero .subtitle { color: var(--ink-muted); font-size: 0.88rem; margin-top: 0.3rem; }
+
+/* Score ring */
+.score-ring { width: 80px; height: 80px; position: relative; flex-shrink: 0; }
+.score-ring svg { transform: rotate(-90deg); }
+.score-ring .score-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
+.score-ring .score-num { font-family: var(--font-display); font-size: 1.5rem; font-weight: 800; line-height: 1; }
+.score-ring .score-label { font-size: 0.6rem; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 0.15rem; }
+
+/* File cards */
+.file-pair { display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.75rem; align-items: center; margin-bottom: 1.25rem; }
+.file-pill { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.75rem 1rem; }
+.file-pill .fp-label { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); margin-bottom: 0.25rem; }
+.file-pill .fp-host { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 600; color: var(--ink-bright); word-break: break-all; line-height: 1.3; }
+.file-pill .fp-meta { font-size: 0.72rem; color: var(--ink-dim); margin-top: 0.25rem; }
+.vs-orb { width: 40px; height: 40px; border-radius: 50%; background: var(--bg-elevated); border: 1px solid var(--border-bright); display: flex; align-items: center; justify-content: center; font-family: var(--font-display); font-weight: 700; font-size: 0.72rem; color: var(--ink-muted); flex-shrink: 0; }
+
+/* Similarity bar */
+.sim-bar { background: var(--bg-elevated); border-radius: var(--radius-sm); padding: 0.8rem 1rem; }
+.sim-bar-head { display: flex; justify-content: space-between; font-size: 0.78rem; margin-bottom: 0.4rem; }
+.sim-bar-head .label { color: var(--ink-muted); }
+.sim-bar-head .value { font-weight: 700; color: var(--ink-bright); }
+.sim-track { height: 6px; background: var(--bg-base); border-radius: 3px; overflow: hidden; }
+.sim-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--fail), var(--warn), var(--ok)); animation: fillBar 0.8s ease 0.2s both; transform-origin: left; }
+@keyframes fillBar { from{transform:scaleX(0)} to{transform:scaleX(1)} }
+
+/* ===== Stat strip ===== */
+.stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; animation: fadeUp 0.5s ease 0.1s both; }
+.stat-tile { background: var(--bg-card); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem; text-align: center; transition: border-color 0.2s, transform 0.2s; }
+.stat-tile:hover { border-color: var(--border-bright); transform: translateY(-2px); }
+.stat-tile .st-num { font-family: var(--font-display); font-size: 1.75rem; font-weight: 800; line-height: 1; }
+.stat-tile .st-label { font-size: 0.72rem; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.3rem; }
+.stat-tile.ok .st-num { color: var(--ok); }
+.stat-tile.warn .st-num { color: var(--warn); }
+.stat-tile.fail .st-num { color: var(--fail); }
+.stat-tile.info .st-num { color: var(--info); }
+.stat-tile.neutral .st-num { color: var(--ink-muted); }
 
 /* ===== Section ===== */
-.section {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.5rem;
-  margin-bottom: 1.5rem;
-  box-shadow: var(--shadow);
-}
-.section-title {
-  font-size: 1.15rem;
-  font-weight: 700;
-  margin-bottom: 1rem;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 2px solid var(--border);
-  padding-bottom: 0.6rem;
-}
-.section-title .count {
-  font-size: 0.82rem;
-  font-weight: 600;
-  padding: 0.15em 0.6em;
-  border-radius: 12px;
-  background: var(--info-bg);
-  color: var(--info);
-}
+.section { background: var(--bg-card); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.25rem; animation: fadeUp 0.4s ease both; }
+.section:nth-child(2) { animation-delay: 0.15s; }
+.section:nth-child(3) { animation-delay: 0.2s; }
+.section:nth-child(4) { animation-delay: 0.25s; }
+.section:nth-child(5) { animation-delay: 0.3s; }
+@keyframes fadeUp { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+.section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--border); }
+.section-head .sh-title { display: flex; align-items: center; gap: 0.5rem; font-family: var(--font-display); font-size: 1.05rem; font-weight: 600; color: var(--ink-bright); }
+.section-head .sh-icon { font-size: 1.1rem; }
+.section-head .sh-count { font-size: 0.75rem; font-weight: 700; padding: 0.15em 0.55em; border-radius: 8px; background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(6,182,212,0.2); }
 
-/* ===== Diff Table ===== */
-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-th { text-align: left; padding: 0.6rem 0.8rem; color: var(--muted); font-weight: 600; font-size: 0.8rem; border-bottom: 2px solid var(--border); white-space: nowrap; }
-td { padding: 0.55rem 0.8rem; border-bottom: 1px solid var(--border); vertical-align: top; }
-td code { font-family: var(--mono); font-size: 0.84em; padding: 0.1em 0.3em; border-radius: 3px; }
+/* ===== Table ===== */
+.table-wrap { overflow-x: auto; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+table { width: 100%; border-collapse: collapse; font-size: 0.84rem; min-width: 500px; }
+thead { background: var(--bg-elevated); }
+th { text-align: left; padding: 0.55rem 0.8rem; color: var(--ink-dim); font-weight: 600; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; }
+td { padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--ink); }
+td code { font-family: var(--font-mono); font-size: 0.82em; background: var(--bg-elevated); color: var(--accent); padding: 0.1em 0.35em; border-radius: 4px; }
+tbody tr:hover { background: rgba(30,41,59,0.3); }
+tr.diff-modified { background: var(--warn-bg); }
+tr.diff-modified td:first-child { border-left: 3px solid var(--warn); }
+tr.diff-added { background: var(--ok-bg); }
+tr.diff-added td:first-child { border-left: 3px solid var(--ok); }
+tr.diff-removed { background: var(--fail-bg); }
+tr.diff-removed td:first-child { border-left: 3px solid var(--fail); }
 
-/* Diff row coloring */
-tr.diff-added { background: var(--added-bg); }
-tr.diff-added td:first-child { border-left: 3px solid var(--added); }
-tr.diff-removed { background: var(--removed-bg); }
-tr.diff-removed td:first-child { border-left: 3px solid var(--removed); }
-tr.diff-modified { background: var(--modified-bg); }
-tr.diff-modified td:first-child { border-left: 3px solid var(--modified); }
+/* ===== Badge ===== */
+.badge { display: inline-flex; align-items: center; gap: 0.2rem; padding: 0.12em 0.5em; border-radius: 6px; font-size: 0.68rem; font-weight: 700; white-space: nowrap; }
+.badge.ok { background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok-border); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); }
+.badge.fail { background: var(--fail-bg); color: var(--fail); border: 1px solid var(--fail-border); }
+.badge.info { background: var(--info-bg); color: var(--info); border: 1px solid var(--info-border); }
+.badge.neutral { background: var(--bg-elevated); color: var(--ink-dim); border: 1px solid var(--border); }
 
-/* Change badges */
-.change-badge {
-  display: inline-block;
-  padding: 0.12em 0.5em;
-  border-radius: 10px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.change-badge.upgrade { background: var(--added-bg); color: var(--added); border: 1px solid #bbf7d0; }
-.change-badge.downgrade { background: var(--removed-bg); color: var(--removed); border: 1px solid #fecaca; }
-.change-badge.added { background: var(--added-bg); color: var(--added); border: 1px solid #bbf7d0; }
-.change-badge.removed { background: var(--removed-bg); color: var(--removed); border: 1px solid #fecaca; }
-.change-badge.modified { background: var(--modified-bg); color: #92400e; border: 1px solid #fde68a; }
-.change-badge.missing-a { background: var(--removed-bg); color: var(--removed); border: 1px solid #fecaca; }
-.change-badge.missing-b { background: var(--removed-bg); color: var(--removed); border: 1px solid #fecaca; }
-
-/* Value cells */
-.val-added { color: var(--added); font-weight: 600; }
-.val-removed { color: var(--removed); font-weight: 600; text-decoration: line-through; }
-.val-modified { color: #92400e; }
+/* ===== Value styling ===== */
+.val-add { color: var(--ok); font-weight: 600; }
+.val-rem { color: var(--fail); font-weight: 600; text-decoration: line-through; opacity: 0.7; }
+.val-mod { color: var(--warn); font-weight: 600; }
+.val-miss { color: var(--ink-dim); font-style: italic; }
 
 /* ===== Banner ===== */
-.banner {
-  border-radius: 8px;
-  padding: 0.8rem 1rem;
-  margin-bottom: 1rem;
-  font-size: 0.88rem;
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-}
-.banner.ok { background: var(--ok-bg); border: 1px solid #bbf7d0; color: #166534; }
-.banner.warn { background: var(--warn-bg); border: 1px solid #fde68a; color: #92400e; }
-.banner.info { background: var(--info-bg); border: 1px solid #bfdbfe; color: #1e40af; }
+.banner { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.75rem 1rem; border-radius: var(--radius-sm); margin-bottom: 0.75rem; font-size: 0.84rem; line-height: 1.5; }
+.banner.ok { background: var(--ok-bg); border: 1px solid var(--ok-border); color: #6ee7b7; }
+.banner.warn { background: var(--warn-bg); border: 1px solid var(--warn-border); color: #fcd34d; }
+.banner.fail { background: var(--fail-bg); border: 1px solid var(--fail-border); color: #fca5a5; }
+.banner.info { background: var(--info-bg); border: 1px solid var(--info-border); color: #93c5fd; }
 
-/* ===== Identical Banner ===== */
-.identical-banner {
-  background: linear-gradient(135deg, var(--ok-bg) 0%, #dcfce7 100%);
-  border: 2px solid var(--ok);
-  border-radius: var(--radius);
-  padding: 2rem;
-  text-align: center;
-  margin-bottom: 1.5rem;
-}
-.identical-banner .icon { font-size: 3rem; margin-bottom: 0.5rem; }
-.identical-banner .title { font-size: 1.3rem; font-weight: 700; color: #166534; margin-bottom: 0.3rem; }
-.identical-banner .desc { color: #15803d; font-size: 0.9rem; }
-
-/* ===== Collapsible ===== */
-details { margin-top: 0.5rem; }
-summary {
-  cursor: pointer;
-  font-size: 0.85rem;
-  color: var(--info);
-  padding: 0.5rem 0;
-  user-select: none;
-}
-summary:hover { text-decoration: underline; }
-
-/* ===== Empty State ===== */
-.empty-state {
-  text-align: center;
-  padding: 2rem;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-.empty-state .icon { font-size: 2rem; margin-bottom: 0.5rem; opacity: 0.4; }
+/* ===== Sub heading ===== */
+.sub-head { font-family: var(--font-display); font-size: 0.88rem; font-weight: 600; margin: 1rem 0 0.5rem; color: var(--ink); }
+.sub-head .sh-count-inline { font-size: 0.72rem; font-weight: 500; color: var(--ink-dim); margin-left: 0.4rem; }
 
 /* ===== Legend ===== */
-.legend {
-  display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 1rem;
-  font-size: 0.8rem;
-}
-.legend-item { display: flex; align-items: center; gap: 0.3rem; }
-.legend-dot { width: 12px; height: 12px; border-radius: 3px; }
-.legend-dot.added { background: var(--added); }
-.legend-dot.removed { background: var(--removed); }
-.legend-dot.modified { background: var(--modified); }
+.legend { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.76rem; color: var(--ink-muted); }
+.legend-item { display: flex; align-items: center; gap: 0.35rem; }
+.legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+.legend-dot.add { background: var(--ok); }
+.legend-dot.rem { background: var(--fail); }
+.legend-dot.mod { background: var(--warn); }
+
+/* ===== Collapsible ===== */
+details { margin-top: 0.6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+summary { cursor: pointer; padding: 0.6rem 1rem; font-size: 0.82rem; font-weight: 500; color: var(--accent); background: var(--bg-elevated); user-select: none; transition: background 0.2s; }
+summary:hover { background: rgba(30,41,59,0.6); }
+details[open] summary { border-bottom: 1px solid var(--border); }
+details > .details-body { padding: 0.5rem 0; }
+
+/* ===== Empty state ===== */
+.empty { text-align: center; padding: 1.5rem; color: var(--ink-dim); font-size: 0.85rem; }
+.empty .em-icon { font-size: 1.6rem; margin-bottom: 0.3rem; opacity: 0.3; }
+
+/* ===== Missing item ===== */
+.missing-list { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+.missing-item { background: var(--info-bg); border: 1px dashed var(--info-border); border-radius: var(--radius-sm); padding: 0.65rem 0.85rem; font-size: 0.82rem; color: #93c5fd; }
+.missing-item strong { color: #bfdbfe; }
+
+/* ===== Code block ===== */
+.code-block { background: #050810; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.7rem 1rem; font-family: var(--font-mono); font-size: 0.78rem; color: #a5b4fc; overflow-x: auto; margin: 0.4rem 0; }
 
 /* ===== Footer ===== */
-.footer { text-align: center; color: var(--muted); font-size: 0.82rem; padding: 2rem 0; }
+.footer { text-align: center; color: var(--ink-dim); font-size: 0.78rem; padding: 2rem 0; }
 
-@media (max-width: 768px) {
-  .container { padding: 1rem; }
-  .header { padding: 1.5rem; }
-  .file-info-grid { grid-template-columns: 1fr; }
-  .vs-badge { margin: 0 auto; }
-  .stats-grid { grid-template-columns: 1fr 1fr; }
-  table { font-size: 0.8rem; }
+/* ===== Mobile ===== */
+.sidebar-toggle { display: none; position: fixed; top: 1rem; left: 1rem; z-index: 101; width: 40px; height: 40px; border-radius: 8px; background: var(--bg-elevated); border: 1px solid var(--border-bright); color: var(--ink); font-size: 1.2rem; cursor: pointer; align-items: center; justify-content: center; }
+@media (max-width: 900px) {
+  .sidebar { transform: translateX(-100%); }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar-toggle { display: flex; }
+  .main { margin-left: 0; padding: 1rem 1rem 1rem 4rem; }
+  .file-pair { grid-template-columns: 1fr; }
+  .vs-orb { margin: 0 auto; }
+  .missing-list { grid-template-columns: 1fr; }
+  .stat-strip { grid-template-columns: 1fr 1fr; }
 }
+@media (max-width: 500px) { .stat-strip { grid-template-columns: 1fr; } .hero { padding: 1.25rem; } .main { padding: 0.75rem; } }
 </style>
 </head>
 <body>
-<div class="container">
 
-<!-- ===== HEADER ===== -->
-<div class="header">
-  <h1>Ascend 环境对比分析报告</h1>
-  <div class="subtitle">多机环境差异比对 / 配置漂移检测</div>
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle navigation">&#9776;</button>
 
-  <div class="file-info-grid">
-    <div class="file-card">
-      <div class="f-label">文件 A</div>
-      <div class="f-host">{{HOST_A}}</div>
-      <div class="f-meta">📅 {{TIMESTAMP_A}} · 🐍 {{PYTHON_A}}</div>
-    </div>
-    <div class="vs-badge">VS</div>
-    <div class="file-card">
-      <div class="f-label">文件 B</div>
-      <div class="f-host">{{HOST_B}}</div>
-      <div class="f-meta">📅 {{TIMESTAMP_B}} · 🐍 {{PYTHON_B}}</div>
+<!-- ===== SIDEBAR ===== -->
+<!-- Navigation items use {{NAV_ITEMS}} placeholder for dynamic generation -->
+<nav class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <div class="sidebar-logo">
+      <span class="dot"></span>
+      <div>
+        Ascend 对比报告
+        <div class="sub">Environment Diff Analyzer</div>
+      </div>
     </div>
   </div>
+  <div class="sidebar-nav" id="nav">
+    {{NAV_ITEMS}}
+  </div>
+  <div class="sidebar-footer">
+    {{TOOL_NAME}} v{{TOOL_VERSION}}<br>{{REPORT_DATE}}
+  </div>
+</nav>
 
-  <div class="similarity-bar">
-    <div class="sim-label">
-      <span>环境相似度</span>
-      <span><strong>{{SIMILARITY_PCT}}%</strong> · {{DIFF_COUNT}} 项差异</span>
+<!-- ===== MAIN ===== -->
+<div class="main">
+
+<!-- ===== HERO ===== -->
+<section class="hero" id="hero">
+  <div class="hero-top">
+    <div>
+      <h1>Ascend 环境对比分析报告</h1>
+      <div class="subtitle">{{FILE_COUNT}} 个文件比对 · {{DIFF_COUNT}} 项差异 · 相似度 {{SIMILARITY}}%</div>
     </div>
-    <div class="similarity-track">
-      <div class="similarity-fill" style="width: {{SIMILARITY_PCT}}%"></div>
+    <div class="score-ring">
+      <!-- SVG ring: stroke-dashoffset = 213.6 * (1 - similarity/100) -->
+      {{SCORE_RING_SVG}}
+      <div class="score-text">
+        <div class="score-num" style="color: {{SCORE_COLOR}};">{{SIMILARITY}}%</div>
+        <div class="score-label">相似度</div>
+      </div>
     </div>
   </div>
-</div>
 
-<!-- ===== IDENTICAL BANNER (shown when 0 differences) ===== -->
-<div class="identical-banner">
-  <div class="icon">✅</div>
-  <div class="title">两个环境完全一致</div>
-  <div class="desc">未发现任何差异。两个 dump 文件的所有采集项完全相同。</div>
-</div>
+  <!-- File pair cards: repeat for each file with VS between them -->
+  {{FILE_PAIR_CARDS}}
 
-<!-- ===== STATS CARDS ===== -->
-<div class="stats-grid">
-  <div class="stat-card version">
-    <div class="stat-num">{{VERSION_CHANGES}}</div>
-    <div class="stat-label">版本变更</div>
+  <div class="sim-bar">
+    <div class="sim-bar-head">
+      <span class="label">环境相似度</span>
+      <span class="value">{{SIMILARITY}}% · {{DIFF_COUNT}} 项差异 · {{IDENTICAL_COUNT}} 项一致</span>
+    </div>
+    <div class="sim-track">
+      <div class="sim-fill" style="width: {{SIMILARITY}}%"></div>
+    </div>
   </div>
-  <div class="stat-card env">
-    <div class="stat-num">{{ENV_CHANGES}}</div>
-    <div class="stat-label">环境变量变更</div>
-  </div>
-  <div class="stat-card system">
-    <div class="stat-num">{{SYSTEM_CHANGES}}</div>
-    <div class="stat-label">系统设置变更</div>
-  </div>
-  <div class="stat-card other">
-    <div class="stat-num">{{OTHER_CHANGES}}</div>
-    <div class="stat-label">其他变更</div>
-  </div>
-  <div class="stat-card identical">
-    <div class="stat-num">{{IDENTICAL_SECTIONS}}</div>
-    <div class="stat-label">一致项</div>
-  </div>
-</div>
+</section>
+
+<!-- ===== STATS ===== -->
+<section class="stat-strip" id="stats">
+  <!-- Repeat for each category: version/env/system/config/network/weight/other + identical -->
+  {{STAT_TILES}}
+</section>
 
 <!-- ===== LEGEND ===== -->
 <div class="legend">
-  <div class="legend-item"><div class="legend-dot added"></div> 新增 / 升级</div>
-  <div class="legend-item"><div class="legend-dot removed"></div> 删除 / 降级</div>
-  <div class="legend-item"><div class="legend-dot modified"></div> 修改</div>
+  <div class="legend-item"><div class="legend-dot add"></div> 新增 / 升级</div>
+  <div class="legend-item"><div class="legend-dot rem"></div> 删除 / 降级 / 缺失</div>
+  <div class="legend-item"><div class="legend-dot mod"></div> 修改</div>
 </div>
 
-<!-- ===== VERSION CHANGES ===== -->
-<div class="section">
-  <div class="section-title">
-    <span>⚡ Ascend 组件版本变更</span>
-    <span class="count">{{VERSION_CHANGES}} 项</span>
+<!-- ===== ASSESSMENT BANNER ===== -->
+{{ASSESSMENT_BANNER}}
+
+<!-- ===== SECTION STATISTICS ===== -->
+<section class="section" id="section-stats">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">📊</span> Section 统计</div>
   </div>
-
-  <!-- If no version changes -->
-  <div class="empty-state">
-    <div class="icon">✅</div>
-    所有 Ascend 组件版本完全一致，无变更
-  </div>
-
-  <!-- If version changes exist -->
-  <table>
-    <thead>
-      <tr><th>组件</th><th>文件 A</th><th>文件 B</th><th>变化</th></tr>
-    </thead>
-    <tbody>
-      <tr class="diff-modified">
-        <td><code>driver</code></td>
-        <td><span class="val-modified">24.1.0</span></td>
-        <td><span class="val-modified">26.0.rc1</span></td>
-        <td><span class="change-badge upgrade">↑ 升级</span></td>
-      </tr>
-      <tr class="diff-removed">
-        <td><code>mindie</code></td>
-        <td><span class="val-removed">1.0.0</span></td>
-        <td><span class="val-removed">未安装</span></td>
-        <td><span class="change-badge removed">↓ 移除</span></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-<!-- ===== ENV VAR CHANGES ===== -->
-<div class="section">
-  <div class="section-title">
-    <span>🔑 环境变量变更</span>
-    <span class="count">{{ENV_CHANGES}} 项</span>
-  </div>
-
-  <!-- If no env changes -->
-  <div class="empty-state">
-    <div class="icon">✅</div>
-    环境变量完全一致，无变更
-  </div>
-
-  <!-- Added Variables -->
-  <h4 style="margin-bottom:0.5rem;color:var(--added);font-size:0.9rem;">新增变量 (仅在文件 B 中)</h4>
-  <table>
-    <thead><tr><th>变量名</th><th>文件 A</th><th>文件 B</th><th>变化</th></tr></thead>
-    <tbody>
-      <tr class="diff-added">
-        <td><code>HCCL_BUFFSIZE</code></td>
-        <td>—</td>
-        <td><span class="val-added">"512MB"</span></td>
-        <td><span class="change-badge added">+ 新增</span></td>
-      </tr>
-    </tbody>
-  </table>
-
-  <!-- Removed Variables -->
-  <h4 style="margin:1rem 0 0.5rem;color:var(--removed);font-size:0.9rem;">删除变量 (仅在文件 A 中)</h4>
-  <table>
-    <thead><tr><th>变量名</th><th>文件 A</th><th>文件 B</th><th>变化</th></tr></thead>
-    <tbody>
-      <tr class="diff-removed">
-        <td><code>OLD_VAR</code></td>
-        <td><span class="val-removed">"value"</span></td>
-        <td>—</td>
-        <td><span class="change-badge removed">- 删除</span></td>
-      </tr>
-    </tbody>
-  </table>
-
-  <!-- Modified Variables -->
-  <h4 style="margin:1rem 0 0.5rem;color:var(--modified);font-size:0.9rem;">修改变量</h4>
-  <table>
-    <thead><tr><th>变量名</th><th>文件 A</th><th>文件 B</th><th>变化</th></tr></thead>
-    <tbody>
-      <tr class="diff-modified">
-        <td><code>LD_LIBRARY_PATH</code></td>
-        <td><span class="val-removed">/old/path</span></td>
-        <td><span class="val-added">/new/path</span></td>
-        <td><span class="change-badge modified">~ 修改</span></td>
-      </tr>
-    </tbody>
-  </table>
-
-  <!-- Collapsible full list -->
-  <details>
-    <summary>查看全部环境变量差异 ({{ENV_CHANGES}} 项)</summary>
+  <div class="table-wrap">
     <table>
-      <thead><tr><th>变量名</th><th>文件 A</th><th>文件 B</th></tr></thead>
+      <thead><tr><th>Section</th><th>总路径数</th><th>一致</th><th>差异</th><th>存在性</th></tr></thead>
       <tbody>
-        <tr><td><code>EXAMPLE</code></td><td>value_a</td><td>value_b</td></tr>
+        <!-- Repeat for each section: system, ascend, env, config, network, weight, other -->
+        {{SECTION_STAT_ROWS}}
       </tbody>
     </table>
-  </details>
-</div>
-
-<!-- ===== SYSTEM CHANGES ===== -->
-<div class="section">
-  <div class="section-title">
-    <span>🖥️ 系统设置变更</span>
-    <span class="count">{{SYSTEM_CHANGES}} 项</span>
   </div>
+</section>
 
-  <div class="empty-state">
-    <div class="icon">✅</div>
-    系统设置完全一致，无变更
-  </div>
+<!-- ===== DIFF DETAIL SECTIONS ===== -->
+<!-- The {{DIFF_SECTIONS}} placeholder should be replaced with one or more
+     <section> blocks, one per diff category (system/ascend/env/config/network/weight/other).
+     Only include categories that have diffs. Each block should follow this structure:
 
-  <table>
-    <thead><tr><th>设置项</th><th>文件 A</th><th>文件 B</th><th>变化</th></tr></thead>
-    <tbody>
-      <tr class="diff-modified">
-        <td>overcommit_memory</td>
-        <td><span class="val-removed">0</span></td>
-        <td><span class="val-added">1</span></td>
-        <td><span class="change-badge modified">~ 修改</span></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
+  <section class="section" id="CATEGORY_ID">
+    <div class="section-head">
+      <div class="sh-title"><span class="sh-icon">ICON</span> CATEGORY_TITLE</div>
+      <span class="sh-count">N 项</span>
+    </div>
+    OPTIONAL_BANNERS
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>路径</th><th>文件A</th><th>文件B</th></tr></thead>
+        <tbody>DIFF_TABLE_ROWS</tbody>
+      </table>
+    </div>
+  </section>
+-->
 
-<!-- ===== CONFIG CHANGES (conditional) ===== -->
-<div class="section">
-  <div class="section-title">
-    <span>📄 配置文件变更</span>
-    <span class="count">{{CONFIG_CHANGES}} 项</span>
-  </div>
+{{DIFF_SECTIONS}}
 
-  <div class="banner info">
-    ℹ️ <div>配置文件变更仅在两个 dump 都采集了配置文件时展示。</div>
-  </div>
+<!-- ===== SENSITIVE VARIABLES (conditional) ===== -->
+<!-- Only include if sensitive vars detected. Otherwise omit entirely. -->
+{{SENSITIVE_SECTION}}
 
-  <table>
-    <thead><tr><th>配置路径</th><th>文件 A</th><th>文件 B</th><th>变化</th></tr></thead>
-    <tbody>
-      <tr class="diff-modified">
-        <td><code>mies_config.maxBatchSize</code></td>
-        <td><span class="val-removed">8</span></td>
-        <td><span class="val-added">16</span></td>
-        <td><span class="change-badge modified">~ 修改</span></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-<!-- ===== NETWORK CHANGES (conditional) ===== -->
-<div class="section">
-  <div class="section-title">
-    <span>🌐 网络状态变更</span>
-    <span class="count">{{NETWORK_CHANGES}} 项</span>
-  </div>
-
-  <div class="empty-state">
-    <div class="icon">✅</div>
-    网络连通性状态一致，无变更
-  </div>
-
-  <table>
-    <thead><tr><th>检查项</th><th>文件 A</th><th>文件 B</th><th>变化</th></tr></thead>
-    <tbody>
-      <tr class="diff-modified">
-        <td><code>ping 192.168.1.2</code></td>
-        <td><span class="val-added">0% loss</span></td>
-        <td><span class="val-removed">100% loss</span></td>
-        <td><span class="change-badge removed">↓ 恶化</span></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-<!-- ===== WEIGHT CHANGES (conditional) ===== -->
-<div class="section">
-  <div class="section-title">
-    <span>📦 权重哈希变更</span>
-    <span class="count">{{WEIGHT_CHANGES}} 项</span>
-  </div>
-
-  <div class="empty-state">
-    <div class="icon">✅</div>
-    权重文件哈希一致，无变更
-  </div>
-
-  <table>
-    <thead><tr><th>Tensor ID</th><th>文件 A (SHA256)</th><th>文件 B (SHA256)</th><th>变化</th></tr></thead>
-    <tbody>
-      <tr class="diff-modified">
-        <td><code>00001</code></td>
-        <td><span class="val-removed">abc123...</span></td>
-        <td><span class="val-added">def456...</span></td>
-        <td><span class="change-badge modified">~ 变更</span></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
+<!-- ===== MISSING SECTIONS (conditional) ===== -->
+<!-- Only include if some sections were not collected in either file. -->
+{{MISSING_SECTION}}
 
 <!-- ===== DRIFT ASSESSMENT ===== -->
-<div class="section">
-  <div class="section-title"><span>📊 漂移评估</span></div>
-
-  <div class="banner ok">
-    ✅ <div><strong>环境一致性良好：</strong>两个环境的核心配置高度一致，差异项不影响部署。</div>
+<section class="section" id="drift">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">📈</span> 漂移评估</div>
   </div>
-
-  <!-- Or if significant drift -->
-  <div class="banner warn">
-    ⚠️ <div><strong>存在配置漂移：</strong>发现 {{SIGNIFICANT_CHANGES}} 项重要差异，可能导致部署行为不一致。</div>
+  {{DRIFT_BANNER}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>评估维度</th><th>状态</th><th>说明</th></tr></thead>
+      <tbody>
+        {{DRIFT_ROWS}}
+      </tbody>
+    </table>
   </div>
+</section>
 
-  <table>
-    <thead><tr><th>评估维度</th><th>状态</th><th>说明</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>Ascend 组件版本</td>
-        <td><span class="change-badge modified">部分不一致</span></td>
-        <td>{{VERSION_ASSESSMENT}}</td>
-      </tr>
-      <tr>
-        <td>关键环境变量</td>
-        <td><span class="change-badge added">一致</span></td>
-        <td>关键 Ascend 环境变量无差异</td>
-      </tr>
-      <tr>
-        <td>系统配置</td>
-        <td><span class="change-badge modified">部分不一致</span></td>
-        <td>{{SYSTEM_ASSESSMENT}}</td>
-      </tr>
-      <tr>
-        <td>网络连通性</td>
-        <td><span class="change-badge added">一致</span></td>
-        <td>所有主机连通性状态相同</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
+<!-- ===== KEY FINDINGS ===== -->
+<section class="section" id="findings">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🔍</span> 关键发现与建议</div>
+  </div>
+  <!-- Repeat for each finding. Each finding is a banner (ok/warn/fail/info). -->
+  {{FINDING_BANNERS}}
+</section>
+
+<!-- ===== RAW DATA COMPARISON ===== -->
+<section class="section" id="raw-data">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">📋</span> 原始数据对比</div>
+  </div>
+  <!-- Repeat for each section (system/ascend/env) with a sub-head + table -->
+  {{RAW_DATA_TABLES}}
+
+  <details>
+    <summary>查看全部环境变量对比 ({{ENV_TOTAL_COUNT}} 项)</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>变量名</th>{{FILE_COL_HEADERS}}</tr></thead>
+          <tbody>
+            {{ALL_ENV_VAR_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  {{RAW_DATA_SUMMARY_BANNER}}
+</section>
 
 <div class="footer">
-  本报告由 ascend-dump-analyzer skill 生成 · 对比时间：{{COMPARE_TIMESTAMP}}
+  {{TOOL_NAME}} · {{TOOL_VERSION}} · {{REPORT_TIMESTAMP}}
 </div>
 
-</div>
+</div><!-- /main -->
+
+<script>
+// Scroll-spy navigation: highlights current section in sidebar
+(function() {
+  var sections = document.querySelectorAll('section[id]');
+  var navLinks = document.querySelectorAll('.nav-item');
+  var navMap = {};
+
+  navLinks.forEach(function(link) {
+    var href = link.getAttribute('href');
+    if (href && href.startsWith('#')) {
+      navMap[href.substring(1)] = link;
+    }
+  });
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        var id = entry.target.id;
+        navLinks.forEach(function(l) { l.classList.remove('active'); });
+        if (navMap[id]) {
+          navMap[id].classList.add('active');
+        }
+      }
+    });
+  }, {
+    rootMargin: '-20% 0px -60% 0px',
+    threshold: 0
+  });
+
+  sections.forEach(function(s) { observer.observe(s); });
+
+  navLinks.forEach(function(link) {
+    link.addEventListener('click', function() {
+      if (window.innerWidth <= 900) {
+        document.querySelector('.sidebar').classList.remove('open');
+      }
+    });
+  });
+})();
+</script>
+
 </body>
 </html>

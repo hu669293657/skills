@@ -4,514 +4,509 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ascend 环境分析报告 — {{HOSTNAME}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700;800&family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {
-  --ok: #22c55e;
-  --ok-bg: #f0fdf4;
+  --bg-base: #0a0e1a;
+  --bg-surface: #111827;
+  --bg-card: rgba(17, 24, 39, 0.8);
+  --bg-elevated: #1e293b;
+  --ink: #e2e8f0;
+  --ink-bright: #f1f5f9;
+  --ink-muted: #94a3b8;
+  --ink-dim: #64748b;
+  --border: rgba(148, 163, 184, 0.12);
+  --border-bright: rgba(148, 163, 184, 0.25);
+  --accent: #06b6d4;
+  --accent-glow: rgba(6, 182, 212, 0.15);
+  --accent-2: #8b5cf6;
+  --ok: #10b981;
+  --ok-bg: rgba(16, 185, 129, 0.08);
+  --ok-border: rgba(16, 185, 129, 0.3);
   --warn: #f59e0b;
-  --warn-bg: #fffbeb;
+  --warn-bg: rgba(245, 158, 11, 0.08);
+  --warn-border: rgba(245, 158, 11, 0.3);
   --fail: #ef4444;
-  --fail-bg: #fef2f2;
+  --fail-bg: rgba(239, 68, 68, 0.08);
+  --fail-border: rgba(239, 68, 68, 0.3);
   --info: #3b82f6;
-  --info-bg: #eff6ff;
-  --ink: #1e293b;
-  --muted: #64748b;
-  --border: #e2e8f0;
-  --bg: #f8fafc;
-  --card: #ffffff;
-  --radius: 10px;
-  --shadow: 0 1px 3px rgba(0,0,0,0.08);
-  --mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  --info-bg: rgba(59, 130, 246, 0.08);
+  --info-border: rgba(59, 130, 246, 0.3);
+  --font-display: 'Sora', sans-serif;
+  --font-body: 'DM Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --sidebar-w: 240px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
-
+html { scroll-behavior: smooth; scroll-padding-top: 2rem; }
 body {
-  font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  background: var(--bg);
+  font-family: var(--font-body);
+  background: var(--bg-base);
   color: var(--ink);
-  line-height: 1.6;
+  line-height: 1.65;
   font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
-.container { max-width: 1000px; margin: 0 auto; padding: 2rem; }
+body::before {
+  content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background:
+    radial-gradient(ellipse 600px 400px at 15% 10%, rgba(6,182,212,0.06), transparent),
+    radial-gradient(ellipse 500px 300px at 85% 90%, rgba(139,92,246,0.05), transparent),
+    linear-gradient(180deg, #0a0e1a 0%, #0d1320 100%);
+  z-index: -2;
+}
+body::after {
+  content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background-image:
+    linear-gradient(rgba(148,163,184,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148,163,184,0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+  z-index: -1; pointer-events: none;
+}
 
-/* ===== Header ===== */
-.header {
-  background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%);
-  color: #fff;
-  border-radius: var(--radius);
-  padding: 2.5rem;
-  margin-bottom: 1.5rem;
-  box-shadow: var(--shadow);
+/* ===== Sidebar ===== */
+.sidebar {
+  position: fixed; top: 0; left: 0; width: var(--sidebar-w); height: 100vh;
+  background: rgba(10,14,26,0.85); backdrop-filter: blur(20px);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; z-index: 100;
+  transition: transform 0.3s ease;
 }
-.header-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem; }
-.header h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.3rem; }
-.header .subtitle { opacity: 0.85; font-size: 0.95rem; }
-.header-meta { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-top: 1rem; font-size: 0.85rem; opacity: 0.9; }
-.header-meta span { display: flex; align-items: center; gap: 0.3rem; }
+.sidebar-header { padding: 1.5rem 1.25rem 1rem; border-bottom: 1px solid var(--border); }
+.sidebar-logo { display: flex; align-items: center; gap: 0.6rem; font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; color: var(--ink-bright); }
+.sidebar-logo .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.6;transform:scale(0.85)} }
+.sidebar-logo .sub { font-size: 0.65rem; font-weight: 400; color: var(--ink-dim); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 0.15rem; }
+.sidebar-nav { flex: 1; overflow-y: auto; padding: 0.75rem 0.5rem; scrollbar-width: thin; scrollbar-color: var(--border-bright) transparent; }
+.sidebar-nav::-webkit-scrollbar { width: 4px; }
+.sidebar-nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 4px; }
+.nav-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.75rem; border-radius: var(--radius-sm); color: var(--ink-muted); text-decoration: none; font-size: 0.84rem; font-weight: 500; margin-bottom: 0.15rem; transition: all 0.2s ease; position: relative; }
+.nav-item:hover { background: var(--bg-elevated); color: var(--ink); }
+.nav-item.active { background: var(--accent-glow); color: var(--accent); }
+.nav-item.active::before { content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 60%; background: var(--accent); border-radius: 0 3px 3px 0; }
+.nav-item .nav-icon { font-size: 0.9rem; width: 18px; text-align: center; flex-shrink: 0; }
+.nav-item .nav-badge { margin-left: auto; font-size: 0.68rem; font-weight: 700; padding: 0.1em 0.45em; border-radius: 6px; background: var(--bg-elevated); color: var(--ink-dim); }
+.nav-item.active .nav-badge { background: var(--accent-glow); color: var(--accent); }
+.nav-section-label { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-dim); padding: 1rem 0.75rem 0.4rem; }
+.sidebar-footer { padding: 0.75rem 1rem; border-top: 1px solid var(--border); font-size: 0.7rem; color: var(--ink-dim); }
 
-/* Health Score Ring */
-.health-ring {
-  width: 90px; height: 90px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  flex-direction: column; flex-shrink: 0;
-  position: relative;
-}
-.health-ring .score { font-size: 1.6rem; font-weight: 700; }
-.health-ring .label { font-size: 0.65rem; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.05em; }
+/* ===== Main ===== */
+.main { margin-left: var(--sidebar-w); padding: 2rem 2.5rem; max-width: 1100px; }
 
-/* ===== Cards Grid ===== */
-.cards-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1.5rem;
-}
-.stat-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.2rem;
-  box-shadow: var(--shadow);
-  border-left: 4px solid var(--info);
-}
-.stat-card.ok { border-left-color: var(--ok); }
-.stat-card.warn { border-left-color: var(--warn); }
-.stat-card.fail { border-left-color: var(--fail); }
-.stat-card .stat-icon { font-size: 1.5rem; margin-bottom: 0.5rem; }
-.stat-card .stat-title { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.3rem; }
-.stat-card .stat-value { font-size: 1.3rem; font-weight: 700; }
-.stat-card .stat-sub { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
+/* ===== Hero ===== */
+.hero { background: var(--bg-card); backdrop-filter: blur(20px); border: 1px solid var(--border-bright); border-radius: var(--radius); padding: 2rem; margin-bottom: 1.5rem; position: relative; overflow: hidden; animation: fadeUp 0.5s ease; }
+.hero::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent); }
+.hero-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
+.hero h1 { font-family: var(--font-display); font-size: 1.65rem; font-weight: 700; color: var(--ink-bright); letter-spacing: -0.02em; line-height: 1.2; }
+.hero .subtitle { color: var(--ink-muted); font-size: 0.88rem; margin-top: 0.3rem; }
+.hero-meta { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-top: 0.8rem; font-size: 0.8rem; color: var(--ink-dim); }
+
+/* Score ring */
+.score-ring { width: 80px; height: 80px; position: relative; flex-shrink: 0; }
+.score-ring svg { transform: rotate(-90deg); }
+.score-ring .score-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
+.score-ring .score-num { font-family: var(--font-display); font-size: 1.5rem; font-weight: 800; line-height: 1; }
+.score-ring .score-label { font-size: 0.6rem; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 0.15rem; }
+
+/* ===== Stat strip ===== */
+.stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; animation: fadeUp 0.5s ease 0.1s both; }
+.stat-tile { background: var(--bg-card); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem; text-align: center; transition: border-color 0.2s, transform 0.2s; }
+.stat-tile:hover { border-color: var(--border-bright); transform: translateY(-2px); }
+.stat-tile .st-num { font-family: var(--font-display); font-size: 1.75rem; font-weight: 800; line-height: 1; }
+.stat-tile .st-label { font-size: 0.72rem; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.3rem; }
+.stat-tile.ok .st-num { color: var(--ok); }
+.stat-tile.warn .st-num { color: var(--warn); }
+.stat-tile.fail .st-num { color: var(--fail); }
+.stat-tile.info .st-num { color: var(--info); }
+.stat-tile.neutral .st-num { color: var(--ink-muted); }
 
 /* ===== Section ===== */
-.section {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.5rem;
-  margin-bottom: 1.5rem;
-  box-shadow: var(--shadow);
-}
-.section-title {
-  font-size: 1.15rem;
-  font-weight: 700;
-  margin-bottom: 1rem;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  border-bottom: 2px solid var(--border);
-  padding-bottom: 0.6rem;
-}
-.section-title .icon { font-size: 1.2rem; }
+.section { background: var(--bg-card); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.25rem; animation: fadeUp 0.4s ease both; }
+.section:nth-child(2) { animation-delay: 0.15s; }
+.section:nth-child(3) { animation-delay: 0.2s; }
+.section:nth-child(4) { animation-delay: 0.25s; }
+.section:nth-child(5) { animation-delay: 0.3s; }
+@keyframes fadeUp { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+.section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--border); }
+.section-head .sh-title { display: flex; align-items: center; gap: 0.5rem; font-family: var(--font-display); font-size: 1.05rem; font-weight: 600; color: var(--ink-bright); }
+.section-head .sh-icon { font-size: 1.1rem; }
+.section-head .sh-count { font-size: 0.75rem; font-weight: 700; padding: 0.15em 0.55em; border-radius: 8px; background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(6,182,212,0.2); }
 
 /* ===== Table ===== */
-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-th { text-align: left; padding: 0.6rem 0.8rem; color: var(--muted); font-weight: 600; font-size: 0.8rem; border-bottom: 2px solid var(--border); }
-td { padding: 0.55rem 0.8rem; border-bottom: 1px solid var(--border); vertical-align: top; }
-td code { font-family: var(--mono); font-size: 0.84em; background: var(--bg); padding: 0.1em 0.3em; border-radius: 3px; color: var(--info); }
+.table-wrap { overflow-x: auto; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+table { width: 100%; border-collapse: collapse; font-size: 0.84rem; min-width: 500px; }
+thead { background: var(--bg-elevated); }
+th { text-align: left; padding: 0.55rem 0.8rem; color: var(--ink-dim); font-weight: 600; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; }
+td { padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--ink); }
+td code { font-family: var(--font-mono); font-size: 0.82em; background: var(--bg-elevated); color: var(--accent); padding: 0.1em 0.35em; border-radius: 4px; }
+tbody tr:hover { background: rgba(30,41,59,0.3); }
 
-/* ===== Badges ===== */
-.badge {
-  display: inline-block;
-  padding: 0.15em 0.6em;
-  border-radius: 12px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-.badge.ok { background: var(--ok-bg); color: var(--ok); border: 1px solid #bbf7d0; }
-.badge.warn { background: var(--warn-bg); color: #92400e; border: 1px solid #fde68a; }
-.badge.fail { background: var(--fail-bg); color: var(--fail); border: 1px solid #fecaca; }
-.badge.info { background: var(--info-bg); color: var(--info); border: 1px solid #bfdbfe; }
-.badge.missing { background: #f1f5f9; color: var(--muted); border: 1px solid var(--border); }
+/* ===== Badge ===== */
+.badge { display: inline-flex; align-items: center; gap: 0.2rem; padding: 0.12em 0.5em; border-radius: 6px; font-size: 0.68rem; font-weight: 700; white-space: nowrap; }
+.badge.ok { background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok-border); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); }
+.badge.fail { background: var(--fail-bg); color: var(--fail); border: 1px solid var(--fail-border); }
+.badge.info { background: var(--info-bg); color: var(--info); border: 1px solid var(--info-border); }
+.badge.neutral { background: var(--bg-elevated); color: var(--ink-dim); border: 1px solid var(--border); }
+
+/* ===== Value styling ===== */
+.val-add { color: var(--ok); font-weight: 600; }
+.val-rem { color: var(--fail); font-weight: 600; text-decoration: line-through; opacity: 0.7; }
+.val-mod { color: var(--warn); font-weight: 600; }
+.val-miss { color: var(--ink-dim); font-style: italic; }
+
+/* ===== Banner ===== */
+.banner { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.75rem 1rem; border-radius: var(--radius-sm); margin-bottom: 0.75rem; font-size: 0.84rem; line-height: 1.5; }
+.banner.ok { background: var(--ok-bg); border: 1px solid var(--ok-border); color: #6ee7b7; }
+.banner.warn { background: var(--warn-bg); border: 1px solid var(--warn-border); color: #fcd34d; }
+.banner.fail { background: var(--fail-bg); border: 1px solid var(--fail-border); color: #fca5a5; }
+.banner.info { background: var(--info-bg); border: 1px solid var(--info-border); color: #93c5fd; }
+
+/* ===== Sub heading ===== */
+.sub-head { font-family: var(--font-display); font-size: 0.88rem; font-weight: 600; margin: 1rem 0 0.5rem; color: var(--ink); }
+.sub-head .sh-count-inline { font-size: 0.72rem; font-weight: 500; color: var(--ink-dim); margin-left: 0.4rem; }
 
 /* ===== Component Cards ===== */
 .comp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.8rem; margin-bottom: 1rem; }
-.comp-card {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem;
-  border-top: 3px solid var(--ok);
-}
+.comp-card { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem; border-top: 3px solid var(--ok); transition: border-color 0.2s; }
+.comp-card:hover { border-color: var(--border-bright); }
 .comp-card.missing { border-top-color: var(--fail); background: var(--fail-bg); }
 .comp-card.warn { border-top-color: var(--warn); }
-.comp-card .comp-name { font-weight: 700; font-size: 0.9rem; margin-bottom: 0.3rem; }
-.comp-card .comp-version { font-family: var(--mono); font-size: 0.82rem; color: var(--muted); word-break: break-all; }
-.comp-card .comp-meta { font-size: 0.75rem; color: var(--muted); margin-top: 0.3rem; }
-
-/* ===== Banner ===== */
-.banner {
-  border-radius: 8px;
-  padding: 0.8rem 1rem;
-  margin-bottom: 1rem;
-  font-size: 0.88rem;
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-}
-.banner.warn { background: var(--warn-bg); border: 1px solid #fde68a; color: #92400e; }
-.banner.fail { background: var(--fail-bg); border: 1px solid #fecaca; color: #991b1b; }
-.banner.info { background: var(--info-bg); border: 1px solid #bfdbfe; color: #1e40af; }
-.banner.ok { background: var(--ok-bg); border: 1px solid #bbf7d0; color: #166534; }
+.comp-card .comp-name { font-family: var(--font-display); font-weight: 600; font-size: 0.9rem; margin-bottom: 0.3rem; color: var(--ink-bright); }
+.comp-card .comp-version { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink-muted); word-break: break-all; }
+.comp-card .comp-meta { font-size: 0.75rem; color: var(--ink-dim); margin-top: 0.3rem; }
 
 /* ===== Collapsible ===== */
-details { margin-top: 0.5rem; }
-summary {
-  cursor: pointer;
-  font-size: 0.85rem;
-  color: var(--info);
-  padding: 0.5rem 0;
-  user-select: none;
-}
-summary:hover { text-decoration: underline; }
-details[open] summary { margin-bottom: 0.5rem; }
+details { margin-top: 0.6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+summary { cursor: pointer; padding: 0.6rem 1rem; font-size: 0.82rem; font-weight: 500; color: var(--accent); background: var(--bg-elevated); user-select: none; transition: background 0.2s; }
+summary:hover { background: rgba(30,41,59,0.6); }
+details[open] summary { border-bottom: 1px solid var(--border); }
+details > .details-body { padding: 0.5rem 0; }
 
-/* ===== Code Block ===== */
-pre.cmd {
-  background: #0f172a;
-  color: #e2e8f0;
-  font-family: var(--mono);
-  font-size: 0.82rem;
-  padding: 0.8rem 1rem;
-  border-radius: 6px;
-  overflow-x: auto;
-  margin: 0.5rem 0;
-}
+/* ===== Empty state ===== */
+.empty { text-align: center; padding: 1.5rem; color: var(--ink-dim); font-size: 0.85rem; }
+.empty .em-icon { font-size: 1.6rem; margin-bottom: 0.3rem; opacity: 0.3; }
 
-/* ===== Diagnosis List ===== */
+/* ===== Missing item ===== */
+.missing-list { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+.missing-item { background: var(--info-bg); border: 1px dashed var(--info-border); border-radius: var(--radius-sm); padding: 0.65rem 0.85rem; font-size: 0.82rem; color: #93c5fd; }
+.missing-item strong { color: #bfdbfe; }
+
+/* ===== Code block ===== */
+.code-block { background: #050810; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.7rem 1rem; font-family: var(--font-mono); font-size: 0.78rem; color: #a5b4fc; overflow-x: auto; margin: 0.4rem 0; }
+
+/* ===== Issue list ===== */
 .issue-list { list-style: none; }
-.issue-item {
-  display: flex;
-  gap: 0.8rem;
-  padding: 0.8rem;
-  border-radius: 8px;
-  margin-bottom: 0.5rem;
-  align-items: flex-start;
-}
+.issue-item { display: flex; gap: 0.8rem; padding: 0.75rem; border-radius: var(--radius-sm); margin-bottom: 0.5rem; align-items: flex-start; }
 .issue-item.high { background: var(--fail-bg); border-left: 4px solid var(--fail); }
 .issue-item.medium { background: var(--warn-bg); border-left: 4px solid var(--warn); }
 .issue-item.low { background: var(--info-bg); border-left: 4px solid var(--info); }
-.issue-priority { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; padding: 0.1em 0.5em; border-radius: 8px; white-space: nowrap; }
+.issue-priority { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; padding: 0.1em 0.5em; border-radius: 6px; white-space: nowrap; }
 .issue-priority.high { background: var(--fail); color: #fff; }
 .issue-priority.medium { background: var(--warn); color: #fff; }
 .issue-priority.low { background: var(--info); color: #fff; }
 .issue-text { flex: 1; }
-.issue-text .issue-title { font-weight: 600; margin-bottom: 0.2rem; }
-.issue-text .issue-rec { font-size: 0.85rem; color: var(--muted); }
-
-/* ===== Missing Section ===== */
-.missing-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }
-.missing-item { background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 0.8rem; }
-.missing-item .m-name { font-weight: 600; font-size: 0.88rem; margin-bottom: 0.3rem; }
+.issue-text .issue-title { font-weight: 600; margin-bottom: 0.2rem; color: var(--ink-bright); }
+.issue-text .issue-rec { font-size: 0.82rem; color: var(--ink-muted); }
 
 /* ===== Footer ===== */
-.footer { text-align: center; color: var(--muted); font-size: 0.82rem; padding: 2rem 0; }
+.footer { text-align: center; color: var(--ink-dim); font-size: 0.78rem; padding: 2rem 0; }
 
-@media (max-width: 768px) {
-  .container { padding: 1rem; }
-  .header { padding: 1.5rem; }
-  .header-top { flex-direction: column; }
-  .cards-grid { grid-template-columns: 1fr 1fr; }
+/* ===== Mobile ===== */
+.sidebar-toggle { display: none; position: fixed; top: 1rem; left: 1rem; z-index: 101; width: 40px; height: 40px; border-radius: 8px; background: var(--bg-elevated); border: 1px solid var(--border-bright); color: var(--ink); font-size: 1.2rem; cursor: pointer; align-items: center; justify-content: center; }
+@media (max-width: 900px) {
+  .sidebar { transform: translateX(-100%); }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar-toggle { display: flex; }
+  .main { margin-left: 0; padding: 1rem 1rem 1rem 4rem; }
   .comp-grid { grid-template-columns: 1fr; }
-  .missing-grid { grid-template-columns: 1fr; }
+  .missing-list { grid-template-columns: 1fr; }
+  .stat-strip { grid-template-columns: 1fr 1fr; }
 }
+@media (max-width: 500px) { .stat-strip { grid-template-columns: 1fr; } .hero { padding: 1.25rem; } .main { padding: 0.75rem; } }
 </style>
 </head>
 <body>
-<div class="container">
 
-<!-- ===== HEADER ===== -->
-<div class="header">
-  <div class="header-top">
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle navigation">&#9776;</button>
+
+<!-- ===== SIDEBAR ===== -->
+<nav class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <div class="sidebar-logo">
+      <span class="dot"></span>
+      <div>
+        Ascend 环境报告
+        <div class="sub">Single Dump Analyzer</div>
+      </div>
+    </div>
+  </div>
+  <div class="sidebar-nav" id="nav">
+    {{NAV_ITEMS}}
+  </div>
+  <div class="sidebar-footer">
+    {{TOOL_NAME}} v{{TOOL_VERSION}}<br>{{REPORT_DATE}}
+  </div>
+</nav>
+
+<!-- ===== MAIN ===== -->
+<div class="main">
+
+<!-- ===== HERO ===== -->
+<section class="hero" id="hero">
+  <div class="hero-top">
     <div>
       <h1>{{HOSTNAME}}</h1>
       <div class="subtitle">Ascend 环境分析报告</div>
-      <div class="header-meta">
-        <span>📅 {{TIMESTAMP}}</span>
-        <span>⏱ {{DURATION}}s</span>
-        <span>🐍 Python {{PYTHON_VERSION}}</span>
-        <span>📋 {{COLLECTION_SCOPE}}</span>
+      <div class="hero-meta">
+        <span>{{TIMESTAMP}}</span>
+        <span>{{DURATION}}s</span>
+        <span>Python {{PYTHON_VERSION}}</span>
+        <span>{{COLLECTION_SCOPE}}</span>
       </div>
     </div>
-    <div class="health-ring" style="background: conic-gradient(var(--ok) 0deg, var(--border) 0deg);">
-      <div class="score">{{HEALTH_SCORE}}</div>
-      <div class="label">健康度</div>
+    <div class="score-ring">
+      {{SCORE_RING_SVG}}
+      <div class="score-text">
+        <div class="score-num" style="color: {{SCORE_COLOR}};">{{HEALTH_SCORE}}</div>
+        <div class="score-label">健康度</div>
+      </div>
     </div>
   </div>
-</div>
+</section>
 
-<!-- ===== HEALTH CARDS ===== -->
-<div class="cards-grid">
-  <div class="stat-card ok">
-    <div class="stat-icon">🖥️</div>
-    <div class="stat-title">系统</div>
-    <div class="stat-value">{{SYSTEM_STATUS}}</div>
-    <div class="stat-sub">{{CPU_MODEL}}</div>
-  </div>
-  <div class="stat-card warn">
-    <div class="stat-icon">⚡</div>
-    <div class="stat-title">Ascend 组件</div>
-    <div class="stat-value">{{COMPONENTS_INSTALLED}}/7</div>
-    <div class="stat-sub">{{COMPONENTS_DETAIL}}</div>
-  </div>
-  <div class="stat-card fail">
-    <div class="stat-icon">🔑</div>
-    <div class="stat-title">环境变量</div>
-    <div class="stat-value">{{ENV_CRITICAL_SET}}/11</div>
-    <div class="stat-sub">关键变量已设置</div>
-  </div>
-  <div class="stat-card ok">
-    <div class="stat-icon">🌐</div>
-    <div class="stat-title">网络</div>
-    <div class="stat-value">{{NETWORK_STATUS}}</div>
-    <div class="stat-sub">{{NETWORK_DETAIL}}</div>
-  </div>
-</div>
+<!-- ===== HEALTH STAT TILES ===== -->
+<section class="stat-strip" id="stats">
+  {{STAT_TILES}}
+</section>
+
+<!-- ===== ASSESSMENT BANNER ===== -->
+{{ASSESSMENT_BANNER}}
 
 <!-- ===== SYSTEM HEALTH ===== -->
-<div class="section">
-  <div class="section-title"><span class="icon">🖥️</span> 系统健康检查</div>
-  <table>
-    <thead>
-      <tr><th>检查项</th><th>当前值</th><th>期望值</th><th>状态</th><th>说明</th></tr>
-    </thead>
-    <tbody>
-      <!-- Repeat for each system check -->
-      <tr>
-        <td>CPU 型号</td>
-        <td><code>{{CPU_MODEL}}</code></td>
-        <td>—</td>
-        <td><span class="badge ok">OK</span></td>
-        <td>{{CPU_NOTES}}</td>
-      </tr>
-      <tr>
-        <td>架构</td>
-        <td><code>{{ARCH}}</code></td>
-        <td>aarch64 / x86_64</td>
-        <td><span class="badge ok">OK</span></td>
-        <td>{{ARCH_NOTES}}</td>
-      </tr>
-      <tr>
-        <td>CPU 高性能模式</td>
-        <td><code>{{HIGH_PERF}}</code></td>
-        <td>true</td>
-        <td><span class="badge {{HIGH_PERF_BADGE}}">{{HIGH_PERF_STATUS}}</span></td>
-        <td>{{HIGH_PERF_NOTES}}</td>
-      </tr>
-      <tr>
-        <td>虚拟化检测</td>
-        <td><code>{{VM}}</code></td>
-        <td>false</td>
-        <td><span class="badge {{VM_BADGE}}">{{VM_STATUS}}</span></td>
-        <td>{{VM_NOTES}}</td>
-      </tr>
-      <tr>
-        <td>内核版本</td>
-        <td><code>{{KERNEL_RELEASE}}</code></td>
-        <td>≥ 5.10</td>
-        <td><span class="badge ok">OK</span></td>
-        <td>{{KERNEL_NOTES}}</td>
-      </tr>
-      <tr>
-        <td>透明大页 (THP)</td>
-        <td><code>{{THP}}</code></td>
-        <td>always</td>
-        <td><span class="badge {{THP_BADGE}}">{{THP_STATUS}}</span></td>
-        <td>{{THP_NOTES}}</td>
-      </tr>
-      <tr>
-        <td>内存页大小</td>
-        <td><code>{{PAGE_SIZE}}</code></td>
-        <td>4096</td>
-        <td><span class="badge ok">OK</span></td>
-        <td>标准 4K 页</td>
-      </tr>
-      <tr>
-        <td>内存 Overcommit</td>
-        <td><code>{{OVERCOMMIT}}</code></td>
-        <td>0 或 1</td>
-        <td><span class="badge {{OVERCOMMIT_BADGE}}">{{OVERCOMMIT_STATUS}}</span></td>
-        <td>{{OVERCOMMIT_NOTES}}</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-<!-- ===== ASCEND COMPONENTS ===== -->
-<div class="section">
-  <div class="section-title"><span class="icon">⚡</span> Ascend 组件版本</div>
-
-  <!-- Version Consistency Warning (if any) -->
-  <div class="banner warn">
-    ⚠️ <div><strong>版本一致性警告：</strong>{{VERSION_MISMATCH_DETAIL}}</div>
+<section class="section" id="system">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🖥</span> 系统健康检查</div>
+    <span class="sh-count">{{SYSTEM_OK_COUNT}}/{{SYSTEM_TOTAL_COUNT}} OK</span>
   </div>
-
-  <!-- Component Cards -->
-  <div class="comp-grid">
-    <!-- Repeat for each component -->
-    <div class="comp-card">
-      <div class="comp-name">driver</div>
-      <div class="comp-version">{{DRIVER_VERSION}}</div>
-      <div class="comp-meta">{{DRIVER_META}}</div>
-      <div style="margin-top:0.5rem"><span class="badge ok">OK</span></div>
-    </div>
-    <div class="comp-card missing">
-      <div class="comp-name">mindie</div>
-      <div class="comp-version">未找到</div>
-      <div class="comp-meta">version.info 不存在</div>
-      <div style="margin-top:0.5rem"><span class="badge fail">MISSING</span></div>
-    </div>
-  </div>
-
-  <!-- Version Consistency Matrix -->
-  <h4 style="margin-top:1rem;margin-bottom:0.5rem;color:var(--muted);font-size:0.9rem;">版本一致性检查</h4>
-  <table>
-    <thead>
-      <tr><th>组件对比</th><th>版本 A</th><th>版本 B</th><th>状态</th></tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>toolkit vs opp_kernel</td>
-        <td><code>8.2.RC1</code></td>
-        <td><code>8.2.RC1</code></td>
-        <td><span class="badge ok">一致</span></td>
-      </tr>
-      <tr>
-        <td>toolkit vs mindstudio_toolkit</td>
-        <td><code>8.2.RC1</code></td>
-        <td><code>8.1.RC1</code></td>
-        <td><span class="badge warn">不一致</span></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-<!-- ===== ENVIRONMENT VARIABLES ===== -->
-<div class="section">
-  <div class="section-title"><span class="icon">🔑</span> 环境变量分析</div>
-
-  <!-- Sensitive Variable Warning (if unfiltered) -->
-  <div class="banner warn">
-    🔒 <div><strong>敏感变量提示：</strong>本次采集未使用 <code>--filter</code>，发现 {{SENSITIVE_COUNT}} 个疑似敏感变量。建议分享前使用 <code>--filter</code> 重新采集或手动脱敏。</div>
-  </div>
-
-  <h4 style="margin-bottom:0.5rem;color:var(--muted);font-size:0.9rem;">关键 Ascend 环境变量</h4>
-  <table>
-    <thead>
-      <tr><th>变量名</th><th>用途</th><th>状态</th><th>值</th></tr>
-    </thead>
-    <tbody>
-      <!-- Repeat for each critical env var -->
-      <tr>
-        <td><code>ASCEND_HOME_PATH</code></td>
-        <td>Ascend 驱动主路径</td>
-        <td><span class="badge fail">缺失</span></td>
-        <td>—</td>
-      </tr>
-      <tr>
-        <td><code>ASCEND_TOOLKIT_HOME</code></td>
-        <td>CANN toolkit 主路径</td>
-        <td><span class="badge fail">缺失</span></td>
-        <td>—</td>
-      </tr>
-      <tr>
-        <td><code>MINDIE_LLM_HOME_PATH</code></td>
-        <td>MindIE-LLM 安装路径</td>
-        <td><span class="badge fail">缺失</span></td>
-        <td>— <em>与 mindie 组件为空一致，MindIE 可能未安装</em></td>
-      </tr>
-    </tbody>
-  </table>
-
-  <!-- Full Env Vars (Collapsible) -->
-  <details>
-    <summary>查看全部环境变量 ({{ENV_TOTAL_COUNT}} 项)</summary>
+  <div class="table-wrap">
     <table>
-      <thead><tr><th>变量名</th><th>值</th></tr></thead>
+      <thead><tr><th>检查项</th><th>当前值</th><th>期望值</th><th>状态</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td><code>SHELL</code></td><td>/bin/bash</td></tr>
-        <tr><td><code>PATH</code></td><td style="word-break:break-all">/root/.local/share/pnpm/bin:...</td></tr>
+        {{SYSTEM_HEALTH_ROWS}}
       </tbody>
     </table>
+  </div>
+</section>
+
+<!-- ===== ASCEND COMPONENTS ===== -->
+<section class="section" id="ascend">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">⚡</span> Ascend 组件版本</div>
+    <span class="sh-count">{{COMPONENTS_INSTALLED}}/7 已安装</span>
+  </div>
+
+  {{VERSION_MISMATCH_BANNER}}
+
+  <div class="comp-grid">
+    {{COMPONENT_CARDS}}
+  </div>
+
+  <div class="sub-head">版本一致性检查</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>组件对比</th><th>版本 A</th><th>版本 B</th><th>状态</th></tr></thead>
+      <tbody>
+        {{VERSION_CONSISTENCY_ROWS}}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ===== ENVIRONMENT VARIABLES ===== -->
+<section class="section" id="env">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🔑</span> 环境变量分析</div>
+    <span class="sh-count">{{ENV_CRITICAL_SET}}/11 关键变量</span>
+  </div>
+
+  {{SENSITIVE_VAR_BANNER}}
+
+  <div class="sub-head">关键 Ascend 环境变量</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>变量名</th><th>用途</th><th>状态</th><th>值 / 说明</th></tr></thead>
+      <tbody>
+        {{CRITICAL_ENV_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <details>
+    <summary>查看全部环境变量 ({{ENV_TOTAL_COUNT}} 项)</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>变量名</th><th>值</th></tr></thead>
+          <tbody>
+            {{ALL_ENV_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
   </details>
-</div>
+</section>
+
+<!-- ===== CONFIG ANALYSIS (conditional) ===== -->
+{{CONFIG_SECTION}}
+
+<!-- ===== NETWORK STATUS (conditional) ===== -->
+{{NETWORK_SECTION}}
+
+<!-- ===== WEIGHTS (conditional) ===== -->
+{{WEIGHT_SECTION}}
 
 <!-- ===== MISSING SECTIONS ===== -->
-<div class="section">
-  <div class="section-title"><span class="icon">📋</span> 未采集项</div>
-  <div class="banner info">
-    💡 <div>以下信息未采集，建议补充采集以获得更完整的分析。</div>
+<section class="section" id="missing">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">📦</span> 未采集项</div>
   </div>
-  <div class="missing-grid">
-    <div class="missing-item">
-      <div class="m-name">MindIE 服务配置</div>
-      <pre class="cmd">python3 msprechecker_dump.py --mies-config-path &lt;path&gt;</pre>
-    </div>
-    <div class="missing-item">
-      <div class="m-name">网络与 HCCL</div>
-      <pre class="cmd">python3 msprechecker_dump.py --rank-table-path &lt;path&gt; --scene mindie</pre>
-    </div>
-    <div class="missing-item">
-      <div class="m-name">模型权重哈希</div>
-      <pre class="cmd">python3 msprechecker_dump.py --weight-dir &lt;path&gt;</pre>
-    </div>
-    <div class="missing-item">
-      <div class="m-name">user_config / mindie_env</div>
-      <pre class="cmd">python3 msprechecker_dump.py --user-config-path &lt;path&gt;</pre>
-    </div>
+  <div class="banner info">ℹ️ <div>以下信息未采集，建议补充采集以获得更完整的分析。</div></div>
+  <div class="missing-list">
+    {{MISSING_ITEMS}}
   </div>
-</div>
+</section>
 
 <!-- ===== DIAGNOSIS ===== -->
-<div class="section">
-  <div class="section-title"><span class="icon">🔬</span> 综合诊断</div>
+<section class="section" id="diagnosis">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🔬</span> 综合诊断</div>
+  </div>
 
   <ul class="issue-list">
-    <li class="issue-item high">
-      <span class="issue-priority high">高</span>
-      <div class="issue-text">
-        <div class="issue-title">MindIE 未安装</div>
-        <div class="issue-rec">mindie 组件采集为空且 MINDIE_LLM_HOME_PATH 未设置。如需部署推理服务，需安装 MindIE。</div>
-      </div>
-    </li>
-    <li class="issue-item high">
-      <span class="issue-priority high">高</span>
-      <div class="issue-text">
-        <div class="issue-title">全部 Ascend 环境变量未设置</div>
-        <div class="issue-rec">执行 <code>source /usr/local/Ascend/ascend-toolkit/set_env.sh</code> 初始化环境</div>
-      </div>
-    </li>
-    <li class="issue-item medium">
-      <span class="issue-priority medium">中</span>
-      <div class="issue-text">
-        <div class="issue-title">mindstudio_toolkit 版本不匹配 (8.1 vs 8.2)</div>
-        <div class="issue-rec">升级到 8.2 系列以保持与 toolkit 版本一致</div>
-      </div>
-    </li>
-    <li class="issue-item medium">
-      <span class="issue-priority medium">中</span>
-      <div class="issue-text">
-        <div class="issue-title">Driver 为 RC 版本 (26.0.rc1)</div>
-        <div class="issue-rec">生产环境建议使用正式发布版本</div>
-      </div>
-    </li>
+    {{ISSUE_ITEMS}}
   </ul>
 
-  <h4 style="margin-top:1rem;margin-bottom:0.5rem;color:var(--muted);font-size:0.9rem;">建议下一步</h4>
-  <pre class="cmd"># 1. 初始化 Ascend 环境
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
+  <div class="sub-head">建议下一步</div>
+  {{NEXT_STEPS_CODE}}
+</section>
 
-# 2. 重新采集验证
-python3 msprechecker_dump.py --filter -o /tmp/env_after.json</pre>
-</div>
+<!-- ===== RAW DATA ===== -->
+<section class="section" id="raw-data">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">📋</span> 原始采集数据</div>
+  </div>
+
+  <div class="sub-head">采集元数据 (_meta)</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>指标</th><th>数值</th><th>说明</th></tr></thead>
+      <tbody>
+        {{META_DATA_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sub-head">系统信息 (system)</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>指标</th><th>数值</th><th>说明</th></tr></thead>
+      <tbody>
+        {{SYSTEM_DATA_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sub-head">Ascend 组件 (ascend)</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>组件</th><th>版本</th><th>时间戳 / Commit</th><th>说明</th></tr></thead>
+      <tbody>
+        {{ASCEND_DATA_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sub-head">环境变量 (env) — 关键变量</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>变量名</th><th>数值</th><th>说明</th></tr></thead>
+      <tbody>
+        {{ENV_KEY_DATA_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <details>
+    <summary>查看全部环境变量 ({{ENV_TOTAL_COUNT}} 项)</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>变量名</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {{ALL_ENV_DATA_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  {{RAW_DATA_SUMMARY_BANNER}}
+</section>
 
 <div class="footer">
-  本报告由 ascend-dump-analyzer skill 生成 · 数据来源：msprechecker_dump.py · {{TIMESTAMP}}
+  {{TOOL_NAME}} · {{TOOL_VERSION}} · {{REPORT_TIMESTAMP}}
 </div>
 
-</div>
+</div><!-- /main -->
+
+<script>
+// Scroll-spy navigation
+(function() {
+  var sections = document.querySelectorAll('section[id]');
+  var navLinks = document.querySelectorAll('.nav-item');
+  var navMap = {};
+
+  navLinks.forEach(function(link) {
+    var href = link.getAttribute('href');
+    if (href && href.startsWith('#')) {
+      navMap[href.substring(1)] = link;
+    }
+  });
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        var id = entry.target.id;
+        navLinks.forEach(function(l) { l.classList.remove('active'); });
+        if (navMap[id]) {
+          navMap[id].classList.add('active');
+        }
+      }
+    });
+  }, {
+    rootMargin: '-20% 0px -60% 0px',
+    threshold: 0
+  });
+
+  sections.forEach(function(s) { observer.observe(s); });
+
+  navLinks.forEach(function(link) {
+    link.addEventListener('click', function() {
+      if (window.innerWidth <= 900) {
+        document.querySelector('.sidebar').classList.remove('open');
+      }
+    });
+  });
+})();
+</script>
+
 </body>
 </html>
