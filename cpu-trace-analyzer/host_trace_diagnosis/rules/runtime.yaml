@@ -1,0 +1,63 @@
+# Runtime 同步与 Launch 间隙规则
+# ================================
+# 检测 Runtime 层同步阻塞、kernel launch 间隙过大等问题。
+
+- rule_id: RT001
+  category: Runtime同步阻塞
+  severity: HIGH
+  scalar_conditions:
+    launch_avg_gap_us:
+      op: gt
+      value: 800
+      weight: 0.15
+  temporal_patterns:
+    - pattern: sync_wait_pattern
+      description: "存在stream sync或event wait导致的阻塞等待"
+      weight: 0.25
+  correlation_evidence:
+    - gap_attribution_contains: RUNTIME_BLOCK
+      min_ratio: 0.15
+      weight: 0.6
+  confidence_threshold: 0.5
+  diagnosis: "Runtime层同步操作（如stream sync/event wait）阻塞了kernel提交"
+  suggestions:
+    - text: "减少不必要的同步操作，避免频繁的stream synchronize"
+      priority: 1
+    - text: "使用异步event替代stream sync，实现更细粒度的同步"
+      priority: 2
+    - text: "合并小kernel减少同步次数，降低同步开销"
+      priority: 3
+    - text: "检查是否存在不必要的aclrtSynchronizeStream调用"
+      priority: 4
+
+- rule_id: RT002
+  category: Kernel Launch间隙
+  severity: MEDIUM
+  scalar_conditions:
+    launch_avg_gap_us:
+      op: gt
+      value: 1000
+      weight: 0.3
+    launch_count:
+      op: gt
+      value: 100000
+      weight: 0.1
+  temporal_patterns:
+    - pattern: launch_gap_pattern
+      description: "kernel launch间隙出现规律性大间隔，Host提交效率低"
+      weight: 0.2
+  correlation_evidence:
+    - gap_attribution_contains: LAUNCH_GAP
+      min_ratio: 0.20
+      weight: 0.4
+  confidence_threshold: 0.5
+  diagnosis: "Kernel Launch间隙过大，Host侧提交kernel的效率低下"
+  suggestions:
+    - text: "使用graph capture将kernel序列编译为静态图，减少launch开销"
+      priority: 1
+    - text: "批量化操作，减少单个kernel的launch次数"
+      priority: 2
+    - text: "减少Python层开销，将热点路径下沉到C++实现"
+      priority: 3
+    - text: "检查是否存在Python GIL导致的launch延迟"
+      priority: 4

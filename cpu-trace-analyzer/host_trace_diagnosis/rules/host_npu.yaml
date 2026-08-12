@@ -1,0 +1,69 @@
+# Host-NPU 协同规则
+# ===================
+# 检测 Host 饥饿导致 NPU 空闲、DataLoader 瓶颈等问题。
+
+- rule_id: HN001
+  category: Host饥饿
+  severity: CRITICAL
+  scalar_conditions:
+    correlation_score:
+      op: gt
+      value: 0.6
+      weight: 0.35
+    attribution_sum:
+      op: gt
+      value: 0.5
+      weight: 0.35
+  temporal_patterns:
+    - pattern: launch_gap_pattern
+      description: "Host侧kernel提交出现大间隔，NPU频繁空闲"
+      weight: 0.1
+  correlation_evidence:
+    - gap_attribution_contains: CPU_SCHED
+      min_ratio: 0.10
+      weight: 0.2
+  confidence_threshold: 0.5
+  diagnosis: "Host侧资源不足导致NPU频繁空闲，存在明显的Host饥饿现象"
+  suggestions:
+    - text: "优化Host侧数据准备流水线，提升数据供给速度"
+      priority: 1
+    - text: "减少CPU竞争，为Runtime线程预留专用核心"
+      priority: 2
+    - text: "提升kernel提交频率，使用异步提交减少阻塞"
+      priority: 3
+    - text: "检查是否存在多卡场景下的Host资源争用"
+      priority: 4
+
+- rule_id: HN002
+  category: DataLoader瓶颈
+  severity: HIGH
+  scalar_conditions:
+    cpu_util_avg:
+      op: gt
+      value: 70
+      weight: 0.15
+    correlation_score:
+      op: gt
+      value: 0.4
+      weight: 0.15
+  temporal_patterns:
+    - pattern: runqueue_spike_during_npu_idle
+      description: "DataLoader worker竞争CPU期间NPU出现空闲gap"
+      weight: 0.2
+  correlation_evidence:
+    - gap_attribution_contains: DATA_LOADER
+      min_ratio: 0.20
+      weight: 0.5
+  confidence_threshold: 0.5
+  diagnosis: "DataLoader成为瓶颈，数据准备速度无法匹配NPU计算速度"
+  suggestions:
+    - text: "增加num_workers数量，并行化数据加载"
+      priority: 1
+    - text: "使用persistent_workers避免worker反复创建销毁"
+      priority: 2
+    - text: "启用prefetch_factor提前预取数据"
+      priority: 3
+    - text: "使用更高效的数据格式（如HDF5/WebDataset）"
+      priority: 4
+    - text: "将数据预处理移至Device侧执行"
+      priority: 5

@@ -1,0 +1,65 @@
+# 内存拷贝与带宽规则
+# ====================
+# 检测 H2D/D2H 拷贝瓶颈、同步拷贝阻塞计算等问题。
+
+- rule_id: MEM001
+  category: H2D拷贝瓶颈
+  severity: HIGH
+  scalar_conditions:
+    h2d_bandwidth_mbs:
+      op: lt
+      value: 500
+      weight: 0.3
+    memcpy_total_us:
+      op: gt
+      value: 500000
+      weight: 0.1
+  temporal_patterns:
+    - pattern: h2d_memcpy_blocking
+      description: "H2D拷贝期间Device出现空闲gap，数据传输阻塞计算"
+      weight: 0.2
+  correlation_evidence:
+    - gap_attribution_contains: MEMCPY
+      min_ratio: 0.20
+      weight: 0.4
+  confidence_threshold: 0.5
+  diagnosis: "Host到Device的数据拷贝带宽不足，成为训练吞吐瓶颈"
+  suggestions:
+    - text: "使用异步拷贝aclrtMemcpyAsync替代同步拷贝"
+      priority: 1
+    - text: "增加数据prefetch深度，提前发起H2D传输"
+      priority: 2
+    - text: "使用pinned memory减少拷贝路径开销"
+      priority: 3
+    - text: "考虑使用共享内存或统一内存减少跨设备传输"
+      priority: 4
+
+- rule_id: MEM002
+  category: 内存拷贝阻塞计算
+  severity: MEDIUM
+  scalar_conditions:
+    memcpy_total_us:
+      op: gt
+      value: 1000000
+      weight: 0.3
+    cpu_util_avg:
+      op: lt
+      value: 50
+      weight: 0.2
+  temporal_patterns:
+    - pattern: h2d_memcpy_blocking
+      description: "同步拷贝阻塞期间CPU利用率偏低，处于等待状态"
+      weight: 0.2
+  correlation_evidence:
+    - gap_attribution_contains: MEMCPY
+      min_ratio: 0.10
+      weight: 0.3
+  confidence_threshold: 0.5
+  diagnosis: "同步内存拷贝阻塞了计算流水线，CPU大量时间用于拷贝等待"
+  suggestions:
+    - text: "使用异步拷贝替代同步拷贝，将传输与计算重叠"
+      priority: 1
+    - text: "流水线化数据传输，实现多stage prefetch"
+      priority: 2
+    - text: "减少不必要的Host-Device数据传输，尽量在Device上保持数据"
+      priority: 3

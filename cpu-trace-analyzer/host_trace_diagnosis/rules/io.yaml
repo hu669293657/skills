@@ -1,0 +1,31 @@
+# IO 等待规则
+# ============
+# 检测 IO 等待阻塞数据加载流程的问题。
+
+- rule_id: IO001
+  category: IO等待
+  severity: MEDIUM
+  scalar_conditions:
+    cpu_idle_avg:
+      op: gt
+      value: 30
+      weight: 0.2
+  temporal_patterns:
+    - pattern: io_wait_blocking
+      description: "IO等待期间CPU处于idle状态，数据加载停滞"
+      weight: 0.3
+  correlation_evidence:
+    - gap_attribution_contains: IO_WAIT
+      min_ratio: 0.15
+      weight: 0.5
+  confidence_threshold: 0.5
+  diagnosis: "IO等待阻塞了数据加载流程，导致Device空闲等待数据"
+  suggestions:
+    - text: "使用内存映射文件(mmap)减少数据拷贝和IO等待"
+      priority: 1
+    - text: "增加数据预取深度，提前加载后续batch数据"
+      priority: 2
+    - text: "使用更快的存储介质（SSD/NVMe）或分布式缓存"
+      priority: 3
+    - text: "使用多进程数据加载避免GIL限制"
+      priority: 4

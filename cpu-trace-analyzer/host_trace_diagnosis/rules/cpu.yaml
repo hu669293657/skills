@@ -1,0 +1,64 @@
+# CPU 调度与负载均衡规则
+# ========================
+# 检测 CPU 调度瓶颈、负载不均等问题。
+# value 为 "auto" 的阈值会被引擎替换为实际 CPU 核心数。
+
+- rule_id: CPU001
+  category: CPU调度
+  severity: HIGH
+  scalar_conditions:
+    runqueue_avg:
+      op: gt
+      value: "auto"
+      weight: 0.3
+    sched_latency_p99_us:
+      op: gt
+      value: 5000
+      weight: 0.2
+  temporal_patterns:
+    - pattern: runqueue_spike_during_npu_idle
+      description: "NPU空闲期间runqueue出现尖峰，表明Host侧线程竞争激烈"
+      weight: 0.2
+  correlation_evidence:
+    - gap_attribution_contains: CPU_SCHED
+      min_ratio: 0.20
+      weight: 0.3
+  confidence_threshold: 0.6
+  diagnosis: "CPU调度瓶颈导致Runtime线程无法及时提交kernel"
+  suggestions:
+    - text: "检查OMP_NUM_THREADS是否过大导致CPU竞争"
+      priority: 1
+    - text: "设置CPU affinity将Runtime线程与DataLoader隔离"
+      priority: 2
+    - text: "降低DataLoader的num_workers数量，避免过度订阅CPU"
+      priority: 3
+
+- rule_id: CPU002
+  category: CPU负载不均衡
+  severity: MEDIUM
+  scalar_conditions:
+    cpu_balance_score:
+      op: lt
+      value: 0.5
+      weight: 0.35
+    cpu_util_max:
+      op: gt
+      value: 90
+      weight: 0.15
+  temporal_patterns:
+    - pattern: cpu_util_imbalance
+      description: "CPU利用率在核心间分布不均，存在热点核心"
+      weight: 0.2
+  correlation_evidence:
+    - gap_attribution_contains: CPU_SCHED
+      min_ratio: 0.10
+      weight: 0.3
+  confidence_threshold: 0.5
+  diagnosis: "CPU负载在核心间分布不均，部分核心过载导致调度延迟"
+  suggestions:
+    - text: "使用taskset或numactl绑定关键线程到特定核心"
+      priority: 1
+    - text: "检查是否存在NUMA远端内存访问导致的性能下降"
+      priority: 2
+    - text: "调整DataLoader worker的CPU亲和性，均衡负载分布"
+      priority: 3

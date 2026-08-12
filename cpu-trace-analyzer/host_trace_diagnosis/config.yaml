@@ -1,0 +1,94 @@
+# Host Trace Diagnosis - Global Configuration
+# ================================================
+
+# Layer 1: Parser settings
+parser:
+  # Format detection: read first N bytes to determine format
+  sniff_bytes: 4096
+  # Streaming batch size for large file processing
+  batch_size: 5000
+  # File size threshold (MB) above which streaming mode is forced
+  streaming_threshold_mb: 100
+  # Time window size (microseconds) for sharding very large traces
+  # 10 seconds per window by default
+  window_size_us: 10000000
+
+# Layer 2: IR storage settings
+ir:
+  # Intermediate storage format: parquet | arrow | jsonl
+  format: parquet
+  # Compression codec for Parquet
+  compression: zstd
+  # Whether to build a time index on ts column
+  build_time_index: true
+  # Parquet row group size
+  row_group_size: 100000
+  # Use Perfetto TraceProcessor for SQL queries when available
+  use_perfetto: true
+  # Perfetto binary path (leave empty to auto-detect)
+  perfetto_path: ""
+
+# Layer 3: Feature extraction settings
+features:
+  # Gap detection
+  gap:
+    # Minimum gap duration to consider (microseconds)
+    # Gaps below this are considered normal stream switching overhead
+    min_gap_us: 100
+    # Gaps above this are considered significant
+    significant_gap_us: 1000
+    # Number of top gaps to retain for detailed analysis
+    top_n: 20
+    # Pareto threshold: retain gaps until cumulative coverage reaches this ratio
+    pareto_threshold: 0.8
+
+  # CPU metrics
+  cpu:
+    # Sliding window size for CPU utilization calculation (microseconds)
+    window_us: 1000000
+    # Step size for sliding window
+    step_us: 500000
+
+  # Correlation
+  correlation:
+    # Maximum time offset for Host-Device correlation (microseconds)
+    max_offset_us: 5000
+    # Minimum correlation coefficient to consider significant
+    min_coefficient: 0.6
+    # Number of host events to retrieve per gap window
+    max_host_events_per_gap: 5
+
+# Layer 4: Rule engine settings
+rules:
+  # Directory containing YAML rule files
+  rules_dir: "rules"
+  # Minimum confidence score to trigger a rule
+  default_confidence_threshold: 0.6
+
+# Layer 4: LLM Agent settings
+agent:
+  # Maximum tokens for LLM response
+  max_tokens: 4096
+  # Temperature for diagnosis reasoning
+  temperature: 0.1
+  # Whether to include full evidence chain in LLM prompt
+  include_evidence: true
+  # Whether to include optimization suggestions
+  include_suggestions: true
+
+# Layer 5: Report settings
+report:
+  # Output format: json | html | both
+  format: both
+  # Output directory for reports
+  output_dir: "reports"
+  # Whether to generate Host/Device timeline visualization
+  generate_timeline_viz: true
+  # Maximum number of gaps to show in timeline visualization
+  max_gaps_in_viz: 10
+
+# Logging
+logging:
+  level: INFO
+  # Log file path (empty for console only)
+  file: ""

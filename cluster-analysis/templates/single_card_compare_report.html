@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>双卡比对分析报告 - Rank {{RANK_A}} vs Rank {{RANK_B}}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+body { font-family: 'Inter', 'Microsoft YaHei', sans-serif; background-color: #0f172a; color: #f8fafc; }
+.card { background-color: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
+.text-gradient { background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-track { background: #0f172a; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+table th { background: #334155; color: #cbd5e1; } table td { border-bottom: 1px solid #334155; }
+table tr:hover { background: #334155; }
+.delta-up { color: #f87171; font-weight: 600; } .delta-down { color: #34d399; font-weight: 600; } .delta-neutral { color: #94a3b8; }
+</style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+<div class="max-w-7xl mx-auto space-y-6">
+
+<header class="flex flex-col md:flex-row justify-between items-start md:items-center pb-6 border-b border-slate-700">
+  <div>
+    <h1 class="text-3xl md:text-4xl font-bold bg-gradient-to-r from-red-400 to-orange-400 text-gradient">双卡性能比对报告</h1>
+    <p class="text-slate-400 mt-2 text-sm md:text-base">Rank {{RANK_A}} (基准) vs Rank {{RANK_B}} (对比) — 算子/Kernel/API 差异分析</p>
+  </div>
+  <div class="mt-4 md:mt-0 flex items-center space-x-2 bg-red-900/30 text-red-400 px-4 py-2 rounded-full border border-red-800">
+    <span class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span></span>
+    <span class="font-semibold text-sm">{{STATUS_TEXT}}</span>
+  </div>
+</header>
+<div class="text-xs text-slate-500 -mt-4 mb-2">A: {{PATH_A}} | B: {{PATH_B}} | 生成时间: {{GENERATE_TIME}}</div>
+
+<!-- KPI -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+  <div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm font-medium mb-1">Stage 耗时差异</div><div class="text-3xl font-bold {{STAGE_DELTA_COLOR}}">{{STAGE_DELTA_SIGN}}{{STAGE_DELTA_PCT}}%</div><div class="text-xs text-slate-500 mt-2">{{STAGE_A_MS}} → {{STAGE_B_MS}} ms</div><div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">⏱️</div></div>
+  <div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm font-medium mb-1">计算耗时差异</div><div class="text-3xl font-bold {{COMPUTE_DELTA_COLOR}}">{{COMPUTE_DELTA_SIGN}}{{COMPUTE_DELTA_PCT}}%</div><div class="text-xs text-slate-500 mt-2">ΔCompute = {{DELTA_COMPUTE_MS}} ms</div><div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">⚙️</div></div>
+  <div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm font-medium mb-1">通信耗时差异</div><div class="text-3xl font-bold {{COMM_DELTA_COLOR}}">{{COMM_DELTA_SIGN}}{{COMM_DELTA_PCT}}%</div><div class="text-xs text-slate-500 mt-2">ΔComm = {{DELTA_COMM_MS}} ms</div><div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">📡</div></div>
+  <div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm font-medium mb-1">Kernel 总数差异</div><div class="text-3xl font-bold text-blue-400">{{KERNEL_A}} → {{KERNEL_B}}</div><div class="text-xs text-slate-500 mt-2">ΔKernel = {{DELTA_KERNEL}}</div><div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">🔧</div></div>
+</div>
+
+<!-- 集群信息对比 -->
+<div class="card p-6 flex flex-col md:flex-row gap-8 items-center bg-slate-800/50">
+  <div class="flex-1 flex flex-col md:flex-row w-full gap-4">
+    <div class="flex-1 bg-slate-800 p-4 rounded-lg border border-slate-700">
+      <h3 class="text-emerald-400 font-semibold mb-3 flex items-center"><span class="w-2 h-2 rounded-full bg-emerald-400 mr-2"></span>Rank {{RANK_A}} (基准)</h3>
+      <div class="grid grid-cols-2 gap-2 text-sm">
+        <span class="text-slate-400">Step 数:</span> <span class="font-mono text-white">{{STEP_A}}</span>
+        <span class="text-slate-400">Kernel 数:</span> <span class="font-mono text-white">{{KERNEL_A}}</span>
+        <span class="text-slate-400">算子数:</span> <span class="font-mono text-white">{{OP_A}}</span>
+      </div>
+    </div>
+    <div class="flex-1 bg-slate-800 p-4 rounded-lg border border-slate-700">
+      <h3 class="text-red-400 font-semibold mb-3 flex items-center"><span class="w-2 h-2 rounded-full bg-red-400 mr-2"></span>Rank {{RANK_B}} (对比)</h3>
+      <div class="grid grid-cols-2 gap-2 text-sm">
+        <span class="text-slate-400">Step 数:</span> <span class="font-mono text-white">{{STEP_B}}</span>
+        <span class="text-slate-400">Kernel 数:</span> <span class="font-mono text-white">{{KERNEL_B}}</span>
+        <span class="text-slate-400">算子数:</span> <span class="font-mono text-white">{{OP_B}}</span>
+      </div>
+    </div>
+  </div>
+  <div class="w-full md:w-1/3 text-sm text-slate-300 border-l-0 md:border-l border-slate-600 pl-0 md:pl-6">
+    <p class="font-semibold text-white mb-2">诊断摘要：</p>{{DIAGNOSIS_TEXT}}
+  </div>
+</div>
+
+<!-- Step 时间对比 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">Step 时间对比 (ms)</h3>
+  <div id="chart-step" class="w-full h-80"></div>
+</div>
+
+<!-- 负载分布双饼图 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">负载分布对比</h3>
+  <div id="chart-pie" class="w-full h-72"></div>
+</div>
+
+<!-- Kernel 差异 Top10 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">Kernel 类型耗时差异 Top10</h3>
+  <div id="chart-kernel-diff" class="w-full h-80"></div>
+  <div id="kernel-diff-placeholder" style="display:none;text-align:center;padding:40px;color:#64748b;">无 Kernel 数据</div>
+</div>
+
+<!-- 算子差异表 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">算子耗时差异 Top20</h3>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead><tr><th class="text-left p-3">算子名</th><th class="text-right p-3">A Device(μs)</th><th class="text-right p-3">B Device(μs)</th><th class="text-right p-3">差值(μs)</th><th class="text-right p-3">变化率</th></tr></thead>
+      <tbody>{{OP_DIFF_ROWS}}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- API 差异 Top10 -->
+<div class="card p-6">
+  <h3 class="text-lg font-semibold text-slate-200 mb-4">API 耗时差异 Top10</h3>
+  <div id="chart-api-diff" class="w-full h-80"></div>
+  <div id="api-diff-placeholder" style="display:none;text-align:center;padding:40px;color:#64748b;">无 API 数据</div>
+</div>
+
+<!-- 根因 + 建议 -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 pb-10">
+  <div class="card p-6 border-t-4 border-t-red-500"><h3 class="text-lg font-bold text-white mb-4">劣化根因总结</h3><div class="space-y-3">{{DEGRADATION_ITEMS}}</div></div>
+  <div class="card p-6 border-t-4 border-t-emerald-500"><h3 class="text-lg font-bold text-white mb-4">行动建议</h3><ul class="space-y-4">{{ACTION_ITEMS}}</ul></div>
+</div>
+
+</div>
+<script>
+const cA='#34d399';const cB='#f87171';const ct='#94a3b8';const cg='#334155';
+var c1=echarts.init(document.getElementById('chart-step'));
+c1.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'}},legend:{data:['A-计算','B-计算','A-通信','B-通信','A-空闲','B-空闲'],textStyle:{color:ct},top:5},grid:{left:'3%',right:'4%',bottom:'3%',top:'15%',containLabel:true},xAxis:{type:'category',data:{{STEP_LABELS}},axisLabel:{color:ct},axisLine:{lineStyle:{color:cg}}},yAxis:{type:'value',name:'ms',nameTextStyle:{color:ct},axisLabel:{color:ct},splitLine:{lineStyle:{color:cg,type:'dashed'}}},series:[{name:'A-计算',type:'bar',data:{{A_COMPUTE}},itemStyle:{color:'#34d399',borderRadius:[4,4,0,0]}},{name:'B-计算',type:'bar',data:{{B_COMPUTE}},itemStyle:{color:'#86efac'}},{name:'A-通信',type:'bar',data:{{A_COMM}},itemStyle:{color:'#fbbf24'}},{name:'B-通信',type:'bar',data:{{B_COMM}},itemStyle:{color:'#fde047'}},{name:'A-空闲',type:'bar',data:{{A_FREE}},itemStyle:{color:'#f87171'}},{name:'B-空闲',type:'bar',data:{{B_FREE}},itemStyle:{color:'#fca5a5'}}]});
+var c2=echarts.init(document.getElementById('chart-pie'));
+c2.setOption({tooltip:{trigger:'item',formatter:'{a} <br/>{b}: {c} ms ({d}%)'},legend:{bottom:0,textStyle:{color:ct},data:['计算','通信','空闲']},color:['#8b5cf6','#f59e0b','#64748b'],series:[{name:'Rank A',type:'pie',radius:['35%','65%'],center:['25%','45%'],itemStyle:{borderRadius:5,borderColor:'#1e293b',borderWidth:2},label:{formatter:'{b}\n{d}%',color:'#cbd5e1',fontSize:11},data:[{value:{{A_PIE_COMP}},name:'计算'},{value:{{A_PIE_COMM}},name:'通信'},{value:{{A_PIE_FREE}},name:'空闲'}]},{name:'Rank B',type:'pie',radius:['35%','65%'],center:['75%','45%'],itemStyle:{borderRadius:5,borderColor:'#1e293b',borderWidth:2},label:{formatter:'{b}\n{d}%',color:'#cbd5e1',fontSize:11},data:[{value:{{B_PIE_COMP}},name:'计算'},{value:{{B_PIE_COMM}},name:'通信'},{value:{{B_PIE_FREE}},name:'空闲'}]}],graphic:[{type:'text',left:'22%',top:'40%',textAlign:'center',style:{text:'Rank A',fill:'#34d399',font:'bold 14px Inter'}},{type:'text',left:'72%',top:'40%',textAlign:'center',style:{text:'Rank B',fill:'#f87171',font:'bold 14px Inter'}}]});
+var c3=echarts.init(document.getElementById('chart-kernel-diff'));
+var kd={{KERNEL_DIFF_HAS}};
+if(kd){c3.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},formatter:function(p){return p[0].name+'<br/>差值: '+(p[0].value>0?'+':'')+p[0].value.toFixed(1)+' μs';}},grid:{left:'3%',right:'4%',bottom:'15%',containLabel:true},xAxis:{type:'category',data:{{KERNEL_DIFF_LABELS}},axisLabel:{color:ct,rotate:35,interval:0,fontSize:10},axisLine:{lineStyle:{color:cg}}},yAxis:{type:'value',name:'差值(μs)',nameTextStyle:{color:ct},axisLabel:{color:ct},splitLine:{lineStyle:{color:cg,type:'dashed'}}},series:[{type:'bar',data:{{KERNEL_DIFF_VALUES}},itemStyle:{color:function(p){return p.data>0?'#f87171':'#34d399';},borderRadius:[4,4,0,0]}}]});}else{document.getElementById('kernel-diff-placeholder').style.display='block';document.getElementById('chart-kernel-diff').style.display='none';}
+var c4=echarts.init(document.getElementById('chart-api-diff'));
+var ad={{API_DIFF_HAS}};
+if(ad){c4.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},formatter:function(p){return p[0].name+'<br/>差值: '+(p[0].value>0?'+':'')+p[0].value.toFixed(1)+' μs';}},grid:{left:'3%',right:'4%',bottom:'15%',containLabel:true},xAxis:{type:'category',data:{{API_DIFF_LABELS}},axisLabel:{color:ct,rotate:35,interval:0,fontSize:10},axisLine:{lineStyle:{color:cg}}},yAxis:{type:'value',name:'差值(μs)',nameTextStyle:{color:ct},axisLabel:{color:ct},splitLine:{lineStyle:{color:cg,type:'dashed'}}},series:[{type:'bar',data:{{API_DIFF_VALUES}},itemStyle:{color:function(p){return p.data>0?'#f87171':'#34d399';},borderRadius:[4,4,0,0]}}]});}else{document.getElementById('api-diff-placeholder').style.display='block';document.getElementById('chart-api-diff').style.display='none';}
+window.addEventListener('resize',function(){c1.resize();c2.resize();c3.resize();c4.resize();});
+</script>
+</body>
+</html>

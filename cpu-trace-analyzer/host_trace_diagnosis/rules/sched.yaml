@@ -1,0 +1,63 @@
+# 调度延迟与上下文切换规则
+# ==========================
+# 检测调度延迟过高、上下文切换频繁等问题。
+
+- rule_id: SCHED001
+  category: 调度延迟
+  severity: HIGH
+  scalar_conditions:
+    sched_latency_avg_us:
+      op: gt
+      value: 5000
+      weight: 0.3
+    ctx_switch_rate:
+      op: gt
+      value: 30000
+      weight: 0.2
+  temporal_patterns:
+    - pattern: sched_latency_spike
+      description: "调度延迟出现尖峰，Runtime线程被频繁抢占"
+      weight: 0.2
+  correlation_evidence:
+    - gap_attribution_contains: CPU_SCHED
+      min_ratio: 0.15
+      weight: 0.3
+  confidence_threshold: 0.6
+  diagnosis: "调度延迟过高，Runtime线程频繁被抢占导致kernel提交延迟"
+  suggestions:
+    - text: "提升Runtime线程的调度优先级（nice -10 或 SCHED_FIFO）"
+      priority: 1
+    - text: "使用FIFO调度策略为关键Runtime线程提供实时保障"
+      priority: 2
+    - text: "检查是否存在大量后台进程抢占CPU资源"
+      priority: 3
+
+- rule_id: SCHED002
+  category: 上下文切换
+  severity: MEDIUM
+  scalar_conditions:
+    ctx_switch_rate:
+      op: gt
+      value: 50000
+      weight: 0.35
+    launch_avg_gap_us:
+      op: gt
+      value: 500
+      weight: 0.15
+  temporal_patterns:
+    - pattern: ctx_switch_burst
+      description: "上下文切换出现突发峰值，影响kernel提交连续性"
+      weight: 0.2
+  correlation_evidence:
+    - gap_attribution_contains: CPU_SCHED
+      min_ratio: 0.10
+      weight: 0.3
+  confidence_threshold: 0.5
+  diagnosis: "上下文切换过于频繁，影响NPU kernel提交的连续性"
+  suggestions:
+    - text: "减少工作线程数量，使用线程池复用已有线程"
+      priority: 1
+    - text: "设置调度策略为SCHED_BATCH减少交互式抢占"
+      priority: 2
+    - text: "检查是否存在锁竞争导致的频繁线程切换"
+      priority: 3

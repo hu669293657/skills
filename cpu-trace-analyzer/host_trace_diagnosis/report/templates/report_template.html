@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Host Trace 诊断报告</title>
+    <style>
+        :root {
+            --bg-primary: #f0f2f5;
+            --bg-card: #ffffff;
+            --bg-header: #1a1a2e;
+            --bg-table-header: #f8f9fa;
+            --text-primary: #2d3436;
+            --text-secondary: #636e72;
+            --text-light: #ffffff;
+            --border-color: #e1e8ed;
+            --accent: #0984e3;
+            --danger: #d63031;
+            --danger-bg: rgba(214, 48, 49, 0.06);
+            --warning: #fdcb6e;
+            --success: #00b894;
+            --shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-primary: #0d1117;
+                --bg-card: #161b22;
+                --bg-header: #1a1a2e;
+                --bg-table-header: #21262d;
+                --text-primary: #e6edf3;
+                --text-secondary: #8b949e;
+                --text-light: #ffffff;
+                --border-color: #30363d;
+                --accent: #58a6ff;
+                --danger: #f85149;
+                --danger-bg: rgba(248, 81, 73, 0.08);
+                --warning: #d29922;
+                --success: #3fb950;
+                --shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+            }
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         "Helvetica Neue", Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            font-size: 14px;
+        }
+        .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+
+        header {
+            background: var(--bg-header);
+            color: var(--text-light);
+            padding: 30px 40px;
+            border-radius: 12px 12px 0 0;
+        }
+        header h1 { font-size: 22px; font-weight: 600; }
+        header .subtitle { font-size: 13px; opacity: 0.7; margin-top: 4px; }
+
+        section {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-top: none;
+            padding: 24px 30px;
+            margin-bottom: 16px;
+            box-shadow: var(--shadow);
+        }
+        section:first-of-type { border-radius: 0 0 12px 12px; }
+        section:last-of-type { border-radius: 0 0 12px 12px; margin-bottom: 0; }
+        section h2 {
+            font-size: 17px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .severity-badge {
+            display: inline-block;
+            padding: 5px 18px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .severity-critical { background: var(--danger); color: white; }
+        .severity-high { background: #e17055; color: white; }
+        .severity-medium { background: var(--warning); color: #2d3436; }
+        .severity-low { background: var(--accent); color: white; }
+        .severity-none { background: var(--text-secondary); color: white; }
+
+        .primary-diagnosis {
+            font-size: 15px;
+            margin: 12px 0;
+            padding: 14px 18px;
+            background: var(--bg-table-header);
+            border-radius: 8px;
+            border-left: 4px solid var(--accent);
+        }
+
+        .secondary-diagnoses { margin-top: 10px; padding-left: 20px; }
+        .secondary-diagnoses li {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border-color); }
+        th {
+            background: var(--bg-table-header);
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.5px;
+        }
+        tr.abnormal td { color: var(--danger); font-weight: 600; }
+        tr.abnormal { background: var(--danger-bg); }
+
+        .bar-chart { display: flex; flex-direction: column; gap: 10px; }
+        .bar-item { display: flex; align-items: center; gap: 12px; }
+        .bar-label { width: 150px; font-size: 13px; text-align: right; font-weight: 500; }
+        .bar-container {
+            flex: 1; height: 22px;
+            background: var(--bg-table-header);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .bar-fill { height: 100%; border-radius: 4px; min-width: 2px; }
+        .bar-value { width: 55px; font-size: 12px; font-weight: 600; }
+
+        .attr-CPU_SCHED { background: #d63031; }
+        .attr-DATA_LOADER { background: #e17055; }
+        .attr-MEMCPY { background: #6c5ce7; }
+        .attr-LAUNCH_GAP { background: #0984e3; }
+        .attr-IO_WAIT { background: #fdcb6e; }
+        .attr-RUNTIME_BLOCK { background: #00b894; }
+        .attr-OTHER { background: #636e72; }
+
+        .evidence-list { display: flex; flex-direction: column; gap: 8px; }
+        .evidence-item {
+            padding: 10px 16px;
+            background: var(--bg-table-header);
+            border-left: 3px solid var(--accent);
+            border-radius: 0 6px 6px 0;
+            font-size: 13px;
+        }
+        .evidence-metric { font-weight: 600; }
+        .evidence-value { color: var(--danger); font-weight: 600; }
+        .evidence-conclusion { color: var(--text-secondary); margin-top: 2px; }
+
+        .suggestion-list { display: flex; flex-direction: column; gap: 8px; }
+        .suggestion-item {
+            padding: 12px 16px;
+            background: var(--bg-table-header);
+            border-radius: 8px;
+            font-size: 13px;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+        .suggestion-priority {
+            background: var(--accent);
+            color: white;
+            border-radius: 50%;
+            min-width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .suggestion-source { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+
+        .root-cause-text {
+            font-size: 14px;
+            line-height: 1.8;
+            padding: 16px 20px;
+            background: var(--bg-table-header);
+            border-radius: 8px;
+        }
+        .root-cause-text strong { color: var(--text-primary); }
+        .root-cause-text ul { margin-top: 8px; padding-left: 20px; }
+        .root-cause-text li { margin-bottom: 4px; }
+
+        footer {
+            text-align: center;
+            padding: 20px;
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 20px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Host Trace 诊断报告</h1>
+            <p class="subtitle">昇腾NPU训练场景 Host侧性能分析</p>
+        </header>
+
+        <section id="summary">
+            <h2>诊断摘要</h2>
+            {summary}
+        </section>
+
+        <section id="metrics">
+            <h2>关键指标</h2>
+            {metrics_table}
+        </section>
+
+        <section id="attribution">
+            <h2>瓶颈归因分布</h2>
+            {attribution_bars}
+        </section>
+
+        <section id="evidence">
+            <h2>证据链</h2>
+            {evidence_chain}
+        </section>
+
+        <section id="root-cause">
+            <h2>根因分析</h2>
+            {root_cause}
+        </section>
+
+        <section id="suggestions">
+            <h2>优化建议</h2>
+            {suggestions}
+        </section>
+
+        <section id="top-gaps">
+            <h2>附录：Top Gaps 明细</h2>
+            {top_gaps_table}
+        </section>
+
+        <footer>
+            <p>Generated by Host Trace Diagnosis Agent</p>
+        </footer>
+    </div>
+</body>
+</html>
