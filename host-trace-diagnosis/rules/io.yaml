@@ -1,0 +1,81 @@
+# IO 诊断规则
+# 检测磁盘 IO 阻塞、带宽瓶颈问题
+
+version: "1.0"
+rules:
+  # ===== IO001: IO 等待过高 =====
+  - rule_id: IO001
+    category: io
+    condition:
+      metric: io_wait_pct
+      op: ">"
+      value: 5
+    severity: MEDIUM
+    diagnosis: "CPU IO 等待时间占比过高，存在磁盘 IO 瓶颈"
+    evidence_required:
+      - io_wait_pct
+      - io_issue_count
+    suggestions:
+      - "检查数据加载路径是否在高速存储上（SSD/NVMe）"
+      - "增加 DataLoader num_workers"
+      - "使用 prefetch 和 pin_memory"
+      - "考虑将数据集缓存到内存或 /dev/shm"
+      - "检查是否存在多个进程同时读取同一磁盘"
+    correlation_hint: "检查 IO 等待高峰是否与 NPU idle gap 对齐"
+
+  # ===== IO002: IO 严重阻塞 =====
+  - rule_id: IO002
+    category: io
+    condition:
+      metric: io_wait_pct
+      op: ">"
+      value: 15
+    severity: HIGH
+    diagnosis: "IO 等待严重，CPU 大量时间花在等待磁盘 IO"
+    evidence_required:
+      - io_wait_pct
+      - io_issue_rate
+    suggestions:
+      - "立即检查磁盘性能（iostat, fio）"
+      - "将数据迁移到 NVMe 或内存文件系统"
+      - "使用数据预加载和缓存策略"
+      - "检查文件系统挂载选项（noatime, nodiratime）"
+      - "考虑使用分布式存储或内存数据库"
+
+  # ===== IO003: IO 延迟过高 =====
+  - rule_id: IO003
+    category: io
+    condition:
+      or:
+        - metric: io_latency_avg_ms
+          op: ">"
+          value: 10
+        - metric: io_latency_p99_ms
+          op: ">"
+          value: 50
+    severity: MEDIUM
+    diagnosis: "IO 请求延迟过高，存在磁盘响应慢或 IO 拥塞"
+    evidence_required:
+      - io_latency_avg_ms
+      - io_latency_p99_ms
+    suggestions:
+      - "检查磁盘队列深度和 IO 调度器"
+      - "考虑使用 io_uring 替代传统 IO"
+      - "检查是否有多进程 IO 竞争"
+      - "使用 O_DIRECT 减少内核 buffer cache 开销"
+
+  # ===== IO004: IO 请求速率异常 =====
+  - rule_id: IO004
+    category: io
+    condition:
+      metric: io_issue_rate
+      op: ">"
+      value: 10000
+    severity: LOW
+    diagnosis: "IO 请求速率异常高，可能存在过多小 IO 操作"
+    evidence_required:
+      - io_issue_rate
+    suggestions:
+      - "合并小 IO 为大 IO（增大 read/write buffer）"
+      - "使用 sequential IO 替代 random IO"
+      - "检查文件打开模式和 buffer size"

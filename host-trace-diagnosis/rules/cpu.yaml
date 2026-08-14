@@ -1,0 +1,120 @@
+# CPU 诊断规则
+# 检测 CPU 利用率、均衡性、oversubscription 问题
+
+version: "1.0"
+rules:
+  # ===== CPU001: CPU oversubscription =====
+  - rule_id: CPU001
+    category: cpu
+    condition:
+      and:
+        - metric: cpu_util_avg
+          op: ">"
+          value: 90
+        - metric: runqueue_avg
+          op: ">"
+          ref: cpu_count
+    severity: HIGH
+    workload_context:
+      match: "all"
+      exclude: []
+      threshold_adjust:
+        runqueue_avg_multiplier: 1.5
+    diagnosis: "CPU 调度拥塞，runnable 任务数超过 CPU 核心数，存在 oversubscription"
+    evidence_required:
+      - cpu_util_avg
+      - runqueue_avg
+      - context_switch_rate
+    suggestions:
+      - "检查 OMP_NUM_THREADS 设置，确保不超过物理核心数"
+      - "检查 CPU affinity 绑定，避免多个计算密集线程竞争同一核心"
+      - "降低 DataLoader num_workers 数量"
+      - "检查是否存在不必要的后台进程消耗 CPU"
+    correlation_hint: "检查 NPU idle 时段是否与 CPU runqueue 峰值对齐"
+
+  # ===== CPU002: CPU 单核热点 =====
+  - rule_id: CPU002
+    category: cpu
+    condition:
+      and:
+        - metric: cpu_util_max
+          op: ">"
+          value: 95
+        - metric: cpu_balance
+          op: ">"
+          value: 0.5
+    severity: MEDIUM
+    diagnosis: "CPU 单核热点，负载严重不均，可能存在绑核问题"
+    evidence_required:
+      - cpu_util_max
+      - cpu_balance
+    suggestions:
+      - "检查进程/线程的 CPU affinity 绑定"
+      - "使用 numactl --physcpubind 或 taskset 均衡分配 CPU"
+      - "检查是否存在中断集中到单核（IRQ affinity）"
+    correlation_hint: "检查热点核心上的线程是否是 NPU runtime thread"
+
+  # ===== CPU003: 上下文切换过多 =====
+  - rule_id: CPU003
+    category: cpu
+    condition:
+      metric: context_switch_rate
+      op: ">"
+      value: 50000
+    severity: MEDIUM
+    workload_context:
+      match: "all"
+      threshold_adjust:
+        context_switch_rate_multiplier: 2.0
+    diagnosis: "上下文切换速率过高，可能导致 CPU cache 丢失和调度开销"
+    evidence_required:
+      - context_switch_rate
+      - cpu_util_avg
+    suggestions:
+      - "减少线程数量，使用线程池"
+      - "检查是否存在锁竞争导致频繁切换"
+      - "调整 nice 值或 cgroup 优先级"
+      - "考虑使用 batching 减少 kernel launch 频率"
+
+  # ===== CPU004: CPU 利用率过低 =====
+  - rule_id: CPU004
+    category: cpu
+    condition:
+      and:
+        - metric: cpu_util_avg
+          op: "<"
+          value: 30
+        - metric: npu_idle_ratio
+          op: ">"
+          value: 10
+    severity: MEDIUM
+    diagnosis: "CPU 利用率过低但 NPU 存在空闲，可能存在 host 提交速率不足或同步等待"
+    evidence_required:
+      - cpu_util_avg
+      - npu_idle_ratio
+    suggestions:
+      - "检查是否存在不必要的同步等待（aclrtSynchronizeStream）"
+      - "增加异步提交，减少 host 侧串行等待"
+      - "检查 kernel launch 间隔是否过大"
+      - "考虑增加 preprocessing 并行度"
+    correlation_hint: "检查 NPU idle 期间 host 线程状态，判断是阻塞还是空闲"
+
+  # ===== CPU005: CPU 频率降频 =====
+  - rule_id: CPU005
+    category: cpu
+    condition:
+      and:
+        - metric: cpu_util_avg
+          op: ">"
+          value: 80
+        - metric: cpu_frequency_min
+          op: "<"
+          ref: cpu_frequency_max
+    severity: LOW
+    diagnosis: "CPU 可能存在降频，影响计算性能"
+    evidence_required:
+      - cpu_util_avg
+    suggestions:
+      - "检查 CPU governor 设置，建议使用 performance 模式"
+      - "检查散热和温度限制"
+      - "检查 BIOS 中是否启用了 EPP/EPB 节能策略"

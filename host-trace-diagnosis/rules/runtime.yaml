@@ -1,0 +1,87 @@
+# Runtime 诊断规则
+# 检测框架 Runtime、GIL、DataLoader 等问题
+
+version: "1.0"
+rules:
+  # ===== RT001: 线程频繁阻塞 =====
+  - rule_id: RT001
+    category: runtime
+    condition:
+      metric: thread_block_count
+      op: ">"
+      value: 10
+    severity: MEDIUM
+    diagnosis: "线程频繁进入 D 状态（uninterruptible sleep），存在 IO 或内核等待"
+    evidence_required:
+      - thread_block_count
+    suggestions:
+      - "检查 D 状态线程的系统调用（使用 strace 或 perf）"
+      - "检查是否存在磁盘 IO 等待"
+      - "检查是否存在内存分配导致的阻塞"
+      - "检查是否存在内核锁竞争"
+    correlation_hint: "检查 D 状态线程是否是 runtime thread，以及是否与 NPU idle 对齐"
+
+  # ===== RT002: DataLoader 耗时过长 =====
+  - rule_id: RT002
+    category: runtime
+    condition:
+      and:
+        - metric: dataloader_time_pct
+          op: ">"
+          value: 30
+        - metric: npu_idle_ratio
+          op: ">"
+          value: 10
+    severity: HIGH
+    diagnosis: "DataLoader 耗时过长，数据准备成为瓶颈导致 NPU 空闲"
+    evidence_required:
+      - dataloader_time_pct
+      - npu_idle_ratio
+    suggestions:
+      - "增加 DataLoader num_workers"
+      - "启用 pin_memory=True"
+      - "增大 prefetch_factor"
+      - "检查数据存储路径是否在高速存储上"
+      - "考虑使用数据预加载到 /dev/shm"
+      - "检查数据预处理是否过重（减小 transform 复杂度）"
+    correlation_hint: "检查 NPU idle 时段是否与 DataLoader fetch 时段完全对齐"
+
+  # ===== RT003: GIL 竞争 =====
+  - rule_id: RT003
+    category: runtime
+    condition:
+      metric: gil_contention_count
+      op: ">"
+      value: 100
+    severity: MEDIUM
+    diagnosis: "Python GIL 竞争频繁，多线程无法有效并行"
+    evidence_required:
+      - gil_contention_count
+    suggestions:
+      - "将计算密集部分迁移到 C++ 扩展或使用 torch.multiprocessing"
+      - "使用 torch.set_num_threads 控制 intra-op 并行"
+      - "检查是否存在不必要的 Python 层循环"
+      - "考虑使用 JIT 编译（torch.compile）"
+
+  # ===== RT004: Runtime 调用阻塞 =====
+  - rule_id: RT004
+    category: runtime
+    condition:
+      and:
+        - metric: kernel_launch_gap_avg_ms
+          op: ">"
+          value: 1
+        - metric: cpu_util_avg
+          op: "<"
+          value: 50
+    severity: MEDIUM
+    diagnosis: "Kernel launch 间隔偏大但 CPU 利用率不高，可能存在同步等待"
+    evidence_required:
+      - kernel_launch_gap_avg_ms
+      - cpu_util_avg
+    suggestions:
+      - "检查是否存在不必要的 aclrtSynchronizeStream 调用"
+      - "使用异步 API 替代同步 API"
+      - "增加 kernel batching"
+      - "检查是否存在 graph 编译导致的延迟"
+    correlation_hint: "检查 kernel launch gap 时段 host 线程的调用栈"

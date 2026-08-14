@@ -1,0 +1,106 @@
+# 调度诊断规则
+# 检测调度延迟、runqueue 堆积、线程迁移问题
+
+version: "1.0"
+rules:
+  # ===== SCHED001: 调度延迟过高 =====
+  - rule_id: SCHED001
+    category: sched
+    condition:
+      metric: sched_latency_p99_ms
+      op: ">"
+      value: 20
+    severity: HIGH
+    workload_context:
+      match: "all"
+      exclude: ["inference_single_stream"]
+      threshold_adjust:
+        sched_latency_p99_multiplier: 0.5
+    diagnosis: "调度延迟 P99 过高，关键线程可能无法及时获得 CPU 时间"
+    evidence_required:
+      - sched_latency_p99_ms
+      - sched_latency_avg_ms
+      - runqueue_avg
+    suggestions:
+      - "检查 CPU oversubscription 情况"
+      - "为关键线程设置 RT 优先级（chrt）"
+      - "使用 cgroup 隔离关键线程的 CPU 资源"
+      - "检查是否有过多的内核线程或后台进程干扰"
+    correlation_hint: "检查高延迟调度是否与 NPU idle gap 时间对齐"
+
+  # ===== SCHED002: 调度延迟 P99.9 异常 =====
+  - rule_id: SCHED002
+    category: sched
+    condition:
+      metric: sched_latency_p99_9_ms
+      op: ">"
+      value: 50
+    severity: MEDIUM
+    diagnosis: "存在极端调度延迟（P99.9），偶发性能抖动"
+    evidence_required:
+      - sched_latency_p99_9_ms
+      - sched_latency_max_ms
+    suggestions:
+      - "检查是否存在偶发的 CPU 占用峰值"
+      - "检查内核中断处理是否集中"
+      - "考虑设置 CPU isolation（isolcpus）"
+
+  # ===== SCHED003: Runqueue 严重堆积 =====
+  - rule_id: SCHED003
+    category: sched
+    condition:
+      metric: runqueue_pressure
+      op: ">"
+      value: 2.0
+    severity: HIGH
+    workload_context:
+      match: "training"
+      threshold_adjust:
+        runqueue_pressure_threshold: 3.0
+    diagnosis: "运行队列压力比超过 2.0，严重 oversubscription"
+    evidence_required:
+      - runqueue_avg
+      - runqueue_max
+      - runqueue_pressure
+    suggestions:
+      - "立即减少并发线程数"
+      - "检查 OMP_NUM_THREADS / MKL_NUM_THREADS 设置"
+      - "降低 DataLoader num_workers"
+      - "检查是否存在进程泄漏"
+
+  # ===== SCHED004: Runqueue 中度压力 =====
+  - rule_id: SCHED004
+    category: sched
+    condition:
+      and:
+        - metric: runqueue_pressure
+          op: ">"
+          value: 1.5
+        - metric: runqueue_pressure
+          op: "<="
+          value: 2.0
+    severity: MEDIUM
+    diagnosis: "运行队列存在中度压力，可能影响调度延迟"
+    evidence_required:
+      - runqueue_avg
+      - runqueue_pressure
+    suggestions:
+      - "监控 runqueue 趋势"
+      - "评估是否需要减少线程数"
+      - "检查 CPU affinity 设置"
+
+  # ===== SCHED005: 线程频繁迁移 =====
+  - rule_id: SCHED005
+    category: sched
+    condition:
+      metric: cpu_migration_rate
+      op: ">"
+      value: 1000
+    severity: LOW
+    diagnosis: "线程在 CPU 间频繁迁移，可能导致 cache 和 NUMA locality 丢失"
+    evidence_required:
+      - cpu_migration_rate
+    suggestions:
+      - "使用 taskset 或 numactl 绑定线程到特定 CPU"
+      - "检查内核 sched_domain 配置"
+      - "考虑使用 CPU cgroup 限制调度域"

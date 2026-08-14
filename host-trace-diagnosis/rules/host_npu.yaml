@@ -1,0 +1,183 @@
+# Host-NPU 协同诊断规则
+# 检测 Host-NPU 协同问题，这是昇腾场景的核心分析
+
+version: "1.0"
+rules:
+  # ===== HN001: NPU 空闲率过高 =====
+  - rule_id: HN001
+    category: host_npu
+    condition:
+      metric: npu_idle_ratio
+      op: ">"
+      value: 10
+    severity: HIGH
+    diagnosis: "NPU 空闲率超过10%，存在 host 侧提交不足或阻塞"
+    evidence_required:
+      - npu_idle_ratio
+      - npu_idle_max_gap_ms
+      - npu_idle_gap_count
+    suggestions:
+      - "检查 host 侧 CPU 利用率和调度情况"
+      - "检查是否存在同步等待阻塞 kernel 下发"
+      - "检查 DataLoader 是否能及时供数"
+      - "检查 H2D 拷贝是否存在瓶颈"
+      - "考虑使用 graph mode 减少逐 op 下发开销"
+    correlation_hint: "必须执行 Host-NPU 关联分析，定位 idle 根因"
+
+  # ===== HN002: NPU 大空闲间隔 =====
+  - rule_id: HN002
+    category: host_npu
+    condition:
+      metric: npu_idle_max_gap_ms
+      op: ">"
+      value: 50
+    severity: HIGH
+    diagnosis: "NPU 存在超过50ms的连续空闲，严重浪费算力"
+    evidence_required:
+      - npu_idle_max_gap_ms
+      - npu_idle_avg_gap_ms
+    suggestions:
+      - "定位最大空闲间隔的时间点，检查该时段 host 事件"
+      - "检查是否存在编译/初始化等一次性开销"
+      - "检查是否存在 barrier 或 all-reduce 等同步操作"
+      - "考虑使用流并行掩盖空闲"
+
+  # ===== HN003: Kernel Launch Gap 过大 =====
+  - rule_id: HN003
+    category: host_npu
+    condition:
+      or:
+        - metric: kernel_launch_gap_avg_ms
+          op: ">"
+          value: 1
+        - metric: kernel_launch_gap_p99_ms
+          op: ">"
+          value: 10
+    severity: MEDIUM
+    diagnosis: "Kernel 下发间隔过大，host 提交速率不足以维持 NPU 满载"
+    evidence_required:
+      - kernel_launch_gap_avg_ms
+      - kernel_launch_gap_p99_ms
+    suggestions:
+      - "减少 host 侧 Python 开销（使用 torch.compile）"
+      - "检查 ACL runtime 调用是否存在不必要的同步"
+      - "增加 batch size 减少 kernel 数量"
+      - "使用 graph mode 批量下发"
+      - "检查 host CPU 是否能跟上 NPU 消费速率"
+
+  # ===== HN004: Host-NPU 协同瓶颈（CPU 调度型）=====
+  - rule_id: HN004
+    category: host_npu
+    condition:
+      and:
+        - metric: npu_idle_ratio
+          op: ">"
+          value: 10
+        - metric: runqueue_pressure
+          op: ">"
+          value: 1.0
+        - metric: sched_latency_p99_ms
+          op: ">"
+          value: 5
+    severity: CRITICAL
+    diagnosis: "Host-NPU 协同瓶颈：CPU 调度拥塞导致 runtime thread 无法及时提交 kernel"
+    evidence_required:
+      - npu_idle_ratio
+      - runqueue_pressure
+      - sched_latency_p99_ms
+    suggestions:
+      - "为 NPU runtime thread 设置独立的 CPU core 和 RT 优先级"
+      - "减少竞争 CPU 的线程数（DataLoader workers, OMP threads）"
+      - "使用 cgroup cpuset 隔离 runtime thread"
+      - "调整 OMP_NUM_THREADS 避免 oversubscription"
+      - "考虑使用 CPU isolation（isolcpus）"
+    correlation_hint: "因果链: CPU runqueue高 → runtime调度延迟 → kernel提交延迟 → NPU idle"
+
+  # ===== HN005: Host-NPU 协同瓶颈（IO 阻塞型）=====
+  - rule_id: HN005
+    category: host_npu
+    condition:
+      and:
+        - metric: npu_idle_ratio
+          op: ">"
+          value: 10
+        - metric: io_wait_pct
+          op: ">"
+          value: 5
+    severity: HIGH
+    diagnosis: "Host-NPU 协同瓶颈：IO 等待导致数据准备阻塞，NPU 空闲等待数据"
+    evidence_required:
+      - npu_idle_ratio
+      - io_wait_pct
+      - io_issue_count
+    suggestions:
+      - "将数据集迁移到高速存储（NVMe SSD 或 /dev/shm）"
+      - "增加 DataLoader prefetch 深度"
+      - "使用 pin_memory 和 non_blocking transfer"
+      - "检查数据格式是否高效（考虑使用 mmap 或 WebDataset）"
+      - "增加数据预加载线程数"
+    correlation_hint: "因果链: IO等待 → 数据准备阻塞 → NPU无数据可算 → NPU idle"
+
+  # ===== HN006: Host-NPU 协同瓶颈（内存压力型）=====
+  - rule_id: HN006
+    category: host_npu
+    condition:
+      and:
+        - metric: npu_idle_ratio
+          op: ">"
+          value: 10
+        - metric: major_page_faults
+          op: ">"
+          value: 0
+    severity: CRITICAL
+    diagnosis: "Host-NPU 协同瓶颈：内存不足导致 page fault，数据准备阻塞"
+    evidence_required:
+      - npu_idle_ratio
+      - major_page_faults
+    suggestions:
+      - "增加物理内存或减少内存使用"
+      - "关闭 swap"
+      - "使用 mmap 替代 read"
+      - "减少 DataLoader cache 大小"
+      - "检查是否存在内存泄漏"
+    correlation_hint: "因果链: page fault → 内存换入延迟 → 数据准备阻塞 → NPU idle"
+
+  # ===== HN007: H2D/D2H 拷贝瓶颈 =====
+  - rule_id: HN007
+    category: host_npu
+    condition:
+      or:
+        - metric: h2d_wait_time
+          op: ">"
+          value: 10
+        - metric: d2h_wait_time
+          op: ">"
+          value: 10
+    severity: MEDIUM
+    diagnosis: "H2D/D2H 拷贝等待时间过长，存在内存拷贝瓶颈"
+    evidence_required:
+      - h2d_wait_time
+      - d2h_wait_time
+    suggestions:
+      - "使用 pin_memory 和 non_blocking=True 进行异步拷贝"
+      - "检查 PCIe 带宽利用率"
+      - "减少不必要的 H2D/D2H 拷贝"
+      - "考虑使用共享内存或统一内存"
+      - "增加 batch size 减少拷贝次数"
+
+  # ===== HN008: NPU 同步等待 =====
+  - rule_id: HN008
+    category: host_npu
+    condition:
+      metric: sync_wait_time
+      op: ">"
+      value: 20
+    severity: MEDIUM
+    diagnosis: "Host 侧存在大量同步等待时间，可能存在不必要的 stream sync"
+    evidence_required:
+      - sync_wait_time
+    suggestions:
+      - "减少 aclrtSynchronizeStream / torch.cuda.synchronize 调用"
+      - "使用 event 代替 stream sync 进行精确同步"
+      - "检查是否存在多流之间的不必要依赖"
+      - "使用异步 API 和 future 模式"

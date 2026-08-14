@@ -1,0 +1,57 @@
+# NUMA 诊断规则
+# 检测 NUMA 远端访问、locality 问题
+
+version: "1.0"
+rules:
+  # ===== NUMA001: NUMA 远端访问比例过高 =====
+  - rule_id: NUMA001
+    category: numa
+    condition:
+      metric: remote_ratio
+      op: ">"
+      value: 20
+    severity: MEDIUM
+    diagnosis: "NUMA 远端访问比例过高，跨节点内存访问增加延迟"
+    evidence_required:
+      - remote_ratio
+      - local_count
+      - remote_count
+    suggestions:
+      - "使用 numactl --interleave=all 或 --membind 绑定内存"
+      - "检查进程的 NUMA affinity 设置"
+      - "使用 libnuma 在代码中指定内存分配策略"
+      - "检查 DataLoader 数据加载是否跨 NUMA 节点"
+    correlation_hint: "检查远端访问高峰是否与 NPU idle 对齐"
+
+  # ===== NUMA002: NUMA 严重不均 =====
+  - rule_id: NUMA002
+    category: numa
+    condition:
+      metric: remote_ratio
+      op: ">"
+      value: 40
+    severity: HIGH
+    diagnosis: "NUMA 访问严重不均，超过40%为远端访问，显著影响性能"
+    evidence_required:
+      - remote_ratio
+      - hit_ratio
+    suggestions:
+      - "立即检查内存分配策略"
+      - "使用 numactl --membind 限制到本地节点"
+      - "检查是否存在跨 NUMA 节点的共享内存"
+      - "考虑使用 huge pages 减少 TLB miss"
+
+  # ===== NUMA003: NUMA hint fault 本地率低 =====
+  - rule_id: NUMA003
+    category: numa
+    condition:
+      metric: numa_hint_faults_local_ratio
+      op: "<"
+      value: 70
+    severity: LOW
+    diagnosis: "NUMA hint fault 本地率低，NUMA balancing 可能未生效或效果不佳"
+    evidence_required:
+      - numa_hint_faults_local_ratio
+    suggestions:
+      - "检查 /proc/sys/kernel/numa_balancing 是否启用"
+      - "考虑手动绑定 NUMA affinity 而非依赖自动 balancing"

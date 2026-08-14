@@ -1,0 +1,74 @@
+# 内存诊断规则
+# 检测 page fault、swap、内存压力问题
+
+version: "1.0"
+rules:
+  # ===== MEM001: Major Page Fault =====
+  - rule_id: MEM001
+    category: memory
+    condition:
+      metric: major_page_faults
+      op: ">"
+      value: 0
+    severity: CRITICAL
+    diagnosis: "存在 major page fault，内存不足导致磁盘换入，严重影响性能"
+    evidence_required:
+      - major_page_faults
+    suggestions:
+      - "增加物理内存或减少内存使用"
+      - "检查是否使用了 swap，建议关闭 swap"
+      - "使用 mmap 替代 read 减少 page fault"
+      - "检查数据加载方式，考虑使用内存映射文件"
+      - "增加 prefetch 或使用 pin_memory"
+    correlation_hint: "检查 major page fault 是否与 NPU idle gap 时间对齐"
+
+  # ===== MEM002: Minor Page Fault 过多 =====
+  - rule_id: MEM002
+    category: memory
+    condition:
+      metric: minor_page_fault_rate
+      op: ">"
+      value: 10000
+    severity: MEDIUM
+    diagnosis: "Minor page fault 速率过高，存在大量内存分配/释放"
+    evidence_required:
+      - minor_page_fault_rate
+    suggestions:
+      - "检查是否存在频繁的内存分配/释放"
+      - "使用内存池减少分配开销"
+      - "考虑使用 huge pages"
+      - "检查 DataLoader 是否频繁创建/销毁 buffer"
+
+  # ===== MEM003: Swap 使用 =====
+  - rule_id: MEM003
+    category: memory
+    condition:
+      metric: swap_usage_kb
+      op: ">"
+      value: 0
+    severity: HIGH
+    diagnosis: "检测到 swap 使用，内存不足导致数据被换出到磁盘"
+    evidence_required:
+      - swap_usage_kb
+    suggestions:
+      - "关闭 swap: swapoff -a"
+      - "减少进程内存使用"
+      - "增加物理内存"
+      - "检查是否存在内存泄漏"
+
+  # ===== MEM004: OOM Kill =====
+  - rule_id: MEM004
+    category: memory
+    condition:
+      metric: oom_kill_count
+      op: ">"
+      value: 0
+    severity: CRITICAL
+    diagnosis: "检测到 OOM kill 事件，进程被内核强制终止"
+    evidence_required:
+      - oom_kill_count
+    suggestions:
+      - "检查 cgroup 内存限制"
+      - "减少进程内存使用"
+      - "调整 /proc/sys/vm/overcommit_memory 设置"
+      - "增加物理内存"
