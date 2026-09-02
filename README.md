@@ -1,16 +1,22 @@
 # Skills
 
-个人技能集合，涵盖 vLLM-Ascend 性能调优、环境分析、配置提取等场景。
+个人技能集合，涵盖 vLLM-Ascend 性能调优、Profiling 分析、环境/日志诊断、配置提取等场景。
+
+每个 skill 目录下均有 `SKILL.md`（Agent 执行定义）与 `README.md`（人类可读说明：应用场景、解决的问题、输入及获取方式、输出、流程图、示例提示词）。
 
 ## 仓库结构
 
 ```
 skills/
 ├── ascend-dump-analyzer/          # Ascend NPU 环境信息采集与分析
-├── ascend-tune-lab-main/          # vLLM-Ascend 调优实验室（含子 Skills 和 Agents）
+├── ascend-field-issue-analyzer/   # 现网问题文本日志取证分析
+├── ascend-tune-lab-main/          # vLLM-Ascend 调优实验室（含 9 个子 Skills 和 Agents）
 │   ├── configuration-tuning-skills/
 │   └── configuration-tuning-agents/
 ├── cluster-analysis/              # Ascend 集群性能分析与比对
+├── compare-analyzer/              # Prof 比对结果 (xlsx) 解析与中文报告生成
+├── cpu-trace-analyzer/            # Host 侧 CPU trace 瓶颈定位
+├── host-trace-diagnosis/          # Host 侧 trace 规则化智能诊断
 ├── ibmc_analyzer/                 # iBMC 服务器日志分析与故障定位
 └── vllm-ascend-tuning/            # vLLM-Ascend 全链路性能调优
 ```
@@ -19,7 +25,7 @@ skills/
 
 ### 1. ascend-dump-analyzer
 
-**Ascend NPU 环境信息采集与分析工具**
+**Ascend NPU 环境信息采集与分析工具**（[README](ascend-dump-analyzer/README.md)）
 
 采集 Ascend 服务器的环境信息（系统、驱动、CANN、环境变量、网络、权重等），生成结构化分析报告，支持多环境对比。
 
@@ -28,23 +34,34 @@ skills/
 - **环境对比**：对比两个或多个 dump JSON，识别配置漂移
 - **HTML 报告**：内置可视化模板，支持单环境报告和对比报告
 
-### 2. ascend-tune-lab-main
+### 2. ascend-field-issue-analyzer
 
-**vLLM-Ascend 调优实验室，包含配置调优 Skills 和编排 Agents**
+**现网问题日志取证分析工具**（[README](ascend-field-issue-analyzer/README.md)）
+
+从 plog/slog/host/device/framework 等现网日志中构建证据链，定位训练/推理中断、算子报错、环境异常的根因。
+
+- **日志分诊**：按问题类型自动分诊并提取关键错误
+- **证据链**：所有结论附日志原文与来源文件，杜绝臆测
+- **可回验**：每条结论附回验命令
+- **输出**：Markdown 分析报告（含时间线与处置建议）
+
+### 3. ascend-tune-lab-main
+
+**vLLM-Ascend 调优实验室，包含配置调优 Skills 和编排 Agents**（各子 skill 的 README 见下表）
 
 #### 子 Skills
 
-| Skill | 描述 |
-|-------|------|
-| **ascend-baseline-generator** | 根据设备/模型/量化/NPU 数量从基线文档匹配最佳 vLLM-Ascend 部署配置 |
-| **find-possible-parallel-strategy** | 根据模型参数量与量化类型，枚举合法的 DP×TP×EP 并行组合 |
-| **serving-kv-cache-capacity** | 估算各并行组合下的 KV Cache 容量与内存上限最大并发 |
-| **serving-slo-concurrency** | 基于 TTFT/TPOT SLO 约束估算最大实际并发，覆盖 Qwen/GLM/DeepSeek/MiniMax 等 |
-| **serving-parallel-strategy-tuning** | 并行策略调优入口 Skill，串联上述三个子 Skill 产出推荐配置 |
-| **serving-cfg-extract** | 从服务化日志启动阶段提取 non-default args 关键参数，生成 Excel 报告 |
-| **serving-perf-metrics** | 从服务化日志运行阶段解析性能指标（吞吐、显存、命中率等），输出 CSV |
-| **model-feature-extractor** | 将模型特性支持表 (xlsx) 转换为紧凑 JSON 格式 |
-| **vllm-ascend-config-extractor** | 从 vLLM 和 vLLM-Ascend 源码中提取并对比配置开关定义 |
+| Skill | 描述 | README |
+|-------|------|--------|
+| **ascend-baseline-generator** | 根据设备/模型/量化/NPU 数量从基线文档匹配最佳 vLLM-Ascend 部署配置 | [查看](ascend-tune-lab-main/configuration-tuning-skills/ascend-baseline-generator/README.md) |
+| **find-possible-parallel-strategy** | 根据模型参数量与量化类型，枚举合法的 DP×TP×EP 并行组合 | [查看](ascend-tune-lab-main/configuration-tuning-skills/find-possible-parallel-strategy/README.md) |
+| **serving-kv-cache-capacity** | 估算各并行组合下的 KV Cache 容量与内存上限最大并发 | [查看](ascend-tune-lab-main/configuration-tuning-skills/serving-kv-cache-capacity/README.md) |
+| **serving-slo-concurrency** | 基于 TTFT/TPOT SLO 约束估算最大实际并发，覆盖 Qwen/GLM/DeepSeek/MiniMax 等 | [查看](ascend-tune-lab-main/configuration-tuning-skills/serving-slo-concurrency/README.md) |
+| **serving-parallel-strategy-tuning** | 并行策略调优入口 Skill，串联上述三个子 Skill 产出推荐配置 | [查看](ascend-tune-lab-main/configuration-tuning-skills/serving-parallel-strategy-tuning/README.md) |
+| **serving-cfg-extract** | 从服务化日志启动阶段提取 non-default args 关键参数，生成 Excel 报告 | [查看](ascend-tune-lab-main/configuration-tuning-skills/serving-cfg-extract/README.md) |
+| **serving-perf-metrics** | 从服务化日志运行阶段解析性能指标（吞吐、显存、命中率等），输出 CSV | [查看](ascend-tune-lab-main/configuration-tuning-skills/serving-perf-metrics/README.md) |
+| **model-feature-extractor** | 将模型特性支持表 (xlsx) 转换为紧凑 JSON 格式 | [查看](ascend-tune-lab-main/configuration-tuning-skills/model-feature-extractor/README.md) |
+| **vllm-ascend-config-extractor** | 从 vLLM 和 vLLM-Ascend 源码中提取并对比配置开关定义 | [查看](ascend-tune-lab-main/configuration-tuning-skills/vllm-ascend-config-extractor/README.md) |
 
 #### Agents
 
@@ -52,9 +69,9 @@ skills/
 |-------|------|
 | **serving-perf-optimization** | 两阶段性能优化编排 Agent，Phase 1 基线复现 + Phase 2 调优，串联上述 Skills |
 
-### 3. cluster-analysis
+### 4. cluster-analysis
 
-**Ascend 集群性能分析与比对工具**
+**Ascend 集群性能分析与比对工具**（[README](cluster-analysis/README.md)）
 
 面向昇腾 NPU 集群 profiling 数据的性能分析工具，支持从 `cluster_analysis_output` 目录提取数据，生成全景总结和 HTML 可视化报告。
 
@@ -64,31 +81,77 @@ skills/
 - **双集群比对**：对比正常与异常集群，识别性能差异根因（慢卡定位、通信瓶颈等）
 - **HTML 报告**：内置单集群分析和双集群对比两套可视化模板
 
-### 4. ibmc_analyzer
+### 5. compare-analyzer
 
-**iBMC 服务器日志分析与故障定位工具**
+**Prof 比对结果解析与报告生成工具**（[README](compare-analyzer/README.md)）
+
+解析 `msprof-analyze compare` 生成的比对 xlsx，一次产出 JSON、HTML 报告、中文 xlsx 与中文 CSV。
+
+- **算子级对比**：GPU vs NPU 或 NPU vs NPU 的性能回退/提升分析
+- **中文交付**：翻译并美化比对表格，直接可交付
+- **多格式输出**：JSON（机器可读）+ HTML（可视化）+ xlsx/CSV（表格）
+
+### 6. cpu-trace-analyzer
+
+**Host 侧 CPU trace 瓶颈定位工具**（[README](cpu-trace-analyzer/README.md)）
+
+以"Gap 驱动反向溯源"方式定位 NPU/GPU 训练场景下的 Host 侧性能瓶颈。
+
+- **Gap 扫描**：自动发现计算/通信空隙并按影响排序
+- **根因归因**：CPU 调度、DataLoader 竞争、H2D 拷贝阻塞、kernel launch 间隙
+- **输出**：JSON 诊断结果 + HTML 诊断报告
+
+### 7. host-trace-diagnosis
+
+**Host 侧 trace 规则化智能诊断工具**（[README](host-trace-diagnosis/README.md)）
+
+对 perfetto/ftrace/msprof/perf trace 进行规则库驱动的逐条匹配诊断。
+
+- **多格式支持**：perfetto / ftrace / msprof / perf 统一解析
+- **规则可扩展**：内置 7 个 YAML 规则文件，可自定义扩展
+- **结论可复核**：命中结果关联规则 ID 与证据事件
+
+### 8. ibmc_analyzer
+
+**iBMC 服务器日志分析与故障定位工具**（[README](ibmc_analyzer/README.md)）
 
 基于 iBMC 一键收集 (dump_info) 日志，进行故障根因定位、性能瓶颈排查和集群硬件配置一致性校验。
 
 - **故障定位**：分析 MCE/PCIe 错误、内核 Panic，区分软件与硬件故障
 - **性能排查**：检查 BIOS/OS 参数、降频诊断、温度异常分析
 - **集群对比**：多节点配置 Diff，识别网卡固件、PCIe 带宽等木桶效应
+- **输出**：结构化 JSON + HTML 诊断报告（单机深度分析 + 多机集群对比）
 
-### 5. vllm-ascend-tuning
+### 9. vllm-ascend-tuning
 
-**vLLM-Ascend 全链路性能调优技能**
+**vLLM-Ascend 全链路性能调优技能**（[README](vllm-ascend-tuning/README.md)）
 
-提供从并行策略到模型推理的全链路优化工作流，包含 18 种主流模型的已验证 YAML 基准配置库。
+提供从并行策略到模型推理的全链路优化工作流（Phase 0–11），包含主流模型的已验证 YAML 基准配置库。
 
 - **覆盖模型**：DeepSeek-V3/V3.1/V3.2、Qwen3/3.5 全系列、GLM-4/5.1、Kimi-K2.5、MiniMax-M2.5 等
 - **调优阶段**：并行策略 → 编译优化 → OS 调优 → torch_npu → CANN/HCCL → vLLM 参数 → Speculative Decoding → 量化 → PD 分离 → 基准测试
 - **快速模板**：内置低延迟 (TPOT ~20ms) 和高吞吐 (TPOT ~50ms) 两套快速配置模板
 - **参考文档**：包含 parallel_strategy、graph_mode、quantization、speculative_decoding 等 17 篇技术文档
 
+## 技能选型速查
+
+| 你想做什么 | 推荐技能 |
+|-----------|---------|
+| 体检/比对服务器环境 | ascend-dump-analyzer |
+| 从现网日志定位问题根因 | ascend-field-issue-analyzer |
+| 集群性能分析、找慢卡 | cluster-analysis |
+| 对比两组 Prof 数据（迁移调优前后） | compare-analyzer |
+| 定位 Host 侧瓶颈（Gap 归因） | cpu-trace-analyzer |
+| trace 规则化健康检查 | host-trace-diagnosis |
+| 判断服务器/BMC 硬件健康 | ibmc_analyzer |
+| 端到端 vLLM-Ascend 调优 | vllm-ascend-tuning |
+| 并行策略离线调优流水线 | ascend-tune-lab-main（serving-parallel-strategy-tuning） |
+| 匹配官方基线部署配置 | ascend-tune-lab-main（ascend-baseline-generator） |
+
 ## 同步方式
 
-```bash
-cd C:\Users\66929\Documents\skills
+```powershell
+cd D:\skills
 
 # 本地改动推送到远程
 git add -A
