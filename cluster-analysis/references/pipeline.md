@@ -10,12 +10,12 @@
 | 路径 | 产出者 | 说明 |
 |---|---|---|
 | `detect_result.json` | detect_prof.py | 输入类型判定（db/text、单卡/多卡/集群），后续阶段的分支依据 |
-| `advisor/advisor.md`、`advisor/advisor.json` | 原生 CLI 或 advisor_fallback.py | Advisor 结论 |
+| `advisor/advisor.md`、`advisor/advisor.json` | advisor_fallback.py（原生 advisor all 产物仅留档） | Advisor 结论 |
 | `cluster_analysis_output/cluster_analysis.db` | 原生 msprof-analyze 或 cluster_fallback.py | 集群分析主库（SQLite） |
 | `cluster_analysis_output/recipes/<name>/*.csv` | recipe_fallback.py | 各 recipe 明细 CSV |
 | `cluster_analysis_output/recipes_summary.{md,json}` | recipe_fallback.py | recipe 汇总（同时写入 DB 表 RecipeSummary） |
 | `compare/compare_analysis_result.json` | compare_fallback.py | 卡间对比明细 |
-| `compare/performance_comparison_result_*.xlsx` | compare_fallback.py | 对比 Excel（vendor compare 消费此文件） |
+| `compare/performance_comparison_result_*.xlsx` | 原生 msprof-analyze（归一化复制）或 compare_fallback.py | 对比 Excel（vendor compare 消费此文件） |
 | `reports/cluster_analysis_report.html` | vendor_bridge（cluster） | vendor 单模式报告（最终报告 iframe 内嵌） |
 | `reports/compare_analysis_report.html` | vendor_bridge（compare） | vendor 对比报告（iframe 内嵌） |
 | `reports/cluster_data.json`、`reports/chinese_xlsx/` | vendor_bridge 附带产物 | 报告数据与中文表 |
@@ -33,30 +33,33 @@ python scripts/detect_prof.py --path <输入路径> --output <mw>/detect_result.
 ```
 - 失败处理：中止流水线（无输入类型无法继续）。
 
-### P1 advisor
-优先原生 CLI（命令模板见 msprof_cli.md；探测命令统一为 `msprof-analyze advisor --help`）。降级：
+### P1 advisor（原生留档 + 内置归一化）
+探测到 `msprof-analyze` 时先执行原生 `advisor all`（产物 mstt_advisor_* 仅留档），随后**始终**运行内置实现归一化（advisor.md/advisor.json 为总报告契约件，保证两种路径产物一致）：
 ```bash
 python scripts/advisor_fallback.py --root <输入路径> --output <mw>/advisor
 ```
 
 ### P2 cluster（原生优先）
-降级：
+原生：`msprof-analyze cluster analysis -d <输入路径> --top_num N`。原生成功但产物缺 `cluster_analysis.db` 时（下游 recipes/泳道依赖），用内置实现补齐（幂等：db 已存在自动跳过）。原生失败/不可用降级：
 ```bash
 python scripts/cluster_fallback.py --root <输入路径> [--force]
 ```
 
-### P3 recipes
+### P3 recipes（原生优先）
+原生：逐个执行 8 个 recipe 子命令（cluster_time_summary / communication_time_sum / slow_rank / slow_link / communication_bottleneck / free_analysis / compute_op_sum / hccl_sum，附 `--top_num`）。原生成功但缺 `recipes_summary.json`（总报告契约件，原生不产出）时，用内置实现补齐全量 23+1 recipe 与汇总件。原生失败/不可用降级：
 ```bash
 python scripts/recipe_fallback.py --root <输入路径> --top-num 20
 ```
 - CATEGORIES 注册的 23 个正式 recipe；extra recipe `communication_bandwidth_sum` 实际执行但未注册（扩展定位，见 recipes_catalog.md）。
 - 通信算子判定正则：当前以 recipe_fallback.py 的 `COMM_NAME_PATTERN` 为准（二期收敛至 scripts/lib/config.py）。
 
-### P4 compare
+### P4 compare（原生优先）
+- 原生路径：复用内置选卡（通信占比最小=baseline、最大=compare；`--base-rank/--compare-rank` 可覆盖）→ `msprof-analyze compare -d <baseline卡> -c <compare卡> -o <mw>/compare/native` → 原生 xlsx 归一化复制为 `<mw>/compare/performance_comparison_result_{max}_{min}.xlsx`（vendor glob 契约，历史命名 xlsx 一并清理）→ `compare_fallback.py --json-only` 补产 `compare_analysis_result.json`（仅产 JSON，不触碰 xlsx）。选卡失败/原生命令失败/未找到 xlsx/JSON 补产失败 → 整体回退完整内置实现。
+- 降级：
 ```bash
-python scripts/compare_fallback.py --root <输入路径> --output <mw>/compare --base-rank <N> --compare-rank <N>
+python scripts/compare_fallback.py --root <输入路径> --output <mw>/compare [--base-rank <N> --compare-rank <N>]
 ```
-- `--base-rank/--compare-rank` 未给时自动选卡；产物 `performance_comparison_result_{tag}.xlsx`。
+- `--base-rank/--compare-rank` 未给时自动选卡；产物 `performance_comparison_result_{tag}.xlsx` + `compare_analysis_result.json`。
 
 ### P5 vendor — 集成开源报告
 ```bash
@@ -87,13 +90,14 @@ python scripts/report_generator.py --middleware <mw> --mode {single|cluster|comp
 ```bash
 python scripts/run_workflow.py --input <Prof数据路径> --output-dir <输出根> \
     [--top-num 20] [--base-rank N --compare-rank N] [--report-mode cluster] \
-    [--skip-recipes] [--skip-compare] [--skip-swimlane] [--skip-report] [--force] [--msprof-cli <命令>]
+    [--skip-recipes] [--skip-compare] [--skip-swimlane] [--skip-report] [--force] [--no-native]
 ```
+- 默认**原生优先**：探测到 `msprof-analyze`（PATH 存在性）即各阶段优先原生，失败或产物缺口自动回退/由 fallback 补齐；`--no-native` 整体禁用原生，全部使用内置实现；`--msprof-cli` 兼容保留（no-op）。
 - 未提供的可选参数均取脚本默认值；json 解析输入异常已由 run_workflow 保护（try/except）。
 
 ## 4. 全局纪律
 
-1. **原生 CLI 优先**：先探测 `msprof-analyze` 是否可用（探测命令统一为 `msprof-analyze advisor --help`）。可用则 P1 用 `advisor all`、P2/P3 用 `cluster` 子命令；失败或不可用时回退 fallback 脚本（能力等价，对照见 msprof_cli.md）。
+1. **原生 CLI 优先（默认）**：run_workflow 以 `shutil.which('msprof-analyze')` 探测；可用则 P1 `advisor all`（留档）、P2/P3 `cluster` 子命令、P4 `compare` 均优先原生，失败或产物缺口（db/summary/json）自动回退或由 fallback 补齐；`--no-native` 整体禁用（能力对照见 msprof_cli.md）。
 2. **单卡模式**：P2/P3/P4/P6 跳过；advisor 只做单卡；P7 `--mode single`。**多卡模式**：P1 对**所有卡**聚合 advisor（不是每卡一个）；比对卡对 = **通信占比最大 vs 最小**两张卡。
 3. **进阶分析全量执行**：23 正式 + 1 扩展 recipe 全跑；部分数据缺失的 recipe 输出「不支持/数据缺失」说明，不算失败。
 4. **unit 纪律**：db 内时间为 μs，text-CSV 为 μs，text-JSON 为 ms；写报告时统一换算为 ms 并标注。
@@ -122,7 +126,7 @@ python scripts/run_workflow.py --input <Prof数据路径> --output-dir <输出�
 ## 6. 端到端验收清单
 
 1. `detect_result.json` 存在且含类型判定字段。
-2. advisor.md 与 advisor.json 至少其一存在（原生/降级二选一生效）。
+2. advisor.md 与 advisor.json 至少其一存在（始终由内置实现归一化；原生 advisor all 产物仅留档）。
 3. `cluster_analysis.db` 为有效 SQLite 文件。
 4. `recipes_summary.md` 覆盖全部执行过的 recipe（对应 summary JSON 存在）。
 5. 多卡时 `performance_comparison_result_*.xlsx` 与 `compare_analysis_result.json` 成对存在。

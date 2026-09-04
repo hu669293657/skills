@@ -122,18 +122,35 @@ def table_md_by_header(tables, first_cols):
 # ---------- shared helpers ----------
 
 def cluster_dir(mw):
-    """cluster_analysis_output: inside mw, else sibling of mw (data root)."""
+    """cluster_analysis_output: inside mw, else sibling of mw, else data root
+    recorded in detect_result.json (input/cluster_output)."""
     d1 = os.path.join(mw, 'cluster_analysis_output')
     if os.path.isdir(d1):
         return d1
-    return os.path.join(os.path.dirname(mw), 'cluster_analysis_output')
+    d2 = os.path.join(os.path.dirname(mw), 'cluster_analysis_output')
+    if os.path.isdir(d2):
+        return d2
+    det = read_json(os.path.join(mw, 'detect_result.json')) or {}
+    co = det.get('cluster_output')
+    if isinstance(co, dict) and co.get('path') and os.path.isdir(co['path']):
+        return co['path']
+    root = det.get('input') or det.get('cluster_root')
+    if root:
+        d3 = os.path.join(root, 'cluster_analysis_output')
+        if os.path.isdir(d3):
+            return d3
+    return d2
 
 
 def cluster_rel(mw):
     """Relative href prefix from the final report to cluster_analysis_output."""
-    return ('cluster_analysis_output'
-            if os.path.isdir(os.path.join(mw, 'cluster_analysis_output'))
-            else '../cluster_analysis_output')
+    d = cluster_dir(mw)
+    if os.path.isdir(d):
+        try:
+            return os.path.relpath(d, mw).replace('\\', '/')
+        except ValueError:  # cross-drive (e.g. mw on C:, data root on D:)
+            return d.replace('\\', '/')
+    return 'cluster_analysis_output'
 
 
 def fold(section_html):
@@ -635,14 +652,14 @@ def sec_compare(compare, num='6'):
                      + html_table(['Kernel', '基线次数', '比对次数'], rows) + '</div>')
     c_ins = ins.get('communication', {})
     if c_ins.get('top_degraded'):
-        rows = [[r['Comm Op'], r['Baseline Total(ms)'], r['Compare Total(ms)'],
+        rows = [[r['Comm Op'], r['Baseline Total(us)'], r['Compare Total(us)'],
                  r['Diff(ms)'],
                  r['Compare Wait(ms)'] if 'Compare Wait(ms)' in r else '',
                  r['Compare Transit(ms)'] if 'Compare Transit(ms)' in r else '']
                 for r in c_ins['top_degraded'][:10]]
         parts.append('<div class="card p-5 mt-4"><h3>通信算子比对（劣化 Top 10，'
                      '含 Wait/Transit 拆解）</h3>'
-                     + html_table(['通信算子', '基线(ms)', '比对(ms)', 'Diff(ms)',
+                     + html_table(['通信算子', '基线(us)', '比对(us)', 'Diff(ms)',
                                    '比对 Wait(ms)', '比对 Transit(ms)'], rows) + '</div>')
     # 比对小结：自动归纳双卡差异的方向与集中点
     pts = []

@@ -5,7 +5,10 @@
 用法：
   python run_workflow.py --input <prof路径>            # 单卡目录或多卡根目录
   python run_workflow.py --input <prof根目录> --force  # 忽略已有输出件全部重跑
-  python run_workflow.py --input <...> --msprof-cli    # 优先尝试原生 msprof-analyze CLI
+  python run_workflow.py --input <...> --no-native     # 禁用原生 CLI，全部使用内置实现
+
+默认原生优先：探测到 msprof-analyze 时各阶段优先用原生 CLI，失败或产物不合规
+自动回退内置 fallback 实现（fallback 同时负责归一化总报告契约所需的中间件）。
 
 阶段（依赖顺序执行；每阶段幂等，已有输出件自动跳过）：
   1 detect    探测输入：单卡/多卡、数据格式、已有输出件 -> detect_result.json
@@ -27,6 +30,7 @@
               -> performance_report.html（与全部中间件同目录）
 """
 import argparse
+import glob
 import os
 import shutil
 import subprocess
@@ -61,6 +65,89 @@ def detect_msprof_cli():
     return exe
 
 
+def select_compare_cards(root, base_rank=None, compare_rank=None):
+    """复用 compare_fallback 的选卡逻辑：通信占比最小=baseline，最大=compare。
+
+    返回 (baseline_card, compare_card, tag) 或 None（不可选卡时）。
+    """
+    if SCRIPTS not in sys.path:
+        sys.path.insert(0, SCRIPTS)
+    try:
+        import compare_fallback as cf
+    except Exception as e:
+        print(f'[compare] 选卡模块不可用：{e}')
+        return None
+    cards = cf.find_cards(root)
+    if len(cards) < 2:
+        print(f'[compare] 可用卡数 {len(cards)} < 2，跳过原生 compare')
+        return None
+    by_ratio = sorted(cards, key=lambda c: (c['comm_ratio'],
+                                            c['trace']['Communication(Not Overlapped)']))
+    min_card, max_card = by_ratio[0], by_ratio[-1]
+    if base_rank is not None:
+        cand = [c for c in cards if c['rank'] == base_rank]
+        if not cand:
+            print(f'[compare] --base-rank {base_rank} 不存在，跳过原生 compare')
+            return None
+        min_card = cand[0]
+    if compare_rank is not None:
+        cand = [c for c in cards if c['rank'] == compare_rank]
+        if not cand:
+            print(f'[compare] --compare-rank {compare_rank} 不存在，跳过原生 compare')
+            return None
+        max_card = cand[0]
+    return min_card, max_card, f"{max_card['rank']}_{min_card['rank']}"
+
+
+def pick_native_xlsx(out_dir):
+    """在原生产出目录中查找 compare xlsx，优先 performance_comparison_result 命名。"""
+    hits = []
+    for dirpath, _, filenames in os.walk(out_dir):
+        for fn in filenames:
+            if fn.lower().endswith('.xlsx'):
+                hits.append(os.path.join(dirpath, fn))
+    if not hits:
+        return None
+    pref = [h for h in hits
+            if os.path.basename(h).lower().startswith('performance_comparison_result')]
+    return (pref or hits)[0]
+
+
+def native_compare(cli, root, cmp_dir, base_rank=None, compare_rank=None):
+    """原生 msprof-analyze compare：选卡 -> 原生比对 -> 归一化 xlsx 到 vendor 契约命名。
+
+    返回 True 表示原生 xlsx 已就位；失败/产物缺失返回 False（调用方回退内置实现）。
+    """
+    sel = select_compare_cards(root, base_rank, compare_rank)
+    if not sel:
+        return False
+    min_card, max_card, tag = sel
+    out_dir = os.path.join(cmp_dir, 'native')
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"[compare] 原生 compare：baseline rank {min_card['rank']} vs "
+          f"compare rank {max_card['rank']}")
+    rc, _ = sh([cli, 'compare', '-d', min_card['dir'], '-c', max_card['dir'], '-o', out_dir],
+               cwd=root)
+    if rc != 0:
+        print('[compare] 原生 compare 失败，回退内置实现')
+        return False
+    src = pick_native_xlsx(out_dir)
+    if not src:
+        print('[compare] 原生输出未找到 xlsx，回退内置实现')
+        return False
+    dst = os.path.join(cmp_dir, f'performance_comparison_result_{tag}.xlsx')
+    shutil.copyfile(src, dst)
+    # 清理历史遗留的其他命名 xlsx，保证 vendor_bridge glob 唯一命中当前比对
+    for old in glob.glob(os.path.join(cmp_dir, 'performance_comparison_result_*.xlsx')):
+        if os.path.abspath(old) != os.path.abspath(dst):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+    print(f'[compare] 原生 xlsx 已归一化：{dst}')
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='cluster-analysis 端到端性能分析 workflow',
@@ -73,7 +160,9 @@ def main():
     ap.add_argument('--base-rank', type=int, default=None, help='比对基准卡（默认自动选通信占比最小）')
     ap.add_argument('--compare-rank', type=int, default=None, help='比对目标卡（默认自动选通信占比最大）')
     ap.add_argument('--msprof-cli', action='store_true',
-                    help='若安装了 msprof-analyze 则 advisor/cluster 阶段优先用原生 CLI（失败自动回退内置实现）')
+                    help='（兼容保留）原生优先已默认启用，此开关等价于缺省行为')
+    ap.add_argument('--no-native', action='store_true',
+                    help='禁用原生 msprof-analyze，所有阶段直接使用内置 fallback 实现')
     ap.add_argument('--skip-recipes', action='store_true')
     ap.add_argument('--skip-compare', action='store_true')
     ap.add_argument('--skip-swimlane', action='store_true')
@@ -89,9 +178,14 @@ def main():
     mw = os.path.abspath(args.output_dir) if args.output_dir else os.path.join(root, MW_NAME)
     for sub in ('advisor', 'swimlane', 'compare', 'reports'):
         os.makedirs(os.path.join(mw, sub), exist_ok=True)
-    cli = detect_msprof_cli() if args.msprof_cli else None
-    if args.msprof_cli and not cli:
-        print('[cli] msprof-analyze 未安装，使用内置实现')
+    want_native = not args.no_native
+    cli = detect_msprof_cli() if want_native else None
+    if not want_native:
+        print('[cli] 已禁用原生（--no-native），使用内置 fallback 实现')
+    elif cli:
+        print('[cli] 原生优先已启用：可用则原生，失败自动回退内置实现')
+    else:
+        print('[cli] msprof-analyze 未安装，使用内置 fallback 实现')
 
     # ---------- 1 detect ----------
     detect_json = os.path.join(mw, 'detect_result.json')
@@ -140,10 +234,17 @@ def main():
     cl_exists = mode == 'cluster' and cl.get('exists') and (cl.get('has_db') or cl.get('text_files'))
     if mode == 'cluster' and (args.force or not cl_exists):
         done = False
+        native_done = False
         if cli:
             rc, _ = sh([cli, 'cluster', 'analysis', '-d', root, '--top_num', str(args.top_num)],
                        cwd=root)
             done = rc == 0 and os.path.isdir(os.path.join(root, 'cluster_analysis_output'))
+            native_done = done
+        if native_done and not os.path.isfile(
+                os.path.join(root, 'cluster_analysis_output', 'cluster_analysis.db')):
+            # 原生产物缺归一化 db（recipes/泳道等下游依赖），用内置实现补齐
+            print('[cluster] 原生输出缺 cluster_analysis.db，运行内置实现补齐')
+            sh([sys.executable, script('cluster_fallback.py'), '--root', root])
         if not done:
             rc, _ = sh([sys.executable, script('cluster_fallback.py'), '--root', root]
                        + (['--force'] if args.force else []))
@@ -162,6 +263,7 @@ def main():
     recipes_done = bool(cl.get('recipes_done'))
     if mode == 'cluster' and not args.skip_recipes and (args.force or not recipes_done):
         done = False
+        native_done = False
         if cli:
             for recipe in ('cluster_time_summary', 'communication_time_sum', 'slow_rank',
                            'slow_link', 'communication_bottleneck', 'free_analysis',
@@ -169,6 +271,12 @@ def main():
                 sh([cli, 'cluster', 'analysis', '-d', root, recipe, '--top_num', str(args.top_num)])
             rdir = os.path.join(cl_path, 'recipes')
             done = os.path.isdir(rdir) and bool(os.listdir(rdir))
+            native_done = done
+        if native_done and not os.path.isfile(os.path.join(cl_path, 'recipes_summary.json')):
+            # 原生仅覆盖 8 个 recipe 且不产总报告契约所需的汇总件，用内置实现补齐
+            print('[recipes] 原生输出缺 recipes_summary.json，运行内置实现补齐')
+            sh([sys.executable, script('recipe_fallback.py'), '--root', cl_root,
+                '--top-num', str(args.top_num)])
         if not done:
             rc, _ = sh([sys.executable, script('recipe_fallback.py'), '--root', cl_root,
                         '--top-num', str(args.top_num)])
@@ -182,11 +290,30 @@ def main():
     cmp_ok = False
     if mode == 'cluster' and not args.skip_compare:
         if args.force or not os.path.isfile(cmp_json):
-            rc, _ = sh([sys.executable, script('compare_fallback.py'), '--root', root,
-                        '--output', os.path.join(mw, 'compare')]
-                       + (['--base-rank', str(args.base_rank)] if args.base_rank is not None else [])
-                       + (['--compare-rank', str(args.compare_rank)]
-                          if args.compare_rank is not None else []))
+            cmp_dir = os.path.join(mw, 'compare')
+            rank_args = (['--base-rank', str(args.base_rank)]
+                         if args.base_rank is not None else []) + \
+                        (['--compare-rank', str(args.compare_rank)]
+                         if args.compare_rank is not None else [])
+            native_ok = False
+            if cli:
+                native_ok = native_compare(cli, root, cmp_dir,
+                                           base_rank=args.base_rank,
+                                           compare_rank=args.compare_rank)
+            if native_ok:
+                # 原生 xlsx 已就位（vendor 契约），仅补产总报告契约所需中间件 JSON
+                rc, _ = sh([sys.executable, script('compare_fallback.py'), '--root', root,
+                            '--output', cmp_dir, '--json-only'] + rank_args)
+                if rc != 0 or not os.path.isfile(cmp_json):
+                    print('[compare] 中间件 JSON 补产失败，回退完整内置实现')
+                    native_ok = False
+            if native_ok:
+                rc = 0
+                print('[compare] 原生 compare 成功：xlsx 来自 msprof-analyze，'
+                      'JSON 由内置实现补产')
+            else:
+                rc, _ = sh([sys.executable, script('compare_fallback.py'), '--root', root,
+                            '--output', cmp_dir] + rank_args)
             cmp_ok = rc == 0 and os.path.isfile(cmp_json)
         else:
             cmp_ok = True

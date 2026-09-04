@@ -5,6 +5,9 @@ Selects baseline (min comm ratio) and compare (max comm ratio) cards from
 step_trace_time.csv, then builds msprof-compare-equivalent results:
 performance_comparison_result_{compare}_{base}.xlsx + compare_analysis_result.json
 (prof-compare style middleware with insights).
+
+xlsx 列布局对齐原生 msprof-analyze compare 输出（vendor prof-compare 按固定列下标
+解析，schema 不一致会导致列错位/整表解析为 0）。
 """
 import argparse
 import csv
@@ -66,12 +69,24 @@ def compare_overall(base, comp):
             ('Uncovered Communication Time', 'Communication(Not Overlapped)'),
             ('Free Time', 'Free')]
     rows, insights = [], []
+    stage_b, stage_c = base['trace']['Stage'], comp['trace']['Stage']
     for label, key in dims:
-        b, c = base['trace'][key] / 1000, comp['trace'][key] / 1000
+        b_us, c_us = base['trace'][key], comp['trace'][key]
+        b, c = b_us / 1000, c_us / 1000
         ratio = (c - b) / b if b else None
-        rows.append({'Dimension': label, f'Baseline(us)': round(b * 1000, 1),
-                     f'Compare(us)': round(c * 1000, 1), 'Diff(ms)': round(c - b, 3),
-                     'Diff Ratio': round(ratio, 4) if ratio is not None else 'N/A'})
+        # 列序对齐 vendor overall_metrics.py: 0 维度名, 1-3 base duration(ms)/
+        # ratio/number, 4-6 comp 同, 7 diff(ms), 8 diff_ratio; Diff(ms) 为附加列。
+        # 模板按 ms 渲染 OverallMetrics（step_trace_time.csv 源值为 us，需 /1000）
+        rows.append({'Dimension': label,
+                     'Baseline(ms)': round(b, 2),
+                     'Baseline Ratio(%)': round(b_us / stage_b * 100, 2) if stage_b else 0,
+                     'Baseline Number': '-',
+                     'Compare(ms)': round(c, 2),
+                     'Compare Ratio(%)': round(c_us / stage_c * 100, 2) if stage_c else 0,
+                     'Compare Number': '-',
+                     'Diff Duration(ms)': round(c - b, 2),
+                     'Diff Ratio': round(ratio, 4) if ratio is not None else '',
+                     'Diff(ms)': round(c - b, 3)})
         if ratio is not None and abs(ratio) > 0.01:
             insights.append({'dimension': label, 'diff_ms': round(c - b, 3),
                              'diff_ratio': round(ratio, 4),
@@ -97,13 +112,16 @@ def compare_op_statistic(base, comp):
         t_comp = vb['total'] if vb else 0
         diff = t_comp - t_base
         ratio = diff / t_base if t_base else None
-        rows.append({'Op Type': op,
+        # 列序对齐 vendor operator.py: 0 No., 1 算子名, 2-3 base duration(ms)/calls,
+        # 4-5 comp 同, 6 diff(ms), 7 diff_ratio; is_comm 为附加列
+        rows.append({'No.': len(rows) + 1,
+                     'Op Type': op,
                      'Baseline Total Time(ms)': round(t_base / 1000, 3),
+                     'Baseline Calls': va['count'] if va else 0,
                      'Compare Total Time(ms)': round(t_comp / 1000, 3),
+                     'Compare Calls': vb['count'] if vb else 0,
                      'Diff Duration(ms)': round(diff / 1000, 3),
                      'Diff Ratio': round(ratio, 4) if ratio is not None else 'NEW',
-                     'Baseline Calls': va['count'] if va else 0,
-                     'Compare Calls': vb['count'] if vb else 0,
                      'is_comm': bool(COMM_NAME_PATTERN.search(op))})
     rows.sort(key=lambda r: r['Diff Duration(ms)'], reverse=True)
     return rows
@@ -118,11 +136,16 @@ def compare_kernel(base, comp):
                 name = r.get('Name', '')
                 d = to_f(r.get('Duration(us)'))
                 e = out.setdefault(name, {'total': 0.0, 'count': 0, 'max': 0.0,
-                                          'min': float('inf'), 'core': r.get('Accelerator Core', '')})
+                                          'min': float('inf'),
+                                          'core': r.get('Accelerator Core', ''),
+                                          'shape': ''})
                 e['total'] += d
                 e['count'] += 1
                 e['max'] = max(e['max'], d)
                 e['min'] = min(e['min'], d)
+                if not e['shape']:
+                    e['shape'] = (r.get('Input Shapes') or r.get('Input Shape')
+                                  or r.get('Shape') or '')
         for e in out.values():
             if e['min'] == float('inf'):
                 e['min'] = 0
@@ -135,16 +158,29 @@ def compare_kernel(base, comp):
         t_comp = vb['total'] if vb else 0
         diff = t_comp - t_base
         ratio = diff / t_base if t_base else None
-        rows.append({'Kernel Name': name, 'Core Type': (va or vb)['core'],
-                     'Baseline Total(us)': round(t_base, 1), 'Compare Total(us)': round(t_comp, 1),
+        b_avg = round(va['total'] / va['count'], 1) if va else 0
+        c_avg = round(vb['total'] / vb['count'], 1) if vb else 0
+        # 列序对齐 vendor kernel.py parse_compare: 0 No., 1 Kernel Name, 2 Input Shape,
+        # 3-6 base total/avg/max/min(us), 7 base_calls, 8-11 comp 同, 12 comp_calls,
+        # 13 total_ratio, 14 avg_ratio; Core Type/Diff Total 等为附加列
+        rows.append({'No.': len(rows) + 1,
+                     'Kernel Name': name,
+                     'Input Shape': (va or vb or {}).get('shape', ''),
+                     'Baseline Total(us)': round(t_base, 1),
+                     'Baseline Avg(us)': b_avg,
+                     'Baseline Max(us)': round(va['max'], 1) if va else 0,
+                     'Baseline Min(us)': round(va['min'], 1) if va else 0,
+                     'Baseline Calls': va['count'] if va else 0,
+                     'Compare Total(us)': round(t_comp, 1),
+                     'Compare Avg(us)': c_avg,
+                     'Compare Max(us)': round(vb['max'], 1) if vb else 0,
+                     'Compare Min(us)': round(vb['min'], 1) if vb else 0,
+                     'Compare Calls': vb['count'] if vb else 0,
+                     'Total Ratio': round(t_comp / t_base, 4) if t_base else 'NEW',
+                     'Avg Ratio': round(c_avg / b_avg, 4) if b_avg else 'NEW',
+                     'Core Type': (va or vb)['core'],
                      'Diff Total(us)': round(diff, 1),
                      'Diff Total Ratio': round(ratio, 4) if ratio is not None else 'NEW',
-                     'Baseline Calls': va['count'] if va else 0,
-                     'Compare Calls': vb['count'] if vb else 0,
-                     'Baseline Avg(us)': round(va['total'] / va['count'], 1) if va else 0,
-                     'Compare Avg(us)': round(vb['total'] / vb['count'], 1) if vb else 0,
-                     'Baseline Max(us)': round(va['max'], 1) if va else 0,
-                     'Compare Max(us)': round(vb['max'], 1) if vb else 0,
                      'is_comm': bool(COMM_NAME_PATTERN.search(name))})
     rows.sort(key=lambda r: r['Diff Total(us)'], reverse=True)
     return rows
@@ -163,12 +199,28 @@ def compare_api(base, comp):
         va, vb = a.get(api), b.get(api)
         t_base = va['total'] if va else 0
         t_comp = vb['total'] if vb else 0
-        rows.append({'API Name': api,
+        b_calls = va['count'] if va else 0
+        c_calls = vb['count'] if vb else 0
+        b_avg = round(t_base / b_calls, 3) if b_calls else 0
+        c_avg = round(t_comp / c_calls, 3) if c_calls else 0
+        # 列序对齐 vendor api_compare.py: 0 No., 1 API 名, 2-5 base total/self/avg(ms)/
+        # calls, 6-9 comp 同, 10-13 total/self/avg/calls_ratio; Diff(ms) 为附加列
+        # （api_statistic.csv 无 self 耗时，self=total）
+        rows.append({'No.': len(rows) + 1,
+                     'API Name': api,
                      'Baseline Total(ms)': round(t_base / 1000, 3),
+                     'Baseline Self(ms)': round(t_base / 1000, 3),
+                     'Baseline Avg(ms)': round(t_base / 1000 / b_calls, 3) if b_calls else 0,
+                     'Baseline Calls': b_calls,
                      'Compare Total(ms)': round(t_comp / 1000, 3),
-                     'Diff(ms)': round((t_comp - t_base) / 1000, 3),
-                     'Baseline Calls': va['count'] if va else 0,
-                     'Compare Calls': vb['count'] if vb else 0})
+                     'Compare Self(ms)': round(t_comp / 1000, 3),
+                     'Compare Avg(ms)': round(t_comp / 1000 / c_calls, 3) if c_calls else 0,
+                     'Compare Calls': c_calls,
+                     'Total Ratio': round(t_comp / t_base, 4) if t_base else 'NEW',
+                     'Self Ratio': round(t_comp / t_base, 4) if t_base else 'NEW',
+                     'Avg Ratio': round(c_avg / b_avg, 4) if b_avg else 'NEW',
+                     'Calls Ratio': round(c_calls / b_calls, 4) if b_calls else 'NEW',
+                     'Diff(ms)': round((t_comp - t_base) / 1000, 3)})
     rows.sort(key=lambda r: r['Diff(ms)'], reverse=True)
     return rows
 
@@ -184,11 +236,18 @@ def compare_communication(base, comp):
                     if name in AGG_ROWS:
                         continue
                     ti = info.get('Communication Time Info', {})
-                    e = out.setdefault(name, {'total': 0.0, 'wait': 0.0, 'transit': 0.0, 'count': 0})
-                    e['total'] += to_f(ti.get('Elapse Time(ms)'))
+                    e = out.setdefault(name, {'total': 0.0, 'wait': 0.0, 'transit': 0.0,
+                                              'count': 0, 'max': 0.0, 'min': float('inf')})
+                    ms = to_f(ti.get('Elapse Time(ms)'))
+                    e['total'] += ms
+                    e['max'] = max(e['max'], ms)
+                    e['min'] = min(e['min'], ms)
                     e['wait'] += to_f(ti.get('Wait Time(ms)'))
                     e['transit'] += to_f(ti.get('Transit Time(ms)'))
                     e['count'] += 1
+        for e in out.values():
+            if e['min'] == float('inf'):
+                e['min'] = 0
         return out
     a, b = agg(base), agg(comp)
     rows = []
@@ -196,9 +255,27 @@ def compare_communication(base, comp):
         va, vb = a.get(op), b.get(op)
         t_base = va['total'] if va else 0
         t_comp = vb['total'] if vb else 0
-        rows.append({'Comm Op': op,
-                     'Baseline Total(ms)': round(t_base, 3), 'Compare Total(ms)': round(t_comp, 3),
+        b_calls = va['count'] if va else 0
+        c_calls = vb['count'] if vb else 0
+        # 列序对齐 vendor communication.py: 0 No., 1 Comm Op, 2 Task Name(空=汇总行),
+        # 3-7 base calls/total/avg/max/min(us), 8-12 comp 同, 13-14 附加位,
+        # 15 diff(us), 16 diff_ratio。源 communication.json 为 ms，模板按 us 渲染，需 x1000
+        rows.append({'No.': len(rows) + 1,
+                     'Comm Op': op,
+                     'Task Name': '',
+                     'Baseline Calls': b_calls,
+                     'Baseline Total(us)': round(t_base * 1000, 1),
+                     'Baseline Avg(us)': round(t_base * 1000 / b_calls, 1) if b_calls else 0,
+                     'Baseline Max(us)': round(va['max'] * 1000, 1) if va else 0,
+                     'Baseline Min(us)': round(va['min'] * 1000, 1) if va else 0,
+                     'Compare Calls': c_calls,
+                     'Compare Total(us)': round(t_comp * 1000, 1),
+                     'Compare Avg(us)': round(t_comp * 1000 / c_calls, 1) if c_calls else 0,
+                     'Compare Max(us)': round(vb['max'] * 1000, 1) if vb else 0,
+                     'Compare Min(us)': round(vb['min'] * 1000, 1) if vb else 0,
                      'Diff(ms)': round(t_comp - t_base, 3),
+                     'is_comm': True,
+                     'Diff Duration(us)': round((t_comp - t_base) * 1000, 1),
                      'Diff Ratio': round((t_comp - t_base) / t_base, 4) if t_base else 'NEW',
                      'Baseline Wait(ms)': round(va['wait'], 3) if va else 0,
                      'Compare Wait(ms)': round(vb['wait'], 3) if vb else 0,
@@ -273,6 +350,9 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--base-rank', type=int, default=None, help='override baseline rank')
     parser.add_argument('--compare-rank', type=int, default=None, help='override compare rank')
+    parser.add_argument('--json-only', action='store_true',
+                        help='仅生成 compare_analysis_result.json 中间件（跳过 xlsx 与 CSV mirrors），'
+                             '供原生 compare 流程补产，避免覆盖原生 xlsx')
     args = parser.parse_args()
 
     root = os.path.abspath(args.root)
@@ -311,28 +391,35 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     tag = f"{max_card['rank']}_{min_card['rank']}"
 
-    # xlsx (msprof-compare style)
-    try:
-        import pandas as pd
-        xlsx_path = os.path.join(args.output, f'performance_comparison_result_{tag}.xlsx')
-        with pd.ExcelWriter(xlsx_path, engine='openpyxl') as w:
-            pd.DataFrame(overall_rows).to_excel(w, sheet_name='OverallMetrics', index=False)
-            pd.DataFrame(op_rows).to_excel(w, sheet_name='OperatorCompareStatistic', index=False)
-            pd.DataFrame(kernel_rows).to_excel(w, sheet_name='KernelCompare', index=False)
-            pd.DataFrame(api_rows).to_excel(w, sheet_name='ApiCompare', index=False)
-            pd.DataFrame(comm_rows).to_excel(w, sheet_name='CommunicationCompare', index=False)
-        print(f'xlsx: {xlsx_path}')
-    except ImportError:
-        xlsx_path = None
-        print('openpyxl/pandas unavailable; skip xlsx')
+    # xlsx (msprof-compare style)；--json-only 模式跳过，保护原生 compare 产物
+    if not args.json_only:
+        try:
+            import pandas as pd
+            xlsx_path = os.path.join(args.output, f'performance_comparison_result_{tag}.xlsx')
+            with pd.ExcelWriter(xlsx_path, engine='openpyxl') as w:
+                # sheet 名含 minimal 可让 vendor overall_metrics 解析器返回
+                # has_minimal_warning=False，避免假的 Not minimal profiling 警告
+                # （注意 Excel sheet 名上限 31 字符）
+                pd.DataFrame(overall_rows).to_excel(
+                    w, sheet_name='OverallMetrics(minimal)', index=False)
+                pd.DataFrame(op_rows).to_excel(w, sheet_name='OperatorCompareStatistic', index=False)
+                pd.DataFrame(kernel_rows).to_excel(w, sheet_name='KernelCompare', index=False)
+                pd.DataFrame(api_rows).to_excel(w, sheet_name='ApiCompare', index=False)
+                pd.DataFrame(comm_rows).to_excel(w, sheet_name='CommunicationCompare', index=False)
+            print(f'xlsx: {xlsx_path}')
+        except ImportError:
+            xlsx_path = None
+            print('openpyxl/pandas unavailable; skip xlsx')
 
-    # CSV mirrors
-    csv_dir = os.path.join(args.output, 'csv')
-    os.makedirs(csv_dir, exist_ok=True)
-    for name, rows in (('overall_metrics', overall_rows), ('operator_statistic', op_rows),
-                       ('kernel_compare', kernel_rows), ('api_compare', api_rows),
-                       ('communication_compare', comm_rows)):
-        write_csv_file(os.path.join(csv_dir, f'{name}.csv'), rows)
+        # CSV mirrors
+        csv_dir = os.path.join(args.output, 'csv')
+        os.makedirs(csv_dir, exist_ok=True)
+        for name, rows in (('overall_metrics', overall_rows), ('operator_statistic', op_rows),
+                           ('kernel_compare', kernel_rows), ('api_compare', api_rows),
+                           ('communication_compare', comm_rows)):
+            write_csv_file(os.path.join(csv_dir, f'{name}.csv'), rows)
+    else:
+        print('json-only: 跳过 xlsx 与 CSV mirrors（原生 compare 产物保持不变）')
 
     # middleware json (prof-compare style)
     middleware = {
