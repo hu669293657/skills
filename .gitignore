@@ -1,0 +1,12 @@
+# Python cache / build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Report outputs
+cluster-analysis/scripts/report_assets/analysis_output/
+
+# OS junk
+Thumbs.db
+Desktop.ini

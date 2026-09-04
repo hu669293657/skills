@@ -1,6 +1,6 @@
 # Skills
 
-个人技能集合，涵盖 vLLM-Ascend 性能调优、Profiling 分析、环境/日志诊断、配置提取等场景。
+个人技能集合，涵盖 vLLM-Ascend 性能调优、训练性能分析与集群比对、Host 侧瓶颈定位、环境/日志/硬件诊断等场景。
 
 每个 skill 目录下均有 `SKILL.md`（Agent 执行定义）与 `README.md`（人类可读说明：应用场景、解决的问题、输入及获取方式、输出、流程图、示例提示词）。
 
@@ -10,11 +10,12 @@
 skills/
 ├── ascend-dump-analyzer/          # Ascend NPU 环境信息采集与分析
 ├── ascend-field-issue-analyzer/   # 现网问题文本日志取证分析
-├── cluster-analysis/              # Ascend 集群性能分析与比对
-├── compare-analyzer/              # Prof 比对结果 (xlsx) 解析与中文报告生成
+├── cluster-analysis/              # 昇腾 NPU 训练性能一站式分析（含 vendor 子技能）
+├── cluster-compare/               # 两集群 profiling 数据比对与劣化归因
 ├── cpu-trace-analyzer/            # Host 侧 CPU trace 瓶颈定位
 ├── host-trace-diagnosis/          # Host 侧 trace 规则化智能诊断
 ├── ibmc_analyzer/                 # iBMC 服务器日志分析与故障定位
+├── prof-compare/                  # 双 Prof 数据比对与中文报告生成
 └── vllm-ascend-tuning/            # vLLM-Ascend 全链路性能调优
 ```
 
@@ -44,27 +45,37 @@ skills/
 
 ### 3. cluster-analysis
 
-**Ascend 集群性能分析与比对工具**（[README](cluster-analysis/README.md)）
+**昇腾 NPU 训练性能一站式分析技能**（[README](cluster-analysis/README.md)）
 
-面向昇腾 NPU 集群 profiling 数据的性能分析工具，支持从 `cluster_analysis_output` 目录提取数据，生成全景总结和 HTML 可视化报告。
+面向单卡/多卡 Prof 数据的一站式性能分析与瓶颈定位，兼容 msprof-analyze 全部能力：原生 CLI 已安装则优先调用，未安装则使用内置 fallback 脚本（能力等价）。
 
-- **数据格式**：支持 DB 模式（cluster.db）和 TEXT 模式（CSV + JSON），自动识别
-- **全景提取**：解析 Step 时间、通信时间、通信带宽、通信矩阵等核心维度，生成 MD 总结文件
-- **单集群分析**：计算时间分布、通信效率、Rank 均衡度，生成 HTML 分析报告
-- **双集群比对**：对比正常与异常集群，识别性能差异根因（慢卡定位、通信瓶颈等）
-- **HTML 报告**：内置单集群分析和双集群对比两套可视化模板
+- **输入自动识别**：单卡/多卡、DB/TEXT 格式、PyTorch/MindSpore 框架，缺失 `cluster_analysis_output` 时自动生成
+- **流水线执行**：八阶段流水线（P0–P7），支持 `run_workflow.py` 一键编排与端到端验收
+- **进阶分析**：五大类 23 正式 + 1 扩展 recipe 全量执行，含 Advisor 诊断与能力矩阵
+- **对比能力**：泳道算子统计与跨卡比对、通信占比最大/最小卡对比（经 vendor_bridge 调用 vendor 子技能）
+- **HTML 报告**：左侧固定导航、分区可折叠、vendor 子报告 iframe 内嵌的完整报告
 
-### 4. compare-analyzer
+### 4. cluster-compare
 
-**Prof 比对结果解析与报告生成工具**（[README](compare-analyzer/README.md)）
+**昇腾集群比对分析技能**（[README](cluster-compare/README.md)）
 
-解析 `msprof-analyze compare` 生成的比对 xlsx，一次产出 JSON、HTML 报告、中文 xlsx 与中文 CSV。
+专注比对两个集群的 profiling 数据（DB 或 TEXT 格式），定位性能差异并输出劣化归因 HTML 报告。
 
-- **算子级对比**：GPU vs NPU 或 NPU vs NPU 的性能回退/提升分析
-- **中文交付**：翻译并美化比对表格，直接可交付
-- **多格式输出**：JSON（机器可读）+ HTML（可视化）+ xlsx/CSV（表格）
+- **数据准备**：无现成 `cluster_analysis_output` 时，自动安装并调用 `msprof-analyze cluster` 生成
+- **比对维度**：Step 耗时拆解、通信算子耗时、通信带宽、通信矩阵
+- **输出**：劣化归因 HTML 对比报告
 
-### 5. cpu-trace-analyzer
+### 5. prof-compare
+
+**双 Prof 数据比对与中文报告生成技能**（[README](prof-compare/README.md)）
+
+比对两个 Prof 数据集（GPU vs NPU / NPU vs NPU），自动检测并安装 msprof-analyze，支持直比与 xlsx 解析两种工作模式。
+
+- **模式一（直比）**：提供两个 Prof 路径，自动调用 compare 生成比对 xlsx 后进入分析
+- **模式二（xlsx 分析）**：直接解析已有的 `performance_comparison_result_*.xlsx`
+- **多格式输出**：JSON（结构化）+ HTML 报告（改善亮点/劣化风险）+ 中文 xlsx 与 CSV
+
+### 6. cpu-trace-analyzer
 
 **Host 侧 CPU trace 瓶颈定位工具**（[README](cpu-trace-analyzer/README.md)）
 
@@ -72,19 +83,20 @@ skills/
 
 - **Gap 扫描**：自动发现计算/通信空隙并按影响排序
 - **根因归因**：CPU 调度、DataLoader 竞争、H2D 拷贝阻塞、kernel launch 间隙
+- **多格式支持**：Chrome JSON / ftrace / msprof / perf / Perfetto 五种 trace 格式统一解析，内置完整 Python 包（CLI 一键运行）
 - **输出**：JSON 诊断结果 + HTML 诊断报告
 
-### 6. host-trace-diagnosis
+### 7. host-trace-diagnosis
 
 **Host 侧 trace 规则化智能诊断工具**（[README](host-trace-diagnosis/README.md)）
 
 对 perfetto/ftrace/msprof/perf trace 进行规则库驱动的逐条匹配诊断。
 
 - **多格式支持**：perfetto / ftrace / msprof / perf 统一解析
-- **规则可扩展**：内置 7 个 YAML 规则文件，可自定义扩展
+- **规则可扩展**：内置 7 个 YAML 规则文件（CPU / Host NPU / IO / 内存 / NUMA / 运行时 / 调度），可自定义扩展
 - **结论可复核**：命中结果关联规则 ID 与证据事件
 
-### 7. ibmc_analyzer
+### 8. ibmc_analyzer
 
 **iBMC 服务器日志分析与故障定位工具**（[README](ibmc_analyzer/README.md)）
 
@@ -95,7 +107,7 @@ skills/
 - **集群对比**：多节点配置 Diff，识别网卡固件、PCIe 带宽等木桶效应
 - **输出**：结构化 JSON + HTML 诊断报告（单机深度分析 + 多机集群对比）
 
-### 8. vllm-ascend-tuning
+### 9. vllm-ascend-tuning
 
 **vLLM-Ascend 全链路性能调优技能**（[README](vllm-ascend-tuning/README.md)）
 
@@ -112,8 +124,9 @@ skills/
 |-----------|---------|
 | 体检/比对服务器环境 | ascend-dump-analyzer |
 | 从现网日志定位问题根因 | ascend-field-issue-analyzer |
-| 集群性能分析、找慢卡 | cluster-analysis |
-| 对比两组 Prof 数据（迁移调优前后） | compare-analyzer |
+| 训练性能一站式分析、找慢卡 | cluster-analysis |
+| 比对两个集群（正常 vs 异常） | cluster-compare |
+| 对比两组 Prof 数据（GPU vs NPU / 调优前后） | prof-compare |
 | 定位 Host 侧瓶颈（Gap 归因） | cpu-trace-analyzer |
 | trace 规则化健康检查 | host-trace-diagnosis |
 | 判断服务器/BMC 硬件健康 | ibmc_analyzer |

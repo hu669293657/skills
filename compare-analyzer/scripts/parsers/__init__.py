@@ -1,1 +1,0 @@
-# Compare Analyzer Parsers Package
