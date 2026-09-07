@@ -57,6 +57,7 @@ class ThreadSampler(object):
     def __init__(self, outdir, pid):
         self.pid = pid
         self.path = os.path.join(outdir, "threads", "threads.csv")
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self.rows = 0
         self._header_written = False
         self.task_dir = "/proc/%s/task" % pid

@@ -3,7 +3,7 @@
 Zero-dependency (Python standard library only). See DESIGN.md for architecture.
 """
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 SCHEMA_VERSION = "1.0"
 REPORT_VERSION = "1.0"
 RULE_VERSION = "1.0"

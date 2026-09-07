@@ -360,12 +360,43 @@ def test_09_end_to_end_collect():
         _cleanup(base)
 
 
+# ---------------------------------------------------------------- 线程采集
+def test_10_thread_sampler_makedirs():
+    print("[10] ThreadSampler 自动创建 threads/ 子目录（回归：threads.csv 崩溃）")
+    from host_bound.collector import thread as thr_mod
+    d = _tmpdir()
+    try:
+        # 回归点：构造 ThreadSampler 必须立刻创建 <outdir>/threads/，
+        # 否则 capture() 首次 open("w") 会 FileNotFoundError
+        ts = thr_mod.ThreadSampler(d, 999999)  # pid 不存在也要先建目录
+        _check(os.path.isdir(os.path.join(d, "threads")),
+               "构造时创建 threads/ 子目录")
+        _check(not ts.available(), "pid 不存在时 available()=False")
+        _check(not ts.capture(0.0, 0.0), "pid 不存在时 capture() 安全返回 False")
+
+        if os.path.isdir("/proc/self/task"):  # Linux：真实采集全链路
+            ts2 = thr_mod.ThreadSampler(d, "self")
+            _check(ts2.available(), "Linux 下 /proc/self/task 可用")
+            _check(ts2.capture(1.0, 1000.0), "capture() 采集成功")
+            _check(ts2.capture(2.0, 2000.0), "第二次 capture() 追加成功")
+            with open(ts2.path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            _check(lines[0].startswith("ts,tid,name,state,utime"),
+                   "表头正确: %s" % lines[0][:40])
+            _check(len(lines) >= 3, "至少采到主线程数据（%d 行）" % len(lines))
+            s = ts2.summary()
+            _check(s["rows"] == ts2.rows and s["path"] == "threads/threads.csv",
+                   "summary() 统计一致（rows=%d）" % s["rows"])
+    finally:
+        _cleanup(d)
+
+
 # ---------------------------------------------------------------- 入口
 ALL = [test_01_probe_environment, test_02_snapshot_series,
        test_03_logger_idempotency, test_04_compute_dq_grades,
        test_05_sanitizer, test_06_process_tree_and_ps,
        test_07_framework_collect, test_08_build_jobs,
-       test_09_end_to_end_collect]
+       test_09_end_to_end_collect, test_10_thread_sampler_makedirs]
 
 
 def main():

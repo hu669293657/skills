@@ -52,7 +52,7 @@ class CliSmokeTest(unittest.TestCase):
         code, out, _err = self._run("version")
         self.assertEqual(code, 0)
         self.assertIn("host-bound", out)
-        self.assertIn("0.2.0", out)
+        self.assertIn("0.2.1", out)
 
     def test_no_command_shows_help(self):
         code, _out, _err = self._run()

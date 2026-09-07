@@ -81,7 +81,7 @@ class ReportSmokeTest(unittest.TestCase):
         self.assertGreaterEqual(html.count("<svg"), 11)
 
         # 页脚版本块由 generate_html 注入
-        self.assertIn("0.2.0", html)
+        self.assertIn("0.2.1", html)
 
     # -- 3. 离线约束 ---------------------------------------------------------
 
