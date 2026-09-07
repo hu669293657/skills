@@ -1,0 +1,60 @@
+# ============================================================
+# 存储与 IO
+# 依赖特征: cpu.iowait_pct, io.util_pct, io.await_ms
+# ============================================================
+- rule_id: HB_IO_IOWAIT
+  name: iowait 占比过高
+  group: io
+  severity: HIGH
+  weight: 1.5
+  contribution: host_bound
+  condition: cpu.iowait_pct >= 20
+  impact_hint: 65
+  diagnosis:
+    type: IO_BOUND
+    statement: CPU 大量时间在等待 IO，数据供给链路存在瓶颈
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 定位慢盘与冷读路径；做数据本地化、预热与顺序读优化
+    expected: cpu.iowait_pct 下降至 5 以下
+    verify: 重采后对比 iowait 与 io.await_ms
+    risk: ""
+
+- rule_id: HB_IO_UTIL
+  name: 存储设备饱和
+  group: io
+  severity: HIGH
+  weight: 1.2
+  contribution: host_bound
+  condition: io.util_pct >= 85
+  impact_hint: 60
+  diagnosis:
+    type: IO_SATURATION
+    statement: 磁盘利用率接近饱和，读写请求开始排队
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 迁移数据到 NVMe 或内存盘，或降低读取并发避免争抢
+    expected: io.util_pct 与 await 同步下降
+    verify: 重采后对比 iostat
+    risk: ""
+
+- rule_id: HB_IO_AWAIT
+  name: IO 延迟过高
+  group: io
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  condition: io.await_ms >= 50
+  impact_hint: 50
+  diagnosis:
+    type: IO_SATURATION
+    statement: 单次 IO 平均等待超过 50 毫秒，读取延迟显著
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 检查磁盘负载与挂载参数，必要时限流或更换存储介质
+    expected: io.await_ms 下降
+    verify: 重采后对比
+    risk: ""

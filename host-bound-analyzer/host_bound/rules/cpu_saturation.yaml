@@ -1,0 +1,41 @@
+# ============================================================
+# CPU 饱和与负载均衡
+# 依赖特征: cpu.util_pct, device.util_pct, cpu.cv_util
+# ============================================================
+- rule_id: HB_CPU_SAT_HIGH
+  name: CPU 饱和且设备利用不足
+  group: cpu
+  severity: HIGH
+  weight: 2.0
+  contribution: host_bound
+  condition: cpu.util_pct >= 85 and device.util_pct < 70
+  impact_hint: 80
+  diagnosis:
+    type: CPU_COMPUTE_BOUND
+    statement: CPU 平均利用率接近饱和，Host 侧计算可能构成主要瓶颈
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 分析 CPU 热点并优化最重函数路径；检查线程配置与 CPU 亲和性
+    expected: CPU 利用率下降或设备利用率上升
+    verify: 重采后对比 cpu.util_pct 与 device.util_pct
+    risk: ""
+
+- rule_id: HB_CPU_IMBALANCE
+  name: 核间负载严重不均衡
+  group: cpu
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  condition: cpu.cv_util > 0.5 and cpu.util_pct >= 60
+  impact_hint: 50
+  diagnosis:
+    type: CPU_IMBALANCE
+    statement: 部分核心过载而部分核心空闲，负载分布失衡，有效并行度受限
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 调整线程数与亲和性（taskset 或 numactl），均衡 DataLoader worker 的核间分布
+    expected: cpu.cv_util 下降，设备利用率上升
+    verify: 重采后观察核间利用率离散度
+    risk: 绑核需避开设备中断所在核心

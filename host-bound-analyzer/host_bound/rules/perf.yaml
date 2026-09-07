@@ -1,0 +1,42 @@
+# ============================================================
+# 性能剖析（perf）归因
+# 依赖特征: perf.cpu_bound_pct, perf.hotspot_category（可选，来自 perf report）
+# ============================================================
+- rule_id: HB_PERF_CPU_HOT
+  name: perf 归因显示 CPU 计算热点主导
+  group: perf
+  severity: HIGH
+  weight: 1.5
+  contribution: host_bound
+  condition: perf.cpu_bound_pct >= 60
+  impact_hint: 70
+  diagnosis:
+    type: CPU_COMPUTE_BOUND
+    statement: 性能剖析将大部分 CPU 时间归因于计算热点函数
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 针对热点符号做优化（算子融合、向量化、减少冗余类型转换与同步）
+    expected: 热点占比与 CPU 利用率下降
+    verify: 重采 perf stat 与 perf report 对比
+    risk: ""
+
+- rule_id: HB_PERF_RUNTIME_HOT
+  name: perf 归因指向运行时与调度开销
+  group: perf
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  confidence: 0.6
+  condition: perf.hotspot_category == 'runtime'
+  impact_hint: 50
+  diagnosis:
+    type: RUNTIME_BOUND
+    statement: CPU 时间大量消耗在框架运行时与调度路径上
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 减少小算子调度开销（算子合并、图模式或编译优化）
+    expected: 运行时开销占比下降
+    verify: 重采后对比热点分布
+    risk: ""

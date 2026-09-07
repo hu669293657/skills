@@ -1,0 +1,62 @@
+# ============================================================
+# 核心判据：Host-Device 供给缺口（CPU 高利用 + 设备低利用）
+# 依赖特征: cpu.util_pct(0-100), device.util_pct(0-100),
+#           cpu.load5_per_core, perf.top_symbols
+# ============================================================
+- rule_id: HB_GAP_CORE
+  name: CPU 高利用且设备严重利用不足
+  group: device
+  severity: CRITICAL
+  weight: 2.5
+  contribution: host_bound
+  condition: cpu.util_pct >= 70 and device.util_pct <= 40
+  impact_hint: 90
+  diagnosis:
+    type: DEVICE_IDLE_GAP
+    statement: Host 侧持续高负载而设备大部分时间空闲，计算供给严重不足
+  recommendation:
+    level: P0
+    certainty: 较高
+    action: 定位 Host 侧最大耗时环节（数据预处理、同步点、调度抖动），优先优化热点 {perf.top_symbols}
+    expected: 设备利用率显著上升（目标 >= 80）
+    verify: 优化后重采，对比 device.util_pct 与 Host Bound Score
+    risk: 大规模改造前先做小范围 A/B 验证
+
+- rule_id: HB_GAP_MODERATE
+  name: CPU 高利用且设备利用率偏低
+  group: device
+  severity: HIGH
+  weight: 1.5
+  contribution: host_bound
+  condition: cpu.util_pct >= 70 and device.util_pct < 70 and device.util_pct > 40
+  impact_hint: 70
+  diagnosis:
+    type: DEVICE_IDLE_GAP
+    statement: 存在 Host-Device 供给缺口，设备仍有明显提升空间
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 排查数据供给与 Host-Device 同步点，合并小算子、提高单 step 提交的计算密度
+    expected: device.util_pct 上升至 80 以上
+    verify: 优化后重采，对比 device.util_pct
+    risk: ""
+
+- rule_id: HB_CPU_SAT_NO_DEVICE
+  name: CPU 饱和（缺少设备利用率佐证）
+  group: cpu
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  confidence: 0.55
+  condition: cpu.util_pct >= 90 and cpu.load5_per_core >= 1.0
+  impact_hint: 60
+  diagnosis:
+    type: CPU_COMPUTE_BOUND
+    statement: CPU 长时间饱和且排队负载超过核数，但缺少设备利用率数据确认
+  recommendation:
+    level: P2
+    certainty: 需补充设备数据确认
+    action: 补采设备利用率（device.util_pct）后复评；同时先用 perf 分析 CPU 热点
+    expected: 确认或排除 Host Bound
+    verify: 补充 device.util_pct 后重跑 analyze
+    risk: ""

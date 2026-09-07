@@ -1,0 +1,43 @@
+# ============================================================
+# 线程超配 / 上下文切换
+# 依赖特征: thread.oversub_ratio, sched.ctx_switch_per_sec,
+#           thread.omp_threads_setting, cpu.cores_logical
+# ============================================================
+- rule_id: HB_THREAD_OVERSUB
+  name: 线程超配引发频繁上下文切换
+  group: thread
+  severity: HIGH
+  weight: 1.5
+  contribution: host_bound
+  condition: thread.oversub_ratio > 2.0 and sched.ctx_switch_per_sec >= 50000
+  impact_hint: 70
+  diagnosis:
+    type: THREAD_OVERSUBSCRIPTION
+    statement: 工作线程数远超物理核数且切换频繁，有效算力被调度开销消耗
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 将各线程池大小之和收敛到物理核数以内（先减半做 A/B 验证），必要时绑核隔离
+    expected: 上下文切换率与调度等待下降，吞吐上升
+    verify: 重采后对比 sched.ctx_switch_per_sec
+    risk: 线程数过低可能造成算力闲置，需逐步调整
+
+- rule_id: HB_OMP_OVERSUB
+  name: OMP 线程数超过逻辑核数
+  group: thread
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  confidence: 0.6
+  condition: thread.omp_threads_setting > cpu.cores_logical
+  impact_hint: 40
+  diagnosis:
+    type: THREAD_OVERSUBSCRIPTION
+    statement: OMP 线程配置超过逻辑核数，易与 DataLoader 等其他线程池叠加超配
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 设置 OMP_NUM_THREADS 不超过物理核数，并与框架内其他线程预算统筹分配
+    expected: 上下文切换率下降
+    verify: 重采后对比 sched.ctx_switch_per_sec
+    risk: ""

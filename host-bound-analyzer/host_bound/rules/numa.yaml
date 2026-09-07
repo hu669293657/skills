@@ -1,0 +1,42 @@
+# ============================================================
+# NUMA 远端访存
+# 依赖特征: numa.remote_access_pct, numa.miss_pct（来自 numastat，可选）
+# ============================================================
+- rule_id: HB_NUMA_REMOTE
+  name: NUMA 远端访问占比过高
+  group: numa
+  severity: HIGH
+  weight: 1.2
+  contribution: host_bound
+  condition: numa.remote_access_pct >= 30
+  impact_hint: 65
+  diagnosis:
+    type: NUMA_REMOTE_ACCESS
+    statement: 跨 NUMA 节点访存比例偏高，内存带宽与访存延迟受损
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 使用 numactl 将进程与内存绑定到设备所在 NUMA 节点；核对网卡与设备拓扑
+    expected: numa.remote_access_pct 显著下降
+    verify: 重采 numastat 对比远端命中率
+    risk: 绑核后需确认对应节点内存充足
+
+- rule_id: HB_NUMA_MISS
+  name: NUMA 本地命中率偏低
+  group: numa
+  severity: MEDIUM
+  weight: 0.8
+  contribution: host_bound
+  confidence: 0.6
+  condition: numa.miss_pct >= 40
+  impact_hint: 45
+  diagnosis:
+    type: NUMA_REMOTE_ACCESS
+    statement: 本地节点命中率不足，存在明显跨节点访存
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 检查进程亲和性与内存分配策略（绑定节点或 interleave）
+    expected: numa.miss_pct 下降
+    verify: 重采 numastat 对比
+    risk: ""

@@ -13,6 +13,7 @@ skills/
 ├── cluster-analysis/              # 昇腾 NPU 训练性能一站式分析（含 vendor 子技能）
 ├── cluster-compare/               # 两集群 profiling 数据比对与劣化归因
 ├── cpu-trace-analyzer/            # Host 侧 CPU trace 瓶颈定位
+├── host-bound-analyzer/           # CPU/Host Bound 采集与离线诊断（18 章节报告）
 ├── host-trace-diagnosis/          # Host 侧 trace 规则化智能诊断
 ├── ibmc_analyzer/                 # iBMC 服务器日志分析与故障定位
 ├── prof-compare/                  # 双 Prof 数据比对与中文报告生成
@@ -96,7 +97,19 @@ skills/
 - **规则可扩展**：内置 7 个 YAML 规则文件（CPU / Host NPU / IO / 内存 / NUMA / 运行时 / 调度），可自定义扩展
 - **结论可复核**：命中结果关联规则 ID 与证据事件
 
-### 8. ibmc_analyzer
+### 8. host-bound-analyzer
+
+**CPU/Host Bound 性能瓶颈离线诊断技能**（[README](host-bound-analyzer/README.md)）
+
+对深度学习训练/推理进程做"宿侧（CPU/Host）是否拖慢加速器"的证据化诊断，覆盖线程过订阅、OMP 线程过多、NUMA 远端访问、iowait/磁盘饱和、内存回收、DataLoader 供数不足等场景。
+
+- **三种使用路径**：解析采集包（tar.gz / 采集目录）、Linux 训练机现场采集诊断（L1/L2 只读，L3 perf 采样须显式授权）、单文件 standalone 脚本交付
+- **规则引擎**：9 个 YAML 规则文件驱动，缺数据的规则自动 SKIP 绝不虚构；加权评分输出根因树与 P0–P3 建议
+- **HTML 报告**：固定 18 章节，零 JS、零外部资源、内嵌 SVG，离线可看
+- **安全合规**：分析只读、默认脱敏（`--sanitize`），结论均挂证据（metric/value/来源文件行号可回溯）
+- **质量保障**：内置冒烟与金标用例测试，仅依赖 Python ≥3.6 标准库
+
+### 9. ibmc_analyzer
 
 **iBMC 服务器日志分析与故障定位工具**（[README](ibmc_analyzer/README.md)）
 
@@ -129,6 +142,7 @@ skills/
 | 对比两组 Prof 数据（GPU vs NPU / 调优前后） | prof-compare |
 | 定位 Host 侧瓶颈（Gap 归因） | cpu-trace-analyzer |
 | trace 规则化健康检查 | host-trace-diagnosis |
+| 采集并诊断 CPU/Host Bound（训练慢、供数不足） | host-bound-analyzer |
 | 判断服务器/BMC 硬件健康 | ibmc_analyzer |
 | 端到端 vLLM-Ascend 调优 | vllm-ascend-tuning |
 

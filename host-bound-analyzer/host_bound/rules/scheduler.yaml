@@ -1,0 +1,61 @@
+# ============================================================
+# 调度器竞争
+# 依赖特征: sched.ctx_switch_per_sec, sched.nonvoluntary_ctx_per_sec,
+#           sched.procs_blocked, cpu.util_pct
+# ============================================================
+- rule_id: HB_SCHED_CTX_HIGH
+  name: 上下文切换异常频繁
+  group: scheduler
+  severity: HIGH
+  weight: 1.2
+  contribution: host_bound
+  condition: sched.ctx_switch_per_sec >= 100000 and cpu.util_pct >= 70
+  impact_hint: 65
+  diagnosis:
+    type: SCHEDULER_CONTENTION
+    statement: 高 CPU 负载伴随大量上下文切换，调度开销显著
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 合并线程池、减少活动线程数；为关键线程设置亲和性或优先级
+    expected: sched.ctx_switch_per_sec 显著下降
+    verify: 重采后对比切换率
+    risk: ""
+
+- rule_id: HB_SCHED_NONVOL
+  name: 非自愿切换过多（CPU 竞争激烈）
+  group: scheduler
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  condition: sched.nonvoluntary_ctx_per_sec >= 20000
+  impact_hint: 50
+  diagnosis:
+    type: SCHEDULER_CONTENTION
+    statement: 大量线程因时间片耗尽被抢占，CPU 竞争激烈
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 降低并发线程数，必要时提高关键线程优先级
+    expected: 非自愿切换率下降
+    verify: 重采后对比 /proc/statctxt 非自愿切换速率
+    risk: ""
+
+- rule_id: HB_SCHED_BLOCKED_IO
+  name: 大量进程处于不可中断等待
+  group: io
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  condition: sched.procs_blocked >= 5
+  impact_hint: 55
+  diagnosis:
+    type: IO_BOUND
+    statement: 多个线程阻塞在 D 状态，通常指向存储或 IO 等待
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 结合 iostat 定位慢盘；优化数据读取方式与缓存策略
+    expected: sched.procs_blocked 趋近 0
+    verify: 重采后对比
+    risk: ""

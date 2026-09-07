@@ -1,0 +1,42 @@
+# ============================================================
+# 数据加载链路（DataLoader / 预处理）
+# 依赖特征: perf.hotspot_category, dl.workers_setting, device.util_pct
+# ============================================================
+- rule_id: HB_DL_HOTSPOT
+  name: CPU 热点指向数据加载与预处理
+  group: dataloader
+  severity: HIGH
+  weight: 1.5
+  contribution: host_bound
+  condition: perf.hotspot_category == 'dataloader'
+  impact_hint: 70
+  diagnosis:
+    type: DATA_PIPELINE_BOUND
+    statement: CPU 热点集中在 DataLoader 与预处理路径，数据生产慢于设备消费
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 增加并均衡 DataLoader worker、启用 prefetch 与 pin_memory；将 CPU 密集预处理向量化或下放
+    expected: 设备利用率上升、step time 下降
+    verify: 重采后对比 device.util_pct
+    risk: worker 过多会与训练线程争抢 CPU，需逐步增大观察
+
+- rule_id: HB_DL_WORKERS_ZERO
+  name: DataLoader 未启用并行 worker
+  group: dataloader
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  confidence: 0.6
+  condition: dl.workers_setting == 0 and device.util_pct < 60
+  impact_hint: 50
+  diagnosis:
+    type: DATA_PIPELINE_BOUND
+    statement: 数据加载为单进程模式，且设备利用率偏低
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 设置 num_workers 大于 0（从 2 到 4 起步逐步增大并观察 CPU 与内存）
+    expected: device.util_pct 上升
+    verify: 重采后对比
+    risk: ""

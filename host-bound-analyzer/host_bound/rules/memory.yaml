@@ -1,0 +1,60 @@
+# ============================================================
+# 内存压力
+# 依赖特征: mem.available_pct, mem.swap_used_pct, mem.pgmajfault_per_sec
+# ============================================================
+- rule_id: HB_MEM_SWAP
+  name: Swap 活跃（性能严重受损）
+  group: memory
+  severity: CRITICAL
+  weight: 2.0
+  contribution: host_bound
+  condition: mem.swap_used_pct >= 20
+  impact_hint: 85
+  diagnosis:
+    type: MEMORY_PRESSURE
+    statement: 系统已使用 swap，训练进程可能被换出导致周期性卡顿
+  recommendation:
+    level: P0
+    certainty: 较高
+    action: 立即降低内存占用（batch size、缓存策略），或将进程迁移到更大内存节点
+    expected: swap 使用归零、主缺页尖峰消失
+    verify: 重采后对比 mem.swap_used_pct
+    risk: ""
+
+- rule_id: HB_MEM_LOW
+  name: 可用内存不足
+  group: memory
+  severity: HIGH
+  weight: 1.2
+  contribution: host_bound
+  condition: mem.available_pct <= 10
+  impact_hint: 70
+  diagnosis:
+    type: MEMORY_PRESSURE
+    statement: 可用内存低于 10，存在页回收与延迟抖动风险
+  recommendation:
+    level: P1
+    certainty: 较高
+    action: 排查内存占用大户，调小 batch 或清理无用缓存进程
+    expected: mem.available_pct 回升至 20 以上
+    verify: 重采后对比
+    risk: ""
+
+- rule_id: HB_MEM_MAJFAULT
+  name: 主缺页异常频繁
+  group: memory
+  severity: MEDIUM
+  weight: 1.0
+  contribution: host_bound
+  condition: mem.pgmajfault_per_sec >= 1000
+  impact_hint: 50
+  diagnosis:
+    type: MEMORY_PRESSURE
+    statement: 频繁主缺页意味着数据被换出后需重新读盘
+  recommendation:
+    level: P2
+    certainty: 建议实验验证
+    action: 减小常驻内存占用，必要时对关键数据页锁定内存
+    expected: 主缺页速率显著下降
+    verify: 重采后对比 /proc/vmstat 的 pgmajfault 速率
+    risk: ""
