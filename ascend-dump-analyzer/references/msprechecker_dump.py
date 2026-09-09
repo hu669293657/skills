@@ -27,6 +27,7 @@ import time
 import shutil
 import hashlib
 import shlex
+import socket
 import platform
 import subprocess
 import ipaddress
@@ -122,22 +123,65 @@ def get_npu_count() -> int:
 
 
 def is_in_container() -> bool:
-    """检测是否运行在容器中"""
-    if os.path.exists('/.dockerenv'):
+    """检测是否运行在容器中（多信号综合判断，避免 PID1 为 systemd 的容器误判）"""
+    # 显式容器标志文件
+    if os.path.exists('/.dockerenv') or os.path.exists('/run/.containerenv'):
         return True
+    try:
+        with open('/proc/1/cgroup', 'r') as f:
+            content = f.read()
+    except Exception:
+        content = ""
+    # cgroup 路径中出现容器运行时标记
+    if re.search(r'docker|kubepods|containerd|libpod|lxc', content):
+        return True
+    # cgroup v2：容器内（启用 cgroup namespace）PID1 位于根路径
+    for line in content.splitlines():
+        if line.strip() == '0::/':
+            return True
+    # 弱信号：宿主机 PID1 进程名通常为 systemd/init
     try:
         with open('/proc/1/sched', 'r') as f:
             first_line = f.readline()
-        if first_line and first_line.startswith('systemd'):
+        if first_line and first_line.startswith(('systemd', 'init')):
             return False
-        return True
     except Exception:
-        return True
+        pass
+    return False
 
 
 def which(cmd: str) -> Optional[str]:
     """安全版 shutil.which"""
     return shutil.which(cmd)
+
+
+def run_cmd(cmd: str, timeout: int = 15) -> Tuple[int, str]:
+    """执行 shell 命令，返回 (returncode, stdout)。任何异常都安全降级，不会中断采集。"""
+    try:
+        proc = subprocess.run(
+            cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=timeout,
+        )
+        return proc.returncode, (proc.stdout or "").strip()
+    except Exception as e:
+        return -1, f"command failed: {e}"
+
+
+def compress_ids(ids) -> str:
+    """将整数列表压缩为 '0-3,8,10-11' 形式的区间字符串（用于 CPU/NUMA 映射展示）"""
+    ids = sorted(set(ids))
+    if not ids:
+        return ""
+    parts = []
+    start = prev = ids[0]
+    for x in ids[1:]:
+        if x == prev + 1:
+            prev = x
+            continue
+        parts.append(f"{start}-{prev}" if prev > start else f"{start}")
+        start = prev = x
+    parts.append(f"{start}-{prev}" if prev > start else f"{start}")
+    return ",".join(parts)
 
 
 # ============================================================================
@@ -501,6 +545,798 @@ class SysCollector:
         return CollectorResult(result, self.collect_type, errors)
 
 
+class HardwareCollector:
+    """硬件资源采集器 — CPU 拓扑 / 内存 / 磁盘 / PCIe&NUMA / 内核参数 / 时钟
+
+    每个子项同时输出结构化字段（供 Agent 精确判断）与 raw 原始输出（现场证据）。
+    """
+
+    def __init__(self):
+        self.collect_type = "hardware"
+
+    # ------------------------------------------------------------------
+    # 子采集器 1：内存（/proc/meminfo）
+    # ------------------------------------------------------------------
+    def _collect_memory(self) -> dict:
+        out = {}
+        try:
+            with open('/proc/meminfo', 'r') as f:
+                raw = f.read()
+            out["raw"] = raw
+            keep = ("MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached",
+                    "SwapTotal", "SwapFree", "HugePages_Total", "Hugepagesize")
+            for line in raw.splitlines():
+                if ":" not in line:
+                    continue
+                key, val = line.split(":", 1)
+                key = key.strip()
+                if key in keep:
+                    m = re.match(r'\s*([\d.]+)', val)
+                    if m:
+                        out[key] = round(float(m.group(1)), 1)
+            total = float(out.get("MemTotal", 0) or 0)
+            avail = float(out.get("MemAvailable", 0) or 0)
+            swap = float(out.get("SwapTotal", 0) or 0)
+            if total:
+                out["mem_total_gb"] = round(total / 1048576, 1)
+                out["mem_available_gb"] = round(avail / 1048576, 1)
+                out["mem_used_pct"] = round((total - avail) / total * 100, 1)
+            out["swap_total_gb"] = round(swap / 1048576, 1)
+        except Exception as e:
+            out["error"] = str(e)
+        return {"memory": out}
+
+    # ------------------------------------------------------------------
+    # 子采集器 2：CPU 拓扑（lscpu -p：Socket/NUMA/核数/线程）
+    # ------------------------------------------------------------------
+    def _collect_cpu_topology(self) -> dict:
+        out = {"raw": None}
+        rc, raw = run_cmd("lscpu -p=CPU,SOCKET,NODE,CORE,ONLINE,MAXMHZ,MINMHZ")
+        if rc != 0 or not raw:
+            rc, raw = run_cmd("lscpu -p")
+        out["raw"] = raw
+        try:
+            cpu_rows = []
+            header = None
+            for line in (raw or "").splitlines():
+                line = line.strip()
+                if line.startswith('#'):
+                    header = [c.strip() for c in line.lstrip('# ').split(',')]
+                    continue
+                if not line:
+                    continue
+                cols = line.split(',')
+                row = dict(zip(header, cols)) if header else {"CPU": cols[0]}
+                cpu_rows.append(row)
+
+            online_cpus, sockets, nodes, cores = [], set(), set(), set()
+            per_numa, per_socket = {}, {}
+            for r in cpu_rows:
+                try:
+                    cpu = int(r.get("CPU", -1))
+                except (TypeError, ValueError):
+                    continue
+                if str(r.get("ONLINE", "1")) not in ("1", "Y", "y"):
+                    continue
+                online_cpus.append(cpu)
+                socket = r.get("SOCKET", "-")
+                node = r.get("NODE", "-")
+                core = r.get("CORE", "-")
+                sockets.add(socket)
+                if node not in ("", "-"):
+                    nodes.add(node)
+                    per_numa.setdefault(node, []).append(cpu)
+                per_socket.setdefault(socket, []).append(cpu)
+                cores.add((socket, core))
+
+            out["logical_cpus_online"] = len(online_cpus)
+            out["socket_count"] = len(sockets)
+            out["numa_node_count"] = len(nodes)
+            out["physical_cores"] = len(cores)
+            if cores:
+                out["threads_per_core"] = round(len(online_cpus) / len(cores), 1)
+            out["numa_cpu_map"] = {n: compress_ids(v) for n, v in per_numa.items()}
+            out["socket_cpu_map"] = {s: compress_ids(v) for s, v in per_socket.items()}
+
+            # lscpu 汇总信息（CPU 型号 / NUMA 分布）
+            rc2, lscpu_all = run_cmd("lscpu")
+            out["lscpu_raw"] = lscpu_all
+            for line in (lscpu_all or "").splitlines():
+                if ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                k = k.strip()
+                if k in ("Model name", "Architecture", "CPU(s)", "On-line CPU(s) list",
+                         "CPU MHz", "Hypervisor vendor", "Virtualization") \
+                        or k.startswith("NUMA node"):
+                    out[k.replace(" ", "_").replace("(", "").replace(")", "")] = v.strip()
+        except Exception as e:
+            out["error"] = str(e)
+        return {"cpu_topology": out}
+
+    # ------------------------------------------------------------------
+    # 子采集器 3：每核 governor 与实际频率（逐核读取 cpufreq）
+    # ------------------------------------------------------------------
+    def _collect_cpu_runtime(self) -> dict:
+        out = {"cores": []}
+        raw_lines = []
+        try:
+            base = "/sys/devices/system/cpu"
+            cpu_dirs = sorted(
+                (d for d in os.listdir(base) if re.fullmatch(r'cpu\d+', d)),
+                key=lambda x: int(x[3:]),
+            )
+            freqs = []
+            for d in cpu_dirs:
+                entry = {"cpu": int(d[3:])}
+                for fname, key, scale in (
+                    ("scaling_governor", "governor", 1),
+                    ("scaling_cur_freq", "cur_freq_mhz", 1000),
+                    ("cpuinfo_max_freq", "max_freq_mhz", 1000),
+                    ("online", "online", 1),
+                ):
+                    if key == "online":
+                        fpath = os.path.join(base, d, fname)
+                    else:
+                        fpath = os.path.join(base, d, "cpufreq", fname)
+                    try:
+                        with open(fpath) as f:
+                            val = f.read().strip()
+                        entry[key] = round(float(val) / scale, 0) if scale > 1 else val
+                        if key == "cur_freq_mhz":
+                            freqs.append(float(val))
+                    except Exception:
+                        entry[key] = None
+                out["cores"].append(entry)
+                raw_lines.append(
+                    f"cpu{entry['cpu']}: governor={entry['governor']} "
+                    f"cur={entry['cur_freq_mhz']}MHz max={entry['max_freq_mhz']}MHz "
+                    f"online={entry['online']}"
+                )
+            out["raw"] = "\n".join(raw_lines) or None
+            if freqs:
+                out["avg_cur_freq_mhz"] = round(sum(freqs) / len(freqs) / 1000, 0)
+            govs = {c["governor"] for c in out["cores"] if c["governor"]}
+            out["governor_modes"] = sorted(govs)
+        except Exception as e:
+            out["error"] = str(e)
+        return {"cpu_runtime": out}
+
+    # ------------------------------------------------------------------
+    # 子采集器 4：磁盘与 BIOS/BMC（df / lsblk / sysfs-dmi / ipmitool）
+    # ------------------------------------------------------------------
+    def _collect_disk(self) -> dict:
+        out = {"filesystems": [], "block_devices": []}
+        raw_parts = []
+        rc, raw = run_cmd("df -hP -x tmpfs -x devtmpfs -x overlay -x squashfs")
+        if rc != 0 or not raw:
+            rc, raw = run_cmd("df -hP")
+        out["df_raw"] = raw
+        raw_parts.append(raw or "")
+        try:
+            for line in (raw or "").splitlines()[1:]:
+                cols = line.split()
+                if len(cols) >= 6:
+                    out["filesystems"].append({
+                        "fs": cols[0], "size": cols[1], "used": cols[2],
+                        "avail": cols[3], "use_pct": cols[4], "mount": cols[5],
+                    })
+        except Exception as e:
+            out["error_df"] = str(e)
+
+        rc, raw = run_cmd("lsblk -d -o NAME,MODEL,ROTA,SIZE,TYPE")
+        if rc == 0 and raw:
+            out["lsblk_raw"] = raw
+            raw_parts.append(raw)
+            try:
+                for line in raw.splitlines()[1:]:
+                    cols = line.split(None, 4)
+                    if len(cols) >= 4:
+                        out["block_devices"].append({
+                            "name": cols[0],
+                            "model": cols[1] if len(cols) > 1 else "",
+                            "rotational": cols[2] if len(cols) > 2 else "",
+                            "size": cols[3] if len(cols) > 3 else "",
+                        })
+            except Exception as e:
+                out["error_lsblk"] = str(e)
+
+        # BIOS / 主板信息（优先 sysfs 免 root 读取）
+        bios = {}
+        for key in ("bios_vendor", "bios_version", "bios_date",
+                    "board_vendor", "board_name", "product_name"):
+            try:
+                with open(f"/sys/class/dmi/id/{key}") as f:
+                    bios[key] = f.read().strip()
+            except Exception:
+                pass
+        # BMC 固件版本（需要 root + ipmitool，失败则尝试 dmidecode）
+        rc, raw = run_cmd("ipmitool mc info")
+        if rc == 0 and raw:
+            m = re.search(r'Firmware Revision\s*:\s*(\S+)', raw)
+            if m:
+                bios["bmc_firmware"] = m.group(1)
+            bios["ipmitool_raw"] = raw
+        else:
+            rc, raw = run_cmd("dmidecode -t bios")
+            if rc == 0 and raw:
+                bios["dmidecode_raw"] = raw
+        out["bios_bmc"] = bios
+        out["raw"] = "\n\n".join(p for p in raw_parts if p) or None
+        return {"disk": out}
+
+    # ------------------------------------------------------------------
+    # 子采集器 5：PCIe / NUMA 拓扑（NPU 与网卡的 PCIe/NUMA 归属）
+    # ------------------------------------------------------------------
+    def _collect_pcie_numa(self) -> dict:
+        out = {}
+        pci_base = "/sys/bus/pci/devices"
+
+        def _read_pci_fields(addr):
+            entry = {}
+            for field, key in (("numa_node", "numa_node"),
+                               ("current_link_speed", "pcie_speed"),
+                               ("current_link_width", "pcie_width")):
+                try:
+                    with open(os.path.join(pci_base, addr, field)) as f:
+                        entry[key] = f.read().strip()
+                except Exception:
+                    entry[key] = None
+            return entry
+
+        # 5.1 NPU PCIe 设备（华为厂商 ID 0x19e5）
+        rc, raw = run_cmd("lspci -nn -d 19e5:")
+        out["lspci_npu_raw"] = raw if rc == 0 else None
+        npu_devices = []
+        for line in (raw or "").splitlines() if rc == 0 else []:
+            m = re.match(r'([0-9a-fA-F:.]+)\s+(.*)', line)
+            if not m:
+                continue
+            addr, desc = m.group(1), m.group(2).strip()
+            entry = {"pci_addr": addr, "device_name": desc}
+            entry.update(_read_pci_fields(addr))
+            npu_devices.append(entry)
+        out["npu_pcie_devices"] = npu_devices
+        out["npu_numa_map"] = {d["pci_addr"]: d.get("numa_node") for d in npu_devices}
+
+        # 5.2 物理网卡及其 NUMA 归属（跳过 lo / veth 等虚拟口）
+        nics = []
+        try:
+            for ifname in sorted(os.listdir("/sys/class/net")):
+                dev_link = os.path.join("/sys/class/net", ifname, "device")
+                if not os.path.islink(dev_link):
+                    continue
+                pci_addr = os.path.basename(os.path.realpath(dev_link))
+                entry = {"nic": ifname, "pci_addr": pci_addr}
+                entry.update(_read_pci_fields(pci_addr))
+                nics.append(entry)
+        except Exception as e:
+            out["error_nic"] = str(e)
+        out["nic_pcie"] = nics
+
+        # 5.3 numactl 硬件拓扑（NUMA 内存分布）
+        rc, raw = run_cmd("numactl -H")
+        out["numactl_raw"] = raw if rc == 0 else None
+        numa_mem = {}
+        if rc == 0:
+            for line in (raw or "").splitlines():
+                m = re.match(r'node (\d+) size:\s*(\d+) MB', line)
+                if m:
+                    numa_mem[f"node{m.group(1)}_mem_gb"] = round(int(m.group(2)) / 1024, 1)
+                    continue
+                m = re.match(r'node (\d+) cpus:', line)
+                if m:
+                    cpus = [int(x) for x in line.split(":", 1)[1].split()]
+                    numa_mem[f"node{m.group(1)}_cpus"] = compress_ids(cpus)
+        if numa_mem:
+            out["numa_memory"] = numa_mem
+        return {"pcie_numa": out}
+
+    # ------------------------------------------------------------------
+    # 子采集器 6：内核调优参数与进程资源限制
+    # ------------------------------------------------------------------
+    def _collect_kernel_params(self) -> dict:
+        out = {}
+        sysctl_keys = [
+            ("/proc/sys/vm/swappiness", "vm.swappiness"),
+            ("/proc/sys/vm/max_map_count", "vm.max_map_count"),
+            ("/proc/sys/vm/overcommit_memory", "vm.overcommit_memory"),
+            ("/proc/sys/vm/overcommit_ratio", "vm.overcommit_ratio"),
+            ("/proc/sys/fs/file-max", "fs.file-max"),
+            ("/proc/sys/kernel/numa_balancing", "kernel.numa_balancing"),
+            ("/proc/sys/kernel/core_pattern", "kernel.core_pattern"),
+            ("/proc/sys/kernel/pid_max", "kernel.pid_max"),
+            ("/proc/sys/kernel/threads-max", "kernel.threads-max"),
+        ]
+        for path, key in sysctl_keys:
+            try:
+                with open(path) as f:
+                    out[key] = f.read().strip()
+            except Exception:
+                out[key] = None
+
+        # /proc/self/limits 等价 ulimit -a（nofile / memlock / nproc 等）
+        limits = {}
+        interesting = {
+            "Max open files": "nofile",
+            "Max locked memory": "memlock",
+            "Max processes": "nproc",
+            "Max stack size": "stack",
+            "Max address space": "address_space",
+        }
+        try:
+            with open("/proc/self/limits") as f:
+                raw = f.read()
+            out["ulimit_raw"] = raw
+            for line in raw.splitlines():
+                for src, dst in interesting.items():
+                    if line.startswith(src):
+                        parts = line.split()
+                        if len(parts) >= 3:
+                            limits[dst] = {"soft": parts[-3], "hard": parts[-2]}
+        except Exception as e:
+            out["error_limits"] = str(e)
+        out["limits"] = limits
+        return {"kernel_params": out}
+
+    # ------------------------------------------------------------------
+    # 子采集器 7：时钟源与 NTP 同步状态
+    # ------------------------------------------------------------------
+    def _collect_clock(self) -> dict:
+        out = {}
+        try:
+            with open("/sys/devices/system/clocksource/clocksource0/current_clocksource") as f:
+                out["clocksource"] = f.read().strip()
+        except Exception:
+            pass
+        try:
+            with open("/sys/devices/system/clocksource/clocksource0/available_clocksource") as f:
+                out["clocksource_available"] = f.read().strip()
+        except Exception:
+            pass
+
+        rc, raw = run_cmd("chronyc tracking")
+        if rc == 0 and raw and "failed" not in raw.lower():
+            out["chrony_raw"] = raw
+            for line in raw.splitlines():
+                if ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                k = k.strip()
+                if k in ("Stratum", "Leap status", "Last offset"):
+                    out[f"ntp_{k.lower().replace(' ', '_')}"] = v.strip()
+            out["ntp_synchronized"] = \
+                "yes" if out.get("ntp_leap_status") == "normal" else "check"
+        else:
+            rc, raw = run_cmd("timedatectl")
+            out["timedatectl_raw"] = raw if rc == 0 and raw else None
+            for line in (raw or "").splitlines():
+                if "System clock synchronized" in line:
+                    out["ntp_synchronized"] = line.split(":", 1)[1].strip()
+                elif "NTP service" in line:
+                    out["ntp_service"] = line.split(":", 1)[1].strip()
+                elif "Time zone" in line:
+                    out["timezone"] = line.split(":", 1)[1].strip()
+        return {"clock": out}
+
+    # ------------------------------------------------------------------
+    # 汇总入口：7 个子采集器并发执行（与 SysCollector 相同的线程池模式）
+    # ------------------------------------------------------------------
+    def collect(self) -> CollectorResult:
+        sub_collectors = [
+            ("memory", self._collect_memory),
+            ("cpu_topology", self._collect_cpu_topology),
+            ("cpu_runtime", self._collect_cpu_runtime),
+            ("disk", self._collect_disk),
+            ("pcie_numa", self._collect_pcie_numa),
+            ("kernel_params", self._collect_kernel_params),
+            ("clock", self._collect_clock),
+        ]
+        result = {}
+        errors = []
+        max_workers = min(len(sub_collectors), os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = {executor.submit(fn): name for name, fn in sub_collectors}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    result.update(future.result())
+                except Exception as e:
+                    errors.append(f"采集 {name} 失败: {e}")
+        return CollectorResult(result, self.collect_type, errors)
+
+
+class NPUCollector:
+    """NPU 运行态采集器（与 AscendCollector 的组件版本采集互补）
+
+    覆盖：npu-smi 全量快照、逐卡健康/温度/功耗/HBM 占用/ECC、固件版本、
+    /dev 设备节点权限、光模块收发状态、昇腾日志目录元信息。
+    每个子项同时保留结构化字段与 raw 原始输出。
+    """
+
+    # /dev 下除 davinciN 外必须存在的昇腾设备节点（容器场景高频故障点）
+    REQUIRED_NODES = ("davinci_manager", "devmm_svm", "hisi_hdc")
+
+    # 每卡采集的 npu-smi info -t 子命令
+    PER_DEVICE_QUERIES = ("board", "common", "usages", "health", "temp", "power", "ecc")
+
+    # npu-smi 命令候选路径（不在 PATH 时兜底）
+    SMI_CANDIDATES = ("/usr/local/sbin/npu-smi", "/usr/local/Ascend/driver/tools/npu-smi")
+
+    # 昇腾日志目录候选
+    LOG_DIR_CANDIDATES = ("/root/ascend/log", "/var/log/npu", "/var/log/ascend")
+
+    def __init__(self):
+        self.collect_type = "npu"
+        self.npu_count = get_npu_count()
+        self.smi_cmd = self._resolve_smi()
+
+    def _resolve_smi(self) -> Optional[str]:
+        """定位 npu-smi 命令：优先 PATH，其次常见安装路径"""
+        found = which("npu-smi")
+        if found:
+            return found
+        for cand in self.SMI_CANDIDATES:
+            if os.path.isfile(cand):
+                return cand
+        return None
+
+    # ------------------------------------------------------------------
+    # 解析辅助
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_kv(raw: str) -> dict:
+        """将 'Key : Value' 风格输出解析为字典（npu-smi -t 系列命令）"""
+        kv = {}
+        for line in raw.splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                k = k.strip()
+                if k:
+                    kv[k] = v.strip()
+        return kv
+
+    @staticmethod
+    def _kv_match(kv: dict, *keywords):
+        """按关键词（不区分大小写、忽略括号）模糊匹配，返回第一个命中的 (key, value)"""
+        for key, value in kv.items():
+            norm = key.lower().replace("(", "").replace(")", "")
+            if all(w.lower() in norm for w in keywords):
+                return key, value
+        return None, None
+
+    @classmethod
+    def _kv_get(cls, kv: dict, *keywords):
+        return cls._kv_match(kv, *keywords)[1]
+
+    @staticmethod
+    def _to_num(value):
+        """尽力转为数字，失败则返回原字符串"""
+        if value is None:
+            return None
+        try:
+            f = float(str(value).split()[0])
+            return int(f) if f == int(f) else round(f, 2)
+        except (ValueError, IndexError):
+            return value
+
+    # ------------------------------------------------------------------
+    # 子采集器 1：npu-smi 全量快照（版本头 + 设备表格）
+    # ------------------------------------------------------------------
+    def _collect_smi(self) -> dict:
+        out = {}
+        if not self.smi_cmd:
+            out["note"] = "未找到 npu-smi 命令，跳过快照采集"
+            return out
+        rc, raw = run_cmd(f"{self.smi_cmd} info", timeout=20)
+        out["smi_rc"] = rc
+        out["smi_raw"] = raw if raw else None
+        if rc == 0 and raw:
+            for line in raw.splitlines():
+                low = line.lower()
+                # 表头形如：| npu-smi 24.1.rc1   Version: 24.1.rc1 |
+                if "npu-smi" in low and "smi_version" not in out:
+                    parts = line.split()
+                    for idx, tok in enumerate(parts):
+                        if tok.lower().startswith("npu-smi") and idx + 1 < len(parts):
+                            out["smi_version"] = parts[idx + 1]
+                            break
+                if "Version:" in line and "driver_version" not in out:
+                    val = line.split("Version:", 1)[1].split("|")[0].strip()
+                    if val:
+                        out["driver_version"] = val
+            # 表格行交叉校验卡数（NPU 行：| <id> <非数字型号> ...）
+            table_ids = []
+            for line in raw.splitlines():
+                fields = line.split()
+                if (fields and fields[0] == "|" and len(fields) >= 3
+                        and fields[1].isdigit() and not fields[2].isdigit()):
+                    table_ids.append(int(fields[1]))
+            if table_ids:
+                out["smi_table_device_ids"] = compress_ids(table_ids)
+        return out
+
+    # ------------------------------------------------------------------
+    # 子采集器 2：逐卡运行态（健康/温度/功耗/占用/ECC/固件）
+    # ------------------------------------------------------------------
+    def _collect_one_device(self, device_id: int) -> dict:
+        dev = {"device_id": device_id}
+        raw_map = {}
+        for subcmd in self.PER_DEVICE_QUERIES:
+            rc, raw = run_cmd(
+                f"{self.smi_cmd} info -t {subcmd} -i {device_id}", timeout=20)
+            # 部分版本需要显式指定芯片号，失败时以 -c 0 重试
+            if (rc != 0 or not raw) and subcmd == "common":
+                rc2, raw2 = run_cmd(
+                    f"{self.smi_cmd} info -t {subcmd} -i {device_id} -c 0", timeout=20)
+                if rc2 == 0 and raw2:
+                    rc, raw = rc2, raw2
+            raw_map[subcmd] = raw or ""
+        dev["raw"] = {k: v if v else None for k, v in raw_map.items()}
+
+        common_kv = self._parse_kv(raw_map.get("common") or "")
+        board_kv = self._parse_kv(raw_map.get("board") or "")
+        usages_kv = self._parse_kv(raw_map.get("usages") or "")
+        temp_kv = self._parse_kv(raw_map.get("temp") or "")
+        power_kv = self._parse_kv(raw_map.get("power") or "")
+        ecc_kv = self._parse_kv(raw_map.get("ecc") or "")
+
+        dev["name"] = self._kv_get(common_kv, "Name") or self._kv_get(board_kv, "Name")
+        dev["chip_type"] = self._kv_get(common_kv, "Chip", "Type")
+        dev["aicore_count"] = self._to_num(self._kv_get(common_kv, "AICore", "Number"))
+        dev["aicore_pct"] = self._to_num(self._kv_get(common_kv, "AICore", "Usage"))
+
+        health_raw = (raw_map.get("health") or "").strip()
+        dev["health"] = self._kv_get(common_kv, "Health") \
+            or (health_raw.splitlines()[0] if health_raw else None)
+        # 健康查询返回非 OK 时保留具体报错（如 Error code: 0x...）
+        if health_raw and health_raw.upper() != "OK":
+            dev["health_message"] = health_raw
+
+        dev["temp_c"] = self._to_num(
+            self._kv_get(temp_kv, "NPU", "Temperature")
+            or self._kv_get(common_kv, "Temperature"))
+        dev["hbm_temp_c"] = self._to_num(self._kv_get(temp_kv, "HBM", "Temperature"))
+
+        # 功耗：键名可能为 Power(W) 或 Power(mW)，统一换算为 W
+        pkey, pval = self._kv_match(power_kv, "power")
+        if not pkey:
+            pkey, pval = self._kv_match(common_kv, "power")
+        if pkey:
+            num = self._to_num(pval)
+            if isinstance(num, (int, float)) and "(mw)" in pkey.lower():
+                num = round(num / 1000, 2)
+            dev["power_w"] = num
+
+        # HBM/DDR 占用（910B 的 usages 输出以 DDR 命名，实为 HBM）
+        dev["hbm_used_mb"] = self._to_num(self._kv_get(usages_kv, "Memory", "Used"))
+        dev["hbm_total_mb"] = self._to_num(self._kv_get(usages_kv, "Memory", "Total"))
+        dev["hbm_usage_pct"] = self._to_num(self._kv_get(usages_kv, "Usage", "Rate"))
+
+        # ECC：保留含 error/correct/ecc 关键词的键值
+        ecc_summary = {k: v for k, v in ecc_kv.items()
+                       if any(w in k.lower() for w in ("error", "correct", "ecc"))}
+        if ecc_summary:
+            dev["ecc"] = ecc_summary
+
+        # 固件/序列号来自 board 信息
+        firmware = self._kv_get(board_kv, "Software", "Version") \
+            or self._kv_get(board_kv, "Firmware")
+        if firmware:
+            dev["firmware_version"] = firmware
+        serial = self._kv_get(board_kv, "Serial")
+        if serial:
+            dev["serial"] = serial
+        return dev
+
+    def _collect_per_device(self) -> dict:
+        out = {}
+        if not self.smi_cmd:
+            out["note"] = "未找到 npu-smi 命令，跳过逐卡运行态采集"
+            return out
+        if self.npu_count <= 0:
+            out["note"] = "未检测到 /dev/davinci* 设备，跳过逐卡采集"
+            return out
+        devices = [None] * self.npu_count
+        max_workers = min(self.npu_count, os.cpu_count() or 4)
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = {executor.submit(self._collect_one_device, i): i
+                       for i in range(self.npu_count)}
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    devices[idx] = future.result()
+                except Exception as e:
+                    devices[idx] = {"device_id": idx, "error": str(e)}
+        out["devices"] = devices
+        return out
+
+    # ------------------------------------------------------------------
+    # 子采集器 3：/dev 设备节点权限（容器场景高频故障点）
+    # ------------------------------------------------------------------
+    def _collect_device_nodes(self) -> dict:
+        out = {}
+        if not os.path.isdir("/dev"):
+            out["error"] = "/dev 不可访问"
+            return {"device_nodes": out}
+        try:
+            import pwd  # 仅 Linux 可用
+        except ImportError:
+            pwd = None
+        try:
+            import grp
+        except ImportError:
+            grp = None
+
+        names = sorted(
+            n for n in os.listdir("/dev")
+            if n.startswith("davinci") or n in self.REQUIRED_NODES
+        )
+        out["davinci_count"] = sum(
+            1 for n in names
+            if n.startswith("davinci") and n[len("davinci"):].isdigit()
+        )
+        nodes = []
+        for name in names:
+            path = os.path.join("/dev", name)
+            try:
+                st = os.stat(path)
+                entry = {
+                    "node": name,
+                    "type": ("char" if stat.S_ISCHR(st.st_mode)
+                             else "block" if stat.S_ISBLK(st.st_mode) else "other"),
+                    "mode": format(stat.S_IMODE(st.st_mode), "04o"),
+                    "uid": st.st_uid,
+                    "gid": st.st_gid,
+                }
+                if pwd:
+                    try:
+                        entry["user"] = pwd.getpwuid(st.st_uid).pw_name
+                    except KeyError:
+                        pass
+                if grp:
+                    try:
+                        entry["group"] = grp.getgrgid(st.st_gid).gr_name
+                    except KeyError:
+                        pass
+                nodes.append(entry)
+            except OSError as e:
+                nodes.append({"node": name, "error": str(e)})
+        out["nodes"] = nodes
+        missing = [n for n in self.REQUIRED_NODES if n not in names]
+        if missing:
+            out["missing_required_nodes"] = missing
+        return {"device_nodes": out}
+
+    # ------------------------------------------------------------------
+    # 子采集器 4：光模块收发状态（hccn_tool optical）
+    # ------------------------------------------------------------------
+    def _collect_optical(self) -> dict:
+        out = {}
+        if not which(HCCN_TOOL_CMD):
+            place = "容器" if is_in_container() else "宿主机"
+            out["note"] = f"{place}上没有找到 'hccn_tool' 命令"
+            return {"optical": out}
+        if self.npu_count <= 0:
+            out["note"] = "未检测到 NPU 设备"
+            return {"optical": out}
+        devices = {}
+        errors = []
+        max_workers = min(self.npu_count, os.cpu_count() or 4)
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = {executor.submit(self._run_optical, i): i
+                       for i in range(self.npu_count)}
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    devices[str(idx)] = future.result()
+                except Exception as e:
+                    errors.append(f"采集 NPU {idx} 光模块信息失败: {e}")
+        out["devices"] = devices
+        if errors:
+            out["errors"] = errors
+        return {"optical": out}
+
+    @staticmethod
+    def _run_optical(device_id: int) -> dict:
+        rc, raw = run_cmd(f"{HCCN_TOOL_CMD} -i {device_id} -optical -g", timeout=20)
+        res = {"rc": rc, "raw": raw if raw else None}
+        if rc == 0 and raw:
+            lanes, rx_vals, tx_vals = [], [], []
+            for line in raw.splitlines():
+                low = line.lower()
+                if "power" not in low:
+                    continue
+                # 尽力提取 "RX Power : -2.5 dBm" / "TX power 0: 640.1 uW" 类数值
+                m = re.search(r"(rx|tx)\s*power[^:]*:\s*(-?[\d.]+)\s*(dbm|uw)?", low)
+                if m:
+                    kind = m.group(1).upper()
+                    val = float(m.group(2))
+                    unit = (m.group(3) or "").lower()
+                    lanes.append({"kind": kind, "value": val, "unit": unit or "raw"})
+                    if unit == "dbm":
+                        (rx_vals if kind == "RX" else tx_vals).append(val)
+            if lanes:
+                res["power_readings"] = lanes
+            if rx_vals:
+                res["rx_power_avg_dbm"] = round(sum(rx_vals) / len(rx_vals), 2)
+            if tx_vals:
+                res["tx_power_avg_dbm"] = round(sum(tx_vals) / len(tx_vals), 2)
+        return res
+
+    # ------------------------------------------------------------------
+    # 子采集器 5：昇腾日志目录元信息（plog/slog 大小与最新时间）
+    # ------------------------------------------------------------------
+    def _collect_log_dirs(self) -> dict:
+        out = {"dirs": []}
+        candidates = [os.path.expanduser("~/ascend/log")]
+        for cand in self.LOG_DIR_CANDIDATES:
+            if cand not in candidates:
+                candidates.append(cand)
+        for base in candidates:
+            if not os.path.isdir(base):
+                continue
+            entry = {"path": base, "subdirs": {}}
+            try:
+                for name in sorted(os.listdir(base)):
+                    sub = os.path.join(base, name)
+                    total, count, latest = 0, 0, 0.0
+                    if os.path.isfile(sub):
+                        files = [sub]
+                    else:
+                        files = []
+                        for root, _dirs, fs in os.walk(sub):
+                            files.extend(os.path.join(root, f) for f in fs)
+                    for fp in files:
+                        try:
+                            st = os.stat(fp)
+                        except OSError:
+                            continue
+                        total += st.st_size
+                        count += 1
+                        latest = max(latest, st.st_mtime)
+                    entry["subdirs"][name] = {
+                        "size_mb": round(total / 1048576, 1),
+                        "file_count": count,
+                        "latest_mtime": time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(latest)
+                        ) if latest else None,
+                    }
+            except OSError as e:
+                entry["error"] = str(e)
+            out["dirs"].append(entry)
+        return {"log_dirs": out}
+
+    # ------------------------------------------------------------------
+    # 汇总入口：5 个子采集器并发执行（与 HardwareCollector 相同的线程池模式）
+    # ------------------------------------------------------------------
+    def collect(self) -> CollectorResult:
+        sub_collectors = [
+            ("smi", self._collect_smi),
+            ("per_device", self._collect_per_device),
+            ("device_nodes", self._collect_device_nodes),
+            ("optical", self._collect_optical),
+            ("log_dirs", self._collect_log_dirs),
+        ]
+        result = {}
+        errors = []
+        max_workers = min(len(sub_collectors), os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = {executor.submit(fn): name for name, fn in sub_collectors}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    result.update(future.result())
+                except Exception as e:
+                    errors.append(f"采集 {name} 失败: {e}")
+        # 顶层汇总字段：count / devices / firmware_version，方便 Agent 直接判断多卡一致性
+        devices = result.get("devices") or []
+        result["count"] = len(devices) if devices else self.npu_count
+        if devices and isinstance(devices[0], dict) and devices[0].get("firmware_version"):
+            result["firmware_version"] = devices[0]["firmware_version"]
+        return CollectorResult(result, self.collect_type, errors)
+
+
 class AscendCollector:
     """Ascend 组件版本采集器"""
 
@@ -572,13 +1408,21 @@ class AscendCollector:
 
 
 class EnvCollector:
-    """环境变量采集器"""
+    """环境变量采集器 — 采集时对疑似敏感变量脱敏，避免密钥泄露进 dump 文件"""
 
     ENV_FILTERS = [
         "ASCEND", "MINDIE", "ATB_", "HCCL_", "MIES",
         "RANKTABLE", "GE_", "TORCH", "ACL_", "NPU_",
         "LCCL_", "LCAL_", "OPS", "INF_"
     ]
+
+    # 疑似敏感变量的 key 匹配模式（值脱敏，key 名保留用于环境一致性比对）
+    SENSITIVE_PATTERN = re.compile(
+        r'password|passwd|pwd|token|secret|api_key|apikey|access_key|'
+        r'secret_key|credential|private_key|certificate|authorization',
+        re.IGNORECASE,
+    )
+    MASKED_VALUE = "***MASKED***"
 
     def __init__(self, filter_env: bool = False):
         self.collect_type = "env"
@@ -591,6 +1435,18 @@ class EnvCollector:
                 k: v for k, v in env_items.items()
                 if any(f in k for f in self.ENV_FILTERS)
             }
+
+        # 敏感变量脱敏
+        masked_keys = sorted(k for k in env_items if self.SENSITIVE_PATTERN.search(k))
+        for k in masked_keys:
+            env_items[k] = self.MASKED_VALUE
+        if masked_keys:
+            preview = ", ".join(masked_keys[:10]) + ("..." if len(masked_keys) > 10 else "")
+            env_items["__masking_warning__"] = (
+                f"{len(masked_keys)} 个疑似敏感环境变量已脱敏为 {self.MASKED_VALUE}"
+                f"（key 名保留用于一致性比对）: {preview}"
+            )
+
         return CollectorResult(env_items, self.collect_type)
 
 
@@ -636,7 +1492,7 @@ class PingCollector:
             errors.append("rank table 没有解析出任何主机信息")
             return CollectorResult(result, self.collect_type, errors)
 
-        for host in host_to_devices:
+        def ping_one(host):
             try:
                 output = subprocess.check_output(
                     shlex.split(f"/usr/bin/ping -c 3 -q -W 2 {host}"),
@@ -644,7 +1500,15 @@ class PingCollector:
                 )
             except Exception:
                 output = "ping failed"
-            result[str(host)] = output
+            return str(host), output
+
+        # 并发 ping，避免主机较多时串行执行过慢
+        max_workers = min(len(host_to_devices), (os.cpu_count() or 4) * 2) or 1
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = [executor.submit(ping_one, host) for host in host_to_devices]
+            for future in as_completed(futures):
+                host, output = future.result()
+                result[host] = output
 
         return CollectorResult(result, self.collect_type, errors)
 
@@ -745,6 +1609,451 @@ class HCCLCollector:
         return result
 
 
+class NetworkCollector:
+    """网络环境采集器 — 网卡状态/路由/RDMA RoCE/监听端口与秩间业务端口连通性"""
+
+    PROBE_TIMEOUT = 2.0
+    MAX_PEER_PROBE_PORTS = 8
+
+    def __init__(self, rank_table: "RankTable" = None):
+        self.collect_type = "network"
+        self.rank_table = rank_table
+
+    def collect(self) -> CollectorResult:
+        sub_collectors = [
+            ("nics", self._collect_nics),
+            ("routes", self._collect_routes),
+            ("rdma", self._collect_rdma),
+            ("listen_ports", self._collect_listen_ports),
+            ("peer_ports", self._collect_peer_ports),
+        ]
+        result = {}
+        errors = []
+        max_workers = min(len(sub_collectors), os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = {executor.submit(fn): name for name, fn in sub_collectors}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    result.update(future.result())
+                except Exception as e:
+                    errors.append(f"采集 {name} 失败: {e}")
+
+        # MTU 一致性结构化判断（排除 lo）
+        nics = result.get("nics") or []
+        mtus = {
+            n.get("mtu") for n in nics
+            if isinstance(n, dict) and n.get("mtu") and n.get("name") != "lo"
+        }
+        result["mtu_consistent"] = len(mtus) <= 1
+        if len(mtus) > 1:
+            result["mtu_values"] = sorted(mtus)
+        return CollectorResult(result, self.collect_type, errors)
+
+    # ---------- 工具方法 ----------
+
+    @staticmethod
+    def _read_sys(path):
+        try:
+            with open(path, "r", errors="replace") as f:
+                return f.read().strip()
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _resolve_driver(base):
+        driver_link = os.path.join(base, "device", "driver")
+        if os.path.islink(driver_link):
+            try:
+                return os.path.basename(os.readlink(driver_link))
+            except OSError:
+                return None
+        return None
+
+    @staticmethod
+    def _parse_proc_net(path, results):
+        """解析 /proc/net/tcp(6)，收集 LISTEN 状态（0A）端口"""
+        try:
+            with open(path, "r", errors="replace") as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            return
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4:
+                continue
+            local, tcp_state = fields[1], fields[3]
+            if tcp_state != "0A":
+                continue
+            addr_part = local.split(":")
+            if len(addr_part) != 2:
+                continue
+            try:
+                port = int(addr_part[-1], 16)
+            except ValueError:
+                continue
+            if port not in results:
+                results.append(port)
+
+    def _probe_port(self, host, port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(self.PROBE_TIMEOUT)
+        try:
+            sock.connect((host, port))
+            return "open"
+        except socket.timeout:
+            return "filtered"
+        except ConnectionRefusedError:
+            return "refused"
+        except OSError:
+            return "unreachable"
+        finally:
+            sock.close()
+
+    # ---------- 子采集器 ----------
+
+    def _collect_nics(self):
+        net_dir = "/sys/class/net"
+        if not os.path.isdir(net_dir):
+            return {"nics": [], "error": "未找到 /sys/class/net"}
+        try:
+            ifaces = sorted(os.listdir(net_dir))
+        except OSError as e:
+            return {"nics": [], "error": str(e)}
+
+        nics = []
+        for iface in ifaces:
+            base = os.path.join(net_dir, iface)
+            info = {"name": iface}
+            mtu = self._read_sys(os.path.join(base, "mtu"))
+            if mtu and mtu.isdigit():
+                info["mtu"] = int(mtu)
+            speed = self._read_sys(os.path.join(base, "speed"))
+            if speed and speed.isdigit():
+                info["speed_mbps"] = int(speed)
+            duplex = self._read_sys(os.path.join(base, "duplex"))
+            if duplex:
+                info["duplex"] = duplex
+            operstate = self._read_sys(os.path.join(base, "operstate"))
+            if operstate:
+                info["operstate"] = operstate
+            mac = self._read_sys(os.path.join(base, "address"))
+            if mac:
+                info["mac"] = mac
+            driver = self._resolve_driver(base)
+            if driver:
+                info["driver"] = driver
+            # bond 归属判断
+            if os.path.isdir(os.path.join(base, "bonding")):
+                info["type"] = "bond"
+                members = []
+                for other in ifaces:
+                    master_link = os.path.join(net_dir, other, "master")
+                    if os.path.islink(master_link):
+                        try:
+                            if os.path.basename(os.readlink(master_link)) == iface:
+                                members.append(other)
+                        except OSError:
+                            pass
+                info["members"] = members
+            elif os.path.islink(os.path.join(base, "master")):
+                info["type"] = "bond_member"
+            nics.append(info)
+
+        result = {"nics": nics}
+        rc, out = run_cmd("ip -br addr")
+        if rc == 0 and out:
+            result["addr_raw"] = out.splitlines()
+        return result
+
+    def _collect_routes(self):
+        result = {}
+        rc, out = run_cmd("ip route")
+        if rc == 0 and out:
+            result["route_raw"] = out.splitlines()
+            for line in out.splitlines():
+                if line.startswith("default"):
+                    result["default_gateway"] = line
+                    break
+        rc, out = run_cmd("ip -6 route")
+        if rc == 0 and out:
+            result["route6_raw"] = out.splitlines()
+        return result
+
+    def _collect_rdma(self):
+        result = {"devices": []}
+        rdma_cls = "/sys/class/infiniband"
+        if os.path.isdir(rdma_cls):
+            try:
+                devices = sorted(os.listdir(rdma_cls))
+            except OSError as e:
+                return {"devices": [], "error": str(e)}
+            for dev in devices:
+                dev_info = {"name": dev}
+                ports_dir = os.path.join(rdma_cls, dev, "ports")
+                if os.path.isdir(ports_dir):
+                    ports = {}
+                    for port in sorted(
+                        os.listdir(ports_dir),
+                        key=lambda p: int(p) if p.isdigit() else 0
+                    ):
+                        pbase = os.path.join(ports_dir, port)
+                        port_info = {}
+                        state = self._read_sys(os.path.join(pbase, "state"))
+                        if state and ":" in state:
+                            port_info["state"] = state.split(":")[-1].strip()
+                        rate = self._read_sys(os.path.join(pbase, "rate"))
+                        if rate:
+                            port_info["rate"] = rate
+                        gids = []
+                        gid_dir = os.path.join(pbase, "gids")
+                        if os.path.isdir(gid_dir):
+                            for gid_file in sorted(os.listdir(gid_dir)):
+                                val = self._read_sys(os.path.join(gid_dir, gid_file))
+                                if val:
+                                    gids.append(val)
+                        port_info["gids"] = gids
+                        ports[port] = port_info
+                    dev_info["ports"] = ports
+                result["devices"].append(dev_info)
+        else:
+            result["note"] = "未发现 /sys/class/infiniband（RoCE/RDMA 未启用或驱动未加载）"
+        rc, out = run_cmd("ibv_devinfo")
+        if rc == 0 and out:
+            result["ibv_devinfo_raw"] = out.splitlines()
+        return result
+
+    def _collect_listen_ports(self):
+        ports = []
+        self._parse_proc_net("/proc/net/tcp", ports)
+        self._parse_proc_net("/proc/net/tcp6", ports)
+        ports.sort()
+        result = {"tcp_listen": ports}
+        rc, out = run_cmd("ss -tlnp")
+        if rc == 0 and out:
+            result["ss_raw"] = out.splitlines()
+        return result
+
+    def _collect_peer_ports(self):
+        """秩间业务端口连通性：对本机监听的业务端口（>=1024）
+        逐一探测 rank table 中各主机的连通性（ICMP 通不代表业务端口通）"""
+        host_to_devices = {}
+        if self.rank_table is not None:
+            host_to_devices = getattr(self.rank_table, "host_to_devices", {}) or {}
+        if not host_to_devices:
+            return {"peers": {}, "note": "无 rank table，跳过秩间端口探测"}
+
+        listen_ports = []
+        self._parse_proc_net("/proc/net/tcp", listen_ports)
+        self._parse_proc_net("/proc/net/tcp6", listen_ports)
+        biz_ports = [p for p in sorted(set(listen_ports)) if p >= 1024]
+        if not biz_ports:
+            return {"peers": {}, "note": "本机未发现 >=1024 的监听端口，跳过秩间端口探测"}
+        biz_ports = biz_ports[: self.MAX_PEER_PROBE_PORTS]
+
+        tasks = [(str(host), port) for host in host_to_devices for port in biz_ports]
+        peers = {}
+        max_workers = min(len(tasks), (os.cpu_count() or 4) * 2) or 1
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = {executor.submit(self._probe_port, h, p): (h, p) for h, p in tasks}
+            for future in as_completed(futures):
+                h, p = futures[future]
+                peers[f"{h}:{p}"] = future.result()
+
+        anomalies = {k: v for k, v in peers.items() if v != "open"}
+        result = {"peers": peers, "probe_ports": biz_ports, "anomalies": anomalies}
+        if anomalies:
+            result["note"] = "refused 多为服务未在该节点部署，filtered/unreachable 需排查防火墙或路由"
+        return result
+
+
+class RuntimeCollector:
+    """软件运行时采集器 — Python 包/推理进程/容器与 cgroup"""
+
+    WATCHED_PACKAGES = (
+        "torch", "torch-npu", "vllm", "vllm-ascend", "transformers",
+        "mindspore", "mindie", "numpy", "triton", "onnx", "onnxruntime",
+    )
+    TARGET_PROCESS_KEYWORDS = ("mindie", "vllm", "torchrun", "python")
+    MAX_TARGET_PROCESSES = 40
+
+    def __init__(self):
+        self.collect_type = "runtime"
+
+    def collect(self) -> CollectorResult:
+        sub_collectors = [
+            ("python", self._collect_python),
+            ("packages", self._collect_packages),
+            ("processes", self._collect_processes),
+            ("container", self._collect_container),
+        ]
+        result = {}
+        errors = []
+        max_workers = min(len(sub_collectors), os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = {executor.submit(fn): name for name, fn in sub_collectors}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    result.update(future.result())
+                except Exception as e:
+                    errors.append(f"采集 {name} 失败: {e}")
+        return CollectorResult(result, self.collect_type, errors)
+
+    # ---------- 工具方法 ----------
+
+    @staticmethod
+    def _read_file(path):
+        try:
+            with open(path, "r", errors="replace") as f:
+                return f.read().strip()
+        except OSError:
+            return None
+
+    def _read_proc_cmdline(self, pid):
+        content = self._read_file(f"/proc/{pid}/cmdline")
+        if not content:
+            return []
+        return [part for part in content.split("\0") if part]
+
+    def _read_proc_status(self, pid):
+        content = self._read_file(f"/proc/{pid}/status")
+        if not content:
+            return {}
+        status = {}
+        for line in content.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            value = value.strip()
+            status[key.strip()] = int(value) if value.isdigit() else value
+        return status
+
+    # ---------- 子采集器 ----------
+
+    def _collect_python(self):
+        result = {
+            "python_version": platform.python_version(),
+            "python_executable": sys.executable,
+        }
+        rc, out = run_cmd(f'"{sys.executable}" -m pip --version', timeout=20)
+        if rc == 0 and out:
+            result["pip"] = out.strip()
+        conda_env = os.environ.get("CONDA_DEFAULT_ENV")
+        if conda_env:
+            result["conda_env"] = conda_env
+        virtual_env = os.environ.get("VIRTUAL_ENV")
+        if virtual_env:
+            result["virtual_env"] = virtual_env
+        return result
+
+    def _collect_packages(self):
+        """pip 包版本：环境比对的核心差异源（torch/torch_npu/vllm/transformers 等）"""
+        result = {"watched": {}}
+        watched_norm = {p.lower().replace("-", "_") for p in self.WATCHED_PACKAGES}
+        try:
+            import importlib.metadata as importlib_metadata
+            for dist in importlib_metadata.distributions():
+                name = (dist.metadata.get("Name") or "").lower().replace("-", "_")
+                if name in watched_norm:
+                    result["watched"][name] = dist.version
+        except Exception as e:
+            result["watched_error"] = str(e)
+        rc, out = run_cmd(f'"{sys.executable}" -m pip list --format=freeze', timeout=60)
+        if rc == 0 and out:
+            result["pip_list_raw"] = out.splitlines()
+        return result
+
+    def _collect_processes(self):
+        """运行进程快照：识别 mindie/vllm/torchrun/python 及其启动参数与 CPU 亲和性"""
+        result = {"targets": [], "total": 0}
+        pids = []
+        try:
+            for entry in os.listdir("/proc"):
+                if entry.isdigit():
+                    pids.append(int(entry))
+        except OSError:
+            pass
+        result["total"] = len(pids)
+
+        targets = []
+        for pid in pids:
+            if pid == os.getpid():
+                continue  # 排除采集器自身
+            cmdline = self._read_proc_cmdline(pid)
+            if not cmdline:
+                continue
+            cmd_join = " ".join(cmdline)
+            low = cmd_join.lower()
+            if not any(k in low for k in self.TARGET_PROCESS_KEYWORDS):
+                continue
+            info = {"pid": pid, "cmd": cmd_join[:512]}
+            status = self._read_proc_status(pid)
+            if status:
+                if isinstance(status.get("PPid"), int):
+                    info["ppid"] = status["PPid"]
+                if isinstance(status.get("Threads"), int):
+                    info["threads"] = status["Threads"]
+                allowed = status.get("Cpus_allowed_list")
+                if allowed:
+                    info["cpu_affinity"] = allowed
+            targets.append(info)
+        targets.sort(key=lambda t: t.get("pid", 0))
+        result["targets"] = targets[: self.MAX_TARGET_PROCESSES]
+
+        rc, out = run_cmd("ps -eo pid,ppid,psr,pcpu,pmem,nlwp,comm,args --sort=-pcpu")
+        if rc == 0 and out:
+            result["ps_raw"] = out.splitlines()[:200]
+        return result
+
+    def _collect_container(self):
+        """容器环境：cgroup 版本/cpuset/内存限制、NPU 设备透传、挂载点"""
+        result = {"in_container": is_in_container()}
+        content = self._read_file("/proc/self/cgroup")
+        if content:
+            result["cgroup_raw"] = content.splitlines()
+            m = re.search(r"[0-9a-f]{64}", content)
+            if m:
+                result["container_id"] = m.group(0)[:12]
+        if os.path.exists("/sys/fs/cgroup/cgroup.controllers"):
+            result["cgroup_version"] = 2
+        elif os.path.exists("/sys/fs/cgroup/cpuset"):
+            result["cgroup_version"] = 1
+
+        cpuset = self._read_file("/sys/fs/cgroup/cpuset.cpus.effective")
+        if cpuset is None:
+            cpuset = self._read_file("/sys/fs/cgroup/cpuset/cpuset.effective_cpus")
+        if cpuset:
+            result["cpuset_cpus"] = cpuset
+        mem_limit = self._read_file("/sys/fs/cgroup/memory.max")
+        if mem_limit is None:
+            mem_limit = self._read_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        if mem_limit:
+            result["memory_limit"] = mem_limit
+
+        npu_devs = set()
+        try:
+            for name in os.listdir("/dev"):
+                if name.startswith("davinci") or name in (
+                    "davinci_manager", "devmm_svm", "hisi_hdc"
+                ):
+                    npu_devs.add(name)
+        except OSError:
+            pass
+        result["npu_devices_in_dev"] = sorted(npu_devs)
+
+        mounts_content = self._read_file("/proc/self/mounts")
+        if mounts_content:
+            interesting = [
+                line for line in mounts_content.splitlines()
+                if "overlay" in line or "davinci" in line or "ascend" in line.lower()
+            ]
+            if interesting:
+                result["mounts_filtered"] = interesting
+        result["note"] = "镜像 ID 需在宿主机执行 docker inspect 获取"
+        return result
+
+
 class WeightCollector:
     """权重文件 SHA256 哈希采集器"""
 
@@ -840,11 +2149,32 @@ def collect_all(args) -> dict:
     info("采集系统信息...")
     _run_collector(SysCollector())
 
+    info("采集硬件资源（CPU/内存/NUMA/PCIe/磁盘/内核参数）...")
+    _run_collector(HardwareCollector())
+
+    info("采集 NPU 运行态（健康状态/温度/功耗/占用/设备节点）...")
+    _run_collector(NPUCollector())
+
     info("采集 Ascend 组件版本...")
     _run_collector(AscendCollector())
 
     info("采集环境变量...")
     _run_collector(EnvCollector(filter_env=args.filter))
+
+    info("采集软件运行时（Python 包/推理进程/容器）...")
+    _run_collector(RuntimeCollector())
+
+    # --- 预解析 rank table（供 Ping/HCCL/Network 采集器复用） ---
+    rank_table = None
+    if args.rank_table_path:
+        info("解析 rank table: {}", args.rank_table_path)
+        try:
+            rank_table = parse_rank_table(args.rank_table_path, args.scene or "mindie")
+        except Exception as e:
+            warn("rank table 解析失败: {}", e)
+
+    info("采集网络细节（网卡/路由/RDMA/端口连通性）...")
+    _run_collector(NetworkCollector(rank_table=rank_table))
 
     # --- 可选：配置文件 ---
     if args.mies_config_path:
@@ -868,36 +2198,22 @@ def collect_all(args) -> dict:
         chunk_size = args.chunk_size * 1024 * 1024
         _run_collector(WeightCollector(args.weight_dir, chunk_size))
 
-    # --- 可选：网络与 HCCL（需要 rank table） ---
-    if args.rank_table_path:
-        framework = Framework.MINDIE
-        if args.scene:
-            if "vllm" in args.scene:
-                framework = Framework.VLLM
+    # --- 可选：Ping/HCCL/HCCN（需要 rank table） ---
+    if rank_table:
+        info("采集 Ping 连通性...")
+        _run_collector(PingCollector(rank_table))
 
-        try:
-            rank_table = parse_rank_table(args.rank_table_path, framework)
-            info("rank table 解析成功: {} 台主机, {} 版本",
-                 len(rank_table.host_to_devices), rank_table.version)
-        except Exception as e:
-            error("rank table 解析失败: {}", e)
-            rank_table = None
+        info("采集 HCCL 通信状态...")
+        _run_collector(HCCLCollector(rank_table))
 
-        if rank_table:
-            info("采集 Ping 连通性...")
-            _run_collector(PingCollector(rank_table))
+        info("采集 Link 状态...")
+        _run_collector(HCCNCollector("link", "link"))
 
-            info("采集 HCCL 通信状态...")
-            _run_collector(HCCLCollector(rank_table))
+        info("采集 VNIC 状态...")
+        _run_collector(HCCNCollector("vnic", "vnic"))
 
-            info("采集 Link 状态...")
-            _run_collector(HCCNCollector("link", "link"))
-
-            info("采集 VNIC 状态...")
-            _run_collector(HCCNCollector("vnic", "vnic"))
-
-            info("采集 TLS 状态...")
-            _run_collector(HCCNCollector("tls", "tls"))
+        info("采集 TLS 状态...")
+        _run_collector(HCCNCollector("tls", "tls"))
 
     return dump_content
 

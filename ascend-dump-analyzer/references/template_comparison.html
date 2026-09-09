@@ -324,7 +324,7 @@ details > .details-body { padding: 0.5rem 0; }
     <table>
       <thead><tr><th>Section</th><th>总路径数</th><th>一致</th><th>差异</th><th>存在性</th></tr></thead>
       <tbody>
-        <!-- Repeat for each section: system, ascend, env, config, network, weight, other -->
+        <!-- Repeat for each section: hardware, system, npu, ascend, runtime, env, config, network, weight, other -->
         {{SECTION_STAT_ROWS}}
       </tbody>
     </table>
@@ -333,7 +333,8 @@ details > .details-body { padding: 0.5rem 0; }
 
 <!-- ===== DIFF DETAIL SECTIONS ===== -->
 <!-- The {{DIFF_SECTIONS}} placeholder should be replaced with one or more
-     <section> blocks, one per diff category (system/ascend/env/config/network/weight/other).
+     <section> blocks, one per diff category
+     (hardware/system/npu/ascend/runtime/env/config/network/weight/other).
      Only include categories that have diffs. Each block should follow this structure:
 
   <section class="section" id="CATEGORY_ID">

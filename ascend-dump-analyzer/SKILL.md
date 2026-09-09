@@ -26,6 +26,7 @@ description: "采集、分析和比对昇腾 NPU 环境信息。当用户需要�
 - 零依赖 — 仅需 Python 标准库（psutil 为可选依赖，缺失时自动跳过）
 - 单文件 — 拷贝到任意 Linux 服务器即可用 `python3` 运行
 - 输出兼容 `msprechecker compare` — JSON 格式与原工具一致
+- 结构化 + raw 双输出 — 每个 section 同时提供结构化字段（供判定）与原始命令输出（供留证）
 
 **使用场景：**
 - 用户要求"采集环境信息"或"创建 dump"
@@ -106,7 +107,7 @@ python3 /tmp/msprechecker_dump.py \
 - 支持 2 个或更多文件同时比对
 - 鲁棒 JSON 解析 — 处理 markdown 转义字符（`\_` → `_`、`\:` → `:`）、多余空行等
 - 递归扁平化 — 适用于任意 JSON 结构，不依赖固定 schema
-- Section 感知分类 — 按 system / ascend / env / config / network / weight / other 分组差异
+- Section 感知分类 — 按 hardware / system / npu / ascend / runtime / env / config / network / weight / other 分组差异
 - 智能截断 — 超长值（LS_COLORS、路径）在显示时截断，JSON 输出中保留完整值
 - 多种输出格式：终端文本、HTML 报告、JSON 差异文件
 
@@ -403,6 +404,14 @@ ascend.driver.version = "24.1"
 | `{{COMPONENT_CARDS}}` | Ascend 组件卡片 | 多个 `.comp-card` div |
 | `{{VERSION_MISMATCH_BANNER}}` | 版本不一致警告 | `.banner.warn` 或空 |
 | `{{VERSION_CONSISTENCY_ROWS}}` | 版本一致性表行 | 多个 `<tr>` |
+| `{{HARDWARE_CPU_MEM_ROWS}}` | 硬件 CPU/内存概览表行 | 多个 `<tr>` |
+| `{{HARDWARE_TOPOLOGY_ROWS}}` | NUMA/PCIe 拓扑表行 | 多个 `<tr>` |
+| `{{HARDWARE_EXTRA_ROWS}}` | 磁盘/内核参数表行（折叠） | 多个 `<tr>` |
+| `{{NPU_DEVICE_ROWS}}` | NPU 设备状态表行 | 多个 `<tr>` |
+| `{{NPU_EXTRA_ROWS}}` | 设备节点/固件/日志表行（折叠） | 多个 `<tr>` |
+| `{{RUNTIME_PKG_ROWS}}` | 关键 pip 包版本表行 | 多个 `<tr>` |
+| `{{RUNTIME_PROCESS_ROWS}}` | 推理进程快照表行 | 多个 `<tr>` |
+| `{{RUNTIME_CONTAINER_ROWS}}` | 容器上下文表行（折叠） | 多个 `<tr>` |
 | `{{CRITICAL_ENV_ROWS}}` | 关键环境变量表行 | 多个带徽章的 `<tr>` |
 | `{{SENSITIVE_VAR_BANNER}}` | 敏感变量警告 | `.banner.warn` 或空 |
 | `{{ALL_ENV_ROWS}}` | 全部环境变量行（折叠） | 多个 `<tr>` |
@@ -417,6 +426,10 @@ ascend.driver.version = "24.1"
 | `{{ASCEND_DATA_ROWS}}` | 原始 Ascend 数据表行 | 多个 `<tr>` |
 | `{{ENV_KEY_DATA_ROWS}}` | 原始关键环境变量行 | 多个 `<tr>` |
 | `{{ALL_ENV_DATA_ROWS}}` | 全部环境变量原始行（折叠） | 多个 `<tr>` |
+| `{{HARDWARE_DATA_ROWS}}` | 原始 hardware 数据表行 | 多个 `<tr>` |
+| `{{NPU_DATA_ROWS}}` | 原始 npu 数据表行 | 多个 `<tr>` |
+| `{{RUNTIME_DATA_ROWS}}` | 原始 runtime 数据表行 | 多个 `<tr>` |
+| `{{NETWORK_DATA_ROWS}}` | 原始 network 数据表行 | 多个 `<tr>` |
 | `{{RAW_DATA_SUMMARY_BANNER}}` | 原始数据摘要 | `.banner.info` |
 | `{{TOOL_NAME}}` / `{{TOOL_VERSION}}` | 工具信息 | msprechecker_dump.py / 1.0.0 |
 | `{{REPORT_DATE}}` / `{{REPORT_TIMESTAMP}}` | 报告时间 | 2026-08-09 |
@@ -507,8 +520,8 @@ ascend.driver.version = "24.1"
 ## 重要注意事项
 
 - `_meta` 键包含采集元数据（工具版本、时间戳、主机名）— 比对逻辑中排除，但报告头部中包含。
-- 如果 JSON 中缺失某 section，表示该采集器未运行（如未提供 `--rank-table-path` 则无 `ping`/`hccl`/`link`/`vnic`/`tls` section）。
+- 如果 JSON 中缺失某 section，表示该采集器未运行（如未提供 `--rank-table-path` 则无 `ping`/`hccl`/`link`/`vnic`/`tls` section，`network.peers` 也为空）。
 - Ascend 组件为空 `{}` 表示未找到 `version.info` 文件 — 标记为缺失，并交叉引用对应环境变量以判断组件是真正未安装还是仅未配置。
-- 环境变量值可能包含敏感信息（API Key、密码、令牌）— 始终扫描并标记敏感变量，建议用户使用 `--filter` 或脱敏后分享。
+- 环境变量值可能包含敏感信息（API Key、密码、令牌）— 采集脚本已自动脱敏（key 保留、值替换为 `***MASKED***`，并在 `env.__masking_warning__` 写入告警）；报告中仍需扫描并标记敏感变量。
 - 比对时，如果某 section 只在一侧存在，将该 section 的所有路径报告为"仅在文件 X 中"。
 - RC（候选发布）版本应标注为非生产版本 — 报告中标记但不判为 FAIL。

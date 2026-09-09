@@ -306,6 +306,48 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 </section>
 
+<!-- ===== HARDWARE RESOURCES (conditional: 若 dump 中无 hardware section，删除本区块) ===== -->
+<section class="section" id="hardware">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🧮</span> 硬件资源</div>
+    <span class="sh-count">{{HARDWARE_OK_COUNT}}/{{HARDWARE_TOTAL_COUNT}} 项</span>
+  </div>
+
+  <div class="sub-head">CPU / 内存概览</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>指标</th><th>数值</th><th>说明</th></tr></thead>
+      <tbody>
+        {{HARDWARE_CPU_MEM_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sub-head">NUMA / PCIe 拓扑</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>节点 / 总线</th><th>归属资源</th><th>说明</th></tr></thead>
+      <tbody>
+        {{HARDWARE_TOPOLOGY_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <details>
+    <summary>磁盘 / 内核参数 / 时钟源 / BIOS 与 BMC ({{HARDWARE_EXTRA_COUNT}} 项)</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>指标</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {{HARDWARE_EXTRA_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+</section>
+
 <!-- ===== ASCEND COMPONENTS ===== -->
 <section class="section" id="ascend">
   <div class="section-head">
@@ -328,6 +370,39 @@ details > .details-body { padding: 0.5rem 0; }
       </tbody>
     </table>
   </div>
+</section>
+
+<!-- ===== NPU RUNTIME (conditional: 若 dump 中无 npu section，删除本区块) ===== -->
+<section class="section" id="npu">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🧊</span> NPU 运行态</div>
+    <span class="sh-count">{{NPU_DEVICE_COUNT}} 卡</span>
+  </div>
+
+  {{NPU_HEALTH_BANNER}}
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Device</th><th>型号</th><th>健康</th><th>温度</th><th>功耗</th><th>AICore</th><th>HBM</th><th>ECC / 告警</th></tr></thead>
+      <tbody>
+        {{NPU_DEVICE_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <details>
+    <summary>设备节点权限 / 固件与驱动 / 日志目录 ({{NPU_EXTRA_COUNT}} 项)</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>指标</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {{NPU_EXTRA_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
 </section>
 
 <!-- ===== ENVIRONMENT VARIABLES ===== -->
@@ -357,6 +432,48 @@ details > .details-body { padding: 0.5rem 0; }
           <thead><tr><th>变量名</th><th>值</th></tr></thead>
           <tbody>
             {{ALL_ENV_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+</section>
+
+<!-- ===== SOFTWARE RUNTIME (conditional: 若 dump 中无 runtime section，删除本区块) ===== -->
+<section class="section" id="runtime">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🧩</span> 软件运行时</div>
+    <span class="sh-count">{{RUNTIME_PKG_COUNT}} 个关键包</span>
+  </div>
+
+  <div class="sub-head">Python 环境与关键包版本</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>包 / 组件</th><th>版本</th><th>说明</th></tr></thead>
+      <tbody>
+        {{RUNTIME_PKG_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sub-head">推理进程快照</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>PID</th><th>进程</th><th>CPU%</th><th>内存%</th><th>线程数</th><th>CPU 亲和</th><th>命令行</th></tr></thead>
+      <tbody>
+        {{RUNTIME_PROCESS_ROWS}}
+      </tbody>
+    </table>
+  </div>
+
+  <details>
+    <summary>容器与 cgroup ({{RUNTIME_CONTAINER_COUNT}} 项)</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>指标</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {{RUNTIME_CONTAINER_ROWS}}
           </tbody>
         </table>
       </div>
@@ -452,6 +569,62 @@ details > .details-body { padding: 0.5rem 0; }
           <thead><tr><th>变量名</th><th>数值</th><th>说明</th></tr></thead>
           <tbody>
             {{ALL_ENV_DATA_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  <details>
+    <summary>硬件资源 (hardware) — {{HARDWARE_DATA_COUNT}} 项</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>路径</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {{HARDWARE_DATA_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  <details>
+    <summary>NPU 运行态 (npu) — {{NPU_DATA_COUNT}} 项</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>路径</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {{NPU_DATA_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  <details>
+    <summary>软件运行时 (runtime) — {{RUNTIME_DATA_COUNT}} 项</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>路径</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {{RUNTIME_DATA_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  <details>
+    <summary>网络细节 (network) — {{NETWORK_DATA_COUNT}} 项</summary>
+    <div class="details-body">
+      <div class="table-wrap" style="margin-top:0.4rem;">
+        <table>
+          <thead><tr><th>路径</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {{NETWORK_DATA_ROWS}}
           </tbody>
         </table>
       </div>

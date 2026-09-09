@@ -109,7 +109,11 @@ class DumpComparator:
     # 顶层 section 分类
     SECTION_CATEGORIES = {
         "system": "system",
+        "hardware": "hardware",
         "ascend": "ascend",
+        "npu": "npu",
+        "runtime": "runtime",
+        "network": "network",
         "env": "env",
         "mies config": "config",
         "user config": "config",
@@ -314,7 +318,7 @@ def output_text(result):
         print(f"    {section:20s}  {stats['total']:3d} 项  一致 {stats['identical']:3d}  {status}")
 
     # 分类差异
-    for category in ["system", "ascend", "env", "config", "network", "weight", "other"]:
+    for category in ["hardware", "system", "npu", "ascend", "runtime", "env", "config", "network", "weight", "other"]:
         if category not in result["diffs"]:
             continue
         cat_data = result["diffs"][category]
@@ -323,7 +327,8 @@ def output_text(result):
             continue
 
         cat_names = {
-            "system": "系统设置", "ascend": "Ascend 组件", "env": "环境变量",
+            "hardware": "硬件资源", "system": "系统设置", "npu": "NPU 运行态",
+            "ascend": "Ascend 组件", "runtime": "软件运行时", "env": "环境变量",
             "config": "配置文件", "network": "网络", "weight": "权重",
             "other": "其他"
         }
@@ -418,7 +423,7 @@ def output_html(result, output_path):
 
     # 统计各类别差异
     cat_stats = {}
-    for cat in ["system", "ascend", "env", "config", "network", "weight", "other"]:
+    for cat in ["hardware", "system", "npu", "ascend", "runtime", "env", "config", "network", "weight", "other"]:
         if cat in result["diffs"]:
             d = result["diffs"][cat]
             cat_stats[cat] = len(d["modified"]) + len(d["only_in"])
@@ -492,7 +497,8 @@ def output_html(result, output_path):
     # 统计卡片
     stat_cards = ""
     cat_names = {
-        "system": "系统", "ascend": "Ascend", "env": "环境变量",
+        "hardware": "硬件资源", "system": "系统", "npu": "NPU 运行态",
+        "ascend": "Ascend", "runtime": "软件运行时", "env": "环境变量",
         "config": "配置", "network": "网络", "weight": "权重", "other": "其他"
     }
     for cat, name in cat_names.items():

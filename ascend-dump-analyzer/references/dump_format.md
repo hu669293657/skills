@@ -8,8 +8,12 @@ Complete schema for dump JSON files produced by `msprechecker_dump.py` or `mspre
 {
   "_meta": { ... },
   "system": { ... },
+  "hardware": { ... },
+  "npu": { ... },
   "ascend": { ... },
   "env": { ... },
+  "runtime": { ... },
+  "network": { ... },
   "mies config": { ... },
   "user config": { ... },
   "mindie env": { ... },
@@ -23,7 +27,7 @@ Complete schema for dump JSON files produced by `msprechecker_dump.py` or `mspre
 }
 ```
 
-Only `_meta`, `system`, `ascend`, `env` are always present. Other sections appear only when the corresponding CLI argument was provided.
+Only `_meta`, `system`, `hardware`, `npu`, `ascend`, `env`, `runtime`, `network` are always present (Linux-specific sub-fields degrade gracefully on unsupported platforms). Other sections appear only when the corresponding CLI argument was provided.
 
 ---
 
@@ -252,3 +256,74 @@ TLS certificate status for each NPU device (output of `hccn_tool -i N -tls -g`).
 `tls switch[0]` value:
 - `0` = TLS disabled (expected for non-TLS deployments)
 - `1` = TLS enabled
+
+---
+
+## hardware
+
+Hardware resources: CPU topology/runtime state, memory, kernel tunables, clock, disk, PCIe/NUMA topology. Sub-fields degrade gracefully (with `error`/`raw` notes) when sysfs or commands are unavailable.
+
+| Field | Type | Description | Expected |
+|-------|------|-------------|----------|
+| `cpu_topology` | dict | `socket_count` / `numa_node_count` / `physical_cores` / `logical_cpus_online` / `numa_cpu_map` / `socket_cpu_map` / `raw` (lscpu -p) | counts > 0 on physical hosts |
+| `cpu_runtime` | dict | Per-core `governor` / `cur_freq` / `online` state | governor `performance` for inference hosts |
+| `memory` | dict | From `/proc/meminfo`: `MemTotal` / `MemAvailable` / `SwapTotal` / `SwapFree` (KB) | swap usually disabled on training hosts |
+| `kernel_params` | dict | `vm.swappiness` / `vm.max_map_count` / `vm.overcommit_memory` / `fs.file-max` / `kernel.numa_balancing` / `kernel.core_pattern` / `limits` (ulimit snapshot) | see per-key expectations below |
+| `clock` | dict | `timedatectl_raw` (NTP sync state) | `NTP synchronized: yes` |
+| `disk` | dict | `filesystems` (df) / `block_devices` (lsblk) / `bios_bmc` (dmidecode) / raw | weight disk free > model size |
+| `pcie_numa` | dict | `npu_pcie_devices` / `npu_numa_map` / `nic_pcie` / `numactl_raw` / `lspci_npu_raw` | NPU/NIC NUMA affinity consistent |
+
+Kernel parameter expectations:
+- `vm.swappiness` = `0`~`10` for inference/training hosts
+- `kernel.numa_balancing` = `0` (avoid NUMA migration jitter)
+- `ulimit nofile` >= `655350`, `memlock` = `unlimited`
+
+---
+
+## npu
+
+NPU runtime state via `npu-smi` plus device nodes and log dirs. `count` is the detected NPU count; per-device details live in `devices` when `npu-smi` is available.
+
+| Field | Type | Description | Expected |
+|-------|------|-------------|----------|
+| `count` | int | Number of NPUs detected | matches board spec (e.g. 8) |
+| `devices` | list | Per-device dict: `device_id` / `name` / `health` / `temperature` / `power` / `aicore_util` / `hbm_util` / `ecc` | all devices uniform; no `Error`/overheat |
+| `board` | dict | `npu-smi info -t board` snapshot (firmware version etc.) | firmware consistent across hosts |
+| `device_nodes` | dict | `/dev/davinci*`, `davinci_manager`, `devmm_svm`, `hisi_hdc` stat info (mode/owner) | readable for the service user; critical in containers |
+| `log_dirs` | dict | `~/ascend/log` dir sizes and latest mtimes | — |
+| `optical` | dict | `hccn_tool` optical/port transceiver snapshot (host only) | — |
+| `note` | string | Degradation reason when `npu-smi` is absent | — |
+
+---
+
+## runtime
+
+Software runtime: Python environment, watched pip packages, inference processes, container/cgroup context.
+
+| Field | Type | Description | Expected |
+|-------|------|-------------|----------|
+| `python_version` / `python_executable` / `pip` | string | Interpreter and pip identity | matches deployment env |
+| `watched` | dict | Key packages: `torch` / `torch-npu` / `vllm` / `vllm-ascend` / `transformers` / `mindspore` / `numpy` / `triton` / `onnx` / `onnxruntime` | version matrix consistent across ranks |
+| `pip_list_raw` | list | Full `pip list --format=freeze` fallback | — |
+| `targets` | list | Matching processes (`mindie` / `vllm` / `torchrun` / `python`): `pid` / `ppid` / `cmdline` / `threads` / `cpus_allowed_list` / `status` | affinity covers multiple cores, not just CPU0 |
+| `in_container` | bool | Multi-signal container detection (dockerenv / cgroup markers / cgroup v2 root / PID1) | `false` on bare metal |
+| `container` | dict | cgroup version, `cpuset`, memory limit, `/dev` NPU passthrough, mounts (containers only) | NPU devices fully mapped |
+| `npu_devices_in_dev` | list | `/dev/davinci*` entries visible to this process | 8 on an 8-card host |
+
+---
+
+## network
+
+Network details: NIC state, routes, RDMA/RoCE GIDs, TCP listeners, and inter-rank port reachability (rank table hosts).
+
+| Field | Type | Description | Expected |
+|-------|------|-------------|----------|
+| `nics` | list | Per-NIC: `name` / `mtu` / `speed_mbps` / `duplex` / `operstate` / `mac` / `driver` / `bond` info | all ranks `UP`, same speed/MTU |
+| `mtu_consistent` | bool | Whether all NIC MTUs agree | `true` |
+| `routes` | dict | `ip route` / `ip -6 route` / `default_gateway` | — |
+| `rdma` | dict | `/sys/class/infiniband` GID table per port + `ibv_devinfo` raw | present when RoCE enabled |
+| `tcp_listen` | list | Local LISTEN ports parsed from `/proc/net/tcp(6)` | — |
+| `peers` | dict | Per-rank-host TCP probe results (business ports from local listeners, max 8): `open` / `filtered` / `refused` / `unreachable` | business ports `open` on peer ranks |
+| `devices` / `error` / `note` | — | Degradation info when sysfs/tools unavailable | — |
+
+Note: ICMP ping success does not imply business port reachability; use `peers` for service-level connectivity checks.
