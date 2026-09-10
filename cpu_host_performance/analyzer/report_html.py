@@ -59,9 +59,9 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A = L.append
     A("<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>")
     A("<meta name='viewport' content='width=device-width,initial-scale=1'>")
-    A("<title>CPU Host 性能分析报告</title><style>%s</style></head><body>" % _CSS)
+    A("<title>HostBound 性能诊断报告</title><style>%s</style></head><body>" % _CSS)
     # ---------- 头部 ----------
-    A("<header><div class='wrap'><h1>CPU Host 性能分析报告</h1>")
+    A("<header><div class='wrap'><h1>HostBound 性能诊断报告</h1>")
     A("<div class='meta'>数据格式：%s ｜ 采集时长：%.1f 秒 ｜ 核心数：%d ｜ 分析时间：%s</div></div></header>"
       % (esc(m.get("format_name", "-")), st["duration"], st["n_cpus"], _now()))
     A("<div class='wrap'>")
@@ -352,7 +352,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
             A("<div class='legend'><span style='color:#d64545'>■</span> 调度延迟 P99 (ms)</div>")
             A(line_fn([("lat_p99", "#d64545", lat)], y_label="ms"))
             A("</div>")
-    A("<div class='footer'>CPU Host 性能分析 Skill 生成 ｜ 仅标准库渲染，可离线打开</div>")
+    A("<div class='footer'>HostBound 性能诊断 Skill 生成 ｜ 仅标准库渲染，可离线打开</div>")
     A("</div></body></html>")
     return "\n".join(L)
 

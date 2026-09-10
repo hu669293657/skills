@@ -27,7 +27,7 @@ python3 analyzer/analyze_cpu_trace.py <输入路径> -o <输出目录>
 输出到指定目录：
 
 - `report.md` — 中文 Markdown 报告
-- `report.html` — 单文件离线 HTML（inline SVG 图表，双击浏览器即可打开），内容与 MD 版一致
+- `hostbound_report.html` — 固定名称的单文件离线 HTML（inline SVG 图表，双击浏览器即可打开），内容与 MD 版一致
 
 分析器运行结束后会在终端打印 **Host 状态**（CRITICAL / WARNING / DEGRADED / HEALTHY / UNKNOWN）与问题清单。
 

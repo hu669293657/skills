@@ -117,7 +117,7 @@ def render_md(m, diag):
     st = diag["stats"]
     L = []
     A = L.append
-    A("# CPU Host 性能分析报告")
+    A("# HostBound 性能诊断报告")
     A("")
     A("> 数据格式：%s ｜ 采集时长：%.1f 秒 ｜ 核心数：%d ｜ 分析时间：%s" % (
         m.get("format_name", "-"), st["duration"], st["n_cpus"], _now()))
@@ -384,6 +384,12 @@ def render_md(m, diag):
     A("- 解析统计：总行 %s，成功 %s，失败 %s（失败行已自动跳过）" % (
         format(m["parse_stats"]["total"], ","), format(m["parse_stats"]["parsed"], ","), format(m["parse_stats"]["failed"], ",")))
     A("- buffer 溢出：%s" % (m.get("buffer_overrun") or "0（未检测到溢出）"))
+    hostbound_snapshots = [k for k in (m.get("snapshot", {}) or {}) if k.startswith("hostbound/")]
+    if hostbound_snapshots:
+        A("- HostBound 扩展快照：%s（已纳入证据覆盖说明；名称匹配本身不构成根因）。" % \
+          "、".join(sorted(k.rsplit("/", 1)[-1] for k in hostbound_snapshots)))
+    else:
+        A("- HostBound 扩展快照：未提供；CPU affinity/NPU 拓扑/目标线程对应关系可能证据不足。")
     A("")
     A("### 分析限制")
     A("")
@@ -457,7 +463,9 @@ def generate_reports(m, diag, out_dir):
     md = render_md(m, diag)
     html = render_html(m, diag, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN)
     md_path = os.path.join(out_dir, "report.md")
-    html_path = os.path.join(out_dir, "report.html")
+    # 固定交付物名称。report.md 保留为机器可读/审阅辅助文件；最终面向客户的
+    # 交付入口始终是同名 HTML，便于自动化系统稳定引用。
+    html_path = os.path.join(out_dir, "hostbound_report.html")
     with io.open(md_path, "w", encoding="utf-8") as f:
         f.write(md)
     with io.open(html_path, "w", encoding="utf-8") as f:

@@ -202,7 +202,9 @@ _SNAPSHOT_FILES = ("cpuinfo.txt", "proc_stat.txt", "loadavg.txt", "meminfo.txt",
                    "interrupts.txt", "softirqs.txt", "schedstat.txt", "vmstat.txt",
                    "cpufreq.txt", "numa.txt", "system_info.txt", "metadata.txt",
                    "cpu_online.txt", "trace_start_time.txt", "trace_end_time.txt",
-                   "trace_overrun.txt")
+                   "trace_overrun.txt", "collection_manifest.json", "npu_smi_info.txt",
+                   "npu_smi_map.txt", "npu_smi_topology.txt", "kernel_cmdline.txt",
+                   "interrupts_at_end.txt", "softirqs_at_end.txt")
 
 def _looks_like_ftrace(text_head):
     return bool(re.search(r'\[\s*\d+\]\s*(?:[a-z.]{0,4}\s+)?\d+\.\d+:', text_head)) or \
@@ -226,12 +228,16 @@ def _load_dir_into_td(dirpath, td):
     for root, _dirs, files in os.walk(dirpath):
         for fn in files:
             fp = os.path.join(root, fn)
-            if fn in _SNAPSHOT_FILES:
+            # hostbound/ 下的 PID/TID affinity、进程线程等快照以相对路径为 key
+            # 保留，供报告列明证据覆盖范围；不会把它们误当作 trace 文本解析。
+            rel = os.path.relpath(fp, dirpath).replace(os.sep, "/")
+            is_hostbound_snapshot = rel.startswith("hostbound/") and (fn.endswith(".txt") or fn.endswith(".json"))
+            if fn in _SNAPSHOT_FILES or is_hostbound_snapshot:
                 try:
                     with io.open(fp, "r", encoding="utf-8", errors="replace") as f:
-                        snapshot[fn] = f.read()
+                        snapshot[rel if is_hostbound_snapshot else fn] = f.read()
                 except Exception:
-                    snapshot[fn] = ""
+                    snapshot[rel if is_hostbound_snapshot else fn] = ""
             else:
                 low = fn.lower()
                 if low.startswith("trace") or low.endswith(".trace") or low.endswith(".log") or low.endswith(".json"):

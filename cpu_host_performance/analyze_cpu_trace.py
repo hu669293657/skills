@@ -13,7 +13,7 @@
   - trace-cmd report 文本
   - Chrome/Perfetto JSON (traceEvents)
 
-输出：<输出目录>/report.md 与 report.html（单文件离线 HTML，全中文）。
+输出：<输出目录>/report.md 与 hostbound_report.html（固定名称、单文件离线 HTML、全中文）。
 仅依赖 Python 标准库。
 """
 import argparse
