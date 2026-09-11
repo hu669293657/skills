@@ -28,6 +28,10 @@
   8 report    生成总 HTML 报告（信息概览优先、左侧固定导航、章节可折叠、
               vendor 子报告嵌入、无卡片清单）
               -> performance_report.html（与全部中间件同目录）
+
+独立报告模式：输入仅含 cluster_analysis_output（无任何卡目录）时，跳过阶段 2-8，
+只调用 vendor/cluster-output-analysis 生成独立报告
+reports/cluster_analysis_report.html，不生成总报告 performance_report.html。
 """
 import argparse
 import glob
@@ -148,6 +152,39 @@ def native_compare(cli, root, cmp_dir, base_rank=None, compare_rank=None):
     return True
 
 
+def run_standalone(args, det, root, mw):
+    """cluster_output_only：输入仅含 cluster_analysis_output（无任何卡目录）。
+
+    只调用 vendor/cluster-output-analysis 子技能生成独立报告
+    reports/cluster_analysis_report.html，不生成总报告 performance_report.html。
+    返回码：0 成功；1 失败。
+    """
+    cl = det.get('cluster_output') or {}
+    cl_path = cl.get('path') or os.path.join(root, 'cluster_analysis_output')
+    if not os.path.isdir(cl_path):
+        cl_path = root
+    reports_dir = os.path.join(mw, 'reports')
+    os.makedirs(reports_dir, exist_ok=True)
+    out_html = os.path.join(reports_dir, 'cluster_analysis_report.html')
+    if not args.force and os.path.isfile(out_html):
+        print(f'[skip] 独立报告已存在：{out_html}')
+        return 0
+    print('[standalone] 输入仅含 cluster_analysis_output，'
+          '只调用 cluster-output-analysis 生成独立报告'
+          '（跳过 advisor/cluster/recipes/compare/swimlane/总报告）')
+    rc, _ = sh([sys.executable, script('vendor_bridge.py'), 'cluster',
+                '--data-dir', cl_path, '--reports-dir', reports_dir])
+    if rc == 0 and os.path.isfile(out_html):
+        print(f'\n完成（独立报告，未生成总报告 performance_report.html）：{out_html}')
+        return 0
+    if rc == 2:
+        print('ERROR: cluster_analysis_output 中未找到可用数据'
+              '（cluster_analysis.db / cluster.db / cluster_step_trace_time.csv）')
+        return 1
+    print('ERROR: cluster-output-analysis 独立报告生成失败')
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='cluster-analysis 端到端性能分析 workflow',
@@ -176,8 +213,7 @@ def main():
         print(f'ERROR: 输入路径不存在: {root}')
         return 1
     mw = os.path.abspath(args.output_dir) if args.output_dir else os.path.join(root, MW_NAME)
-    for sub in ('advisor', 'swimlane', 'compare', 'reports'):
-        os.makedirs(os.path.join(mw, sub), exist_ok=True)
+    os.makedirs(mw, exist_ok=True)
     want_native = not args.no_native
     cli = detect_msprof_cli() if want_native else None
     if not want_native:
@@ -214,6 +250,13 @@ def main():
         print('ERROR: ' + det['error'])
         return 1
     print(f'[detect] mode={mode} cards={len(cards)}')
+
+    # ---------- cluster_output_only：输入仅含 cluster_analysis_output，只出独立报告 ----------
+    if mode == 'cluster_output_only':
+        return run_standalone(args, det, root, mw)
+
+    for sub in ('advisor', 'swimlane', 'compare', 'reports'):
+        os.makedirs(os.path.join(mw, sub), exist_ok=True)
 
     # ---------- 2 advisor（单卡=单卡 advisor；多卡=对全部卡一次 advisor） ----------
     adv_md = os.path.join(mw, 'advisor', 'advisor.md')

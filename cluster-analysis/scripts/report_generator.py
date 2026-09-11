@@ -830,10 +830,10 @@ def sec_appendix(mw, num='8'):
 
 
 def sec_subreports(out_dir, num='8'):
-    """vendor 子报告（cluster-analysis / prof-compare）：iframe 内嵌 + 新窗口链接。"""
+    """vendor 子报告（cluster-output-analysis / prof-compare）：iframe 内嵌 + 新窗口链接。"""
     defs = [
-        ('reports/cluster_analysis_report.html', 'cluster-analysis 子报告',
-         'vendor cluster-analysis 生成：集群时间拆解、通信域映射、通信矩阵、'
+        ('reports/cluster_analysis_report.html', 'cluster-output-analysis 子报告',
+         'vendor cluster-output-analysis 生成：集群时间拆解、通信域映射、通信矩阵、'
          '慢卡/慢链路等完整可视化'),
         ('reports/compare_analysis_report.html', 'prof-compare 子报告',
          'vendor prof-compare 生成：双卡算子 / Kernel / API / 模块维度比对完整可视化'),
@@ -852,10 +852,10 @@ def sec_subreports(out_dir, num='8'):
     if not cards:
         return ''
     return f'''<section id="subreports">
-  <h2>{num}. vendor 子报告（cluster-analysis / prof-compare）</h2>
+  <h2>{num}. vendor 子报告（cluster-output-analysis / prof-compare）</h2>
   {''.join(cards)}
   <div class="card p-5 mt-4"><h3>子报告阅读指引</h3>
-  <p>cluster-analysis 子报告展示集群整体时序拆解、通信域映射与慢卡定位，
+  <p>cluster-output-analysis 子报告展示集群整体时序拆解、通信域映射与慢卡定位，
   与本报告"集群总览 / 进阶分析"章节互为补充；prof-compare 子报告提供双卡差异的
   算子 / Kernel / API 级归因，是"双卡比对"章节的明细展开。
   建议先读主报告"结论与建议"，再按需深入对应子报告定位细节。</p></div>

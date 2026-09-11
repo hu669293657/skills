@@ -1,4 +1,0 @@
-interface:
-  display_name: "CPU Host 性能分析"
-  short_description: "离线分析 Linux CPU Host trace 并生成根因报告"
-  default_prompt: "分析 CPU trace 采集包，生成 Host 性能诊断报告。"

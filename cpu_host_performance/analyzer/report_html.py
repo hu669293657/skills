@@ -4,7 +4,15 @@
     render_html(m, diag, svg_bar_chart_fn, svg_line_chart_fn, esc_fn, sev_color, sev_cn, status_cn)
 """
 import io
+import re
 from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
+from .diagnosis import THRESHOLDS
+
+
+def _cs_limit(n_cpus):
+    """全机上下文切换率判定上限: THRESHOLDS['cs_rate_high'] (单核基线) × 核数"""
+    return THRESHOLDS["cs_rate_high"] * max(n_cpus or 1, 1)
+
 
 _CSS = """
 :root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2129;--border:#2d3742;--txt:#c9d1d9;
@@ -51,7 +59,67 @@ border-radius:8px;padding:14px 18px;margin:12px 0}
 ol.pri{margin:8px 0 0 22px}ol.pri li{margin:5px 0}
 .footer{color:var(--muted);font-size:12px;margin-top:40px;text-align:center}
 @media print{body{background:#fff;color:#111}.card,.kpi,.finding,.chart,.status-hero{border-color:#ccc}}
+/* ---- 左侧固定导航目录 ---- */
+:root{--tocpad:216px}
+html{scroll-behavior:smooth}
+body{padding-left:var(--tocpad)}
+h2{scroll-margin-top:14px}
+header{margin-left:calc(-1 * var(--tocpad));padding-left:var(--tocpad)}
+nav#toc{position:fixed;left:0;top:0;bottom:0;width:200px;overflow-y:auto;z-index:99;
+background:#0a0f16;border-right:1px solid var(--border);padding:18px 10px}
+nav#toc .toc-title{color:var(--muted);font-size:12px;font-weight:600;letter-spacing:2px;
+padding:0 8px 10px;border-bottom:1px solid var(--border);margin-bottom:8px}
+nav#toc a{display:block;color:#9aa7b4;text-decoration:none;font-size:12.8px;
+padding:6px 8px;border-radius:6px;line-height:1.45}
+nav#toc a:hover{background:#161f2c;color:#e6edf3}
+nav#toc a.active{background:#1c3252;color:#4a9eff}
+nav#toc .toc-foot{color:#4a5568;font-size:10.5px;padding:12px 8px 0;margin-top:10px;
+border-top:1px solid var(--border)}
+@media (max-width:1024px){body{padding-left:0}header{margin-left:0;padding-left:0}nav#toc{display:none}}
+@media print{body{padding-left:0}header{margin-left:0;padding-left:0}nav#toc{display:none}}
 """
+
+_SPY_JS = """
+<script>
+(function(){
+var links=[].slice.call(document.querySelectorAll('nav#toc a'));
+var secs=links.map(function(a){return document.getElementById(a.getAttribute('data-sec'))});
+function upd(){
+  var y=window.scrollY+90,cur=0;
+  for(var i=0;i<secs.length;i++){if(secs[i]&&secs[i].offsetTop<=y)cur=i;}
+  links.forEach(function(a,i){a.className=(i===cur)?'active':'';});
+}
+window.addEventListener('scroll',upd,{passive:true});
+window.addEventListener('resize',upd);upd();
+})();
+</script>
+"""
+
+_H2_RE = re.compile(r"<h2>(\d+)\.\s*([^<]*)</h2>")
+
+def _inject_toc(html):
+    """为各节 <h2> 注入锚点 id, 在 body 开头插入固定左侧导航目录, 末尾追加滚动高亮脚本。
+
+    导航为纯 CSS/原生 JS 实现, 保持单文件离线零依赖; 窄屏与打印时自动隐藏。
+    """
+    entries = []
+
+    def _repl(m):
+        num, title = m.group(1), m.group(2).strip()
+        entries.append((num, title))
+        return "<h2 id='sec-%s'>%s. %s</h2>" % (num, num, title)
+
+    html = _H2_RE.sub(_repl, html)
+    if not entries:
+        return html
+    items = "".join(
+        "<a href='#sec-%s' data-sec='sec-%s'>%s. %s</a>" % (n, n, n, t)
+        for n, t in entries)
+    nav = ("<nav id='toc'><div class='toc-title'>报告目录</div>%s"
+           "<div class='toc-foot'>cpu_host_performance</div></nav>" % items)
+    html = html.replace("<body>", "<body>" + nav, 1)
+    html = html.replace("</body>", _SPY_JS + "</body>", 1)
+    return html
 
 def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     st = diag["stats"]
@@ -77,7 +145,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A(_kpi("%.1f%%" % st["max_util"], "单核最高利用率", st["max_util"] >= 90, 70))
     sch = m.get("sched", {})
     if sch.get("cs_rate") is not None:
-        A(_kpi("%.0f/s" % sch["cs_rate"], "上下文切换率", sch["cs_rate"] > 2000 * max(st["n_cpus"], 1)))
+        A(_kpi("%.0f/s" % sch["cs_rate"], "上下文切换率", sch["cs_rate"] > _cs_limit(st["n_cpus"])))
     if sch.get("lat_p99") is not None:
         A(_kpi("%.2f ms" % sch["lat_p99"], "调度延迟 P99", sch["lat_p99"] >= 20, 5))
     irq = m.get("irq", {})
@@ -112,9 +180,10 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A(_row("单核最高利用率", "%.1f%%" % st["max_util"], "&lt;90% 健康",
                "饱和" if st["max_util"] >= 90 else "正常", st["max_util"] >= 90))
     if sch.get("cs_rate") is not None:
-        A(_row("上下文切换率", "%.0f 次/秒" % sch["cs_rate"], "单核&gt;2000/s 偏高",
-               "偏高" if sch["cs_rate"] > 2000 * max(st["n_cpus"], 1) else "正常",
-               sch["cs_rate"] > 2000 * max(st["n_cpus"], 1)))
+        A(_row("上下文切换率", "%.0f 次/秒" % sch["cs_rate"],
+               "全机 &gt; %.0f×核数/s 偏高" % THRESHOLDS["cs_rate_high"],
+               "偏高" if sch["cs_rate"] > _cs_limit(st["n_cpus"]) else "正常",
+               sch["cs_rate"] > _cs_limit(st["n_cpus"])))
     if sch.get("lat_p99") is not None:
         A(_row("调度延迟 P99", "%.2f ms" % sch["lat_p99"], "≥5ms 警告 / ≥20ms 严重",
                "异常" if sch["lat_p99"] >= 5 else "正常", sch["lat_p99"] >= 5))
@@ -147,22 +216,32 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A("<h2>5. CPU Core Balance（各核心负载）</h2>")
     A("<div class='chart'>")
     if m["per_cpu"]:
+        _known = [(c, pc) for c, pc in sorted(m["per_cpu"].items(), key=lambda kv: int(str(kv[0])) if str(kv[0]).isdigit() else 0)
+                  if pc.get("util_known", True)]
         items = [("CPU %s" % c, pc["util"],
                   "#d64545" if pc["util"] >= 90 else ("#d98f00" if pc["util"] >= 70 else "#4a9eff"))
-                 for c, pc in sorted(m["per_cpu"].items(), key=lambda kv: int(str(kv[0])) if str(kv[0]).isdigit() else 0)][:64]
-        A(bar_fn(items, fmt=lambda v: "%.1f%%" % v))
+                 for c, pc in _known][:64]
+        if items:
+            A(bar_fn(items, fmt=lambda v: "%.1f%%" % v))
+        n_unk = len(m["per_cpu"]) - len(_known)
+        if n_unk:
+            A("<p class='note'>%d 个核心无 idle 证据（静默核），利用率记为 N/A。</p>" % n_unk)
     A("</div>")
     A("<table><tr><th>核心</th><th class='num'>利用率</th><th class='num'>空闲比</th>"
       "<th class='num'>上下文切换/s</th><th class='num'>硬中断占比</th><th class='num'>软中断占比</th></tr>")
     for c in sorted(m["per_cpu"].keys()):
         pc = m["per_cpu"][c]
-        A("<tr><td class='evt'>CPU %s</td><td class='num'>%.1f%%</td><td class='num'>%.1f%%</td>"
+        _k = pc.get("util_known", True)
+        util_s = ("%.1f%%" % pc["util"]) if _k else "N/A"
+        idle_s = ("%.1f%%" % pc["idle_ratio"]) if _k else "N/A"
+        A("<tr><td class='evt'>CPU %s</td><td class='num'>%s</td><td class='num'>%s</td>"
           "<td class='num'>%.0f</td><td class='num'>%.1f%%</td><td class='num'>%.1f%%</td></tr>"
-          % (esc(c), pc["util"], pc["idle_ratio"], pc["cs_rate"], pc["irq_ratio"], pc["softirq_ratio"]))
+          % (esc(c), util_s, idle_s, pc["cs_rate"], pc["irq_ratio"], pc["softirq_ratio"]))
     A("</table>")
-    hot = max(m["per_cpu"].items(), key=lambda kv: kv[1]["util"]) if m["per_cpu"] else (None, None)
+    known_pcs = {c: pc for c, pc in m["per_cpu"].items() if pc.get("util_known", True)}
+    hot = max(known_pcs.items(), key=lambda kv: kv[1]["util"]) if known_pcs else (None, None)
     if hot[1]:
-        cold = min(m["per_cpu"].items(), key=lambda kv: kv[1]["util"])
+        cold = min(known_pcs.items(), key=lambda kv: kv[1]["util"])
         A("<p>最高负载：%s（%.1f%%），最低：%s（%.1f%%）。%s</p>" % (
             esc(hot[0]), hot[1]["util"], esc(cold[0]), cold[1]["util"],
             "<b style='color:#d98f00'>存在明显不均衡，详见问题详情。</b>"
@@ -173,7 +252,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A("<p>上下文切换总计 <b>%s</b> 次（%.0f 次/秒）%s</p>" % (
         format(sch.get("cs_total", 0), ","), sch.get("cs_rate", 0) or 0,
         "— 上下文切换率过高会增加调度开销，任务碎片化明显。"
-        if (sch.get("cs_rate") or 0) > 2000 * max(st["n_cpus"], 1) else ""))
+        if (sch.get("cs_rate") or 0) > _cs_limit(st["n_cpus"]) else ""))
     A("<p>唤醒总计 <b>%s</b> 次（%.0f 次/秒）— 唤醒率反映任务碎片化程度。</p>" % (
         format(sch.get("wakeup_total", 0), ","), sch.get("wakeup_rate", 0) or 0))
     if sch.get("lat_avg") is not None:
@@ -354,7 +433,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
             A("</div>")
     A("<div class='footer'>HostBound 性能诊断 Skill 生成 ｜ 仅标准库渲染，可离线打开</div>")
     A("</div></body></html>")
-    return "\n".join(L)
+    return _inject_toc("\n".join(L))
 
 # ---------- 小工具 ----------
 def _kpi(value, name, bad=False, warn_level=None):
@@ -362,8 +441,19 @@ def _kpi(value, name, bad=False, warn_level=None):
     return "<div class='kpi'><div class='v' style='color:%s'>%s</div><div class='n'>%s</div></div>" % (color, value, name)
 
 def value_bad(v, level):
+    """判断 KPI 是否达到 warn 阈值。
+    v 可为数值，或带单位/百分号的格式化字符串（如 "12.3%"、"8.50 ms"、"1234/s"）：
+    去掉 % 与单位后缀，取前导数字比较；解析失败视为未超标。"""
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return v >= level
+    s = str(v).strip().rstrip("%")
+    m = re.match(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", s)
+    if not m:
+        return False
     try:
-        return float(str(v).rstrip("%")) >= level
+        return float(m.group()) >= level
     except Exception:
         return False
 

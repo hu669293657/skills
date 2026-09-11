@@ -30,5 +30,5 @@ msprof-analyze cluster analysis -d <prof_dir> --bp <标杆数据>   # 标杆对�
 1. run_workflow **默认原生优先**：以 `shutil.which('msprof-analyze')` 探测；可用 → P1/P2/P3/P4 优先原生 CLI。
 2. 原生命令失败（数据格式不支持、缺依赖）→ 立即回退对应 fallback 脚本，不要中断流程。
 3. **产物缺口补齐**（原生成功但缺总报告契约件时自动执行）：P2 缺 `cluster_analysis.db` → cluster_fallback.py 补齐；P3 缺 `recipes_summary.json` → recipe_fallback.py 补齐；P4 xlsx 归一化后由 compare_fallback.py `--json-only` 补产 `compare_analysis_result.json`。
-4. fallback 产出的 `cluster_analysis_output/cluster_analysis.db` schema 与原生一致，可被 vendor cluster-analysis 直接消费。
+4. fallback 产出的 `cluster_analysis_output/cluster_analysis.db` schema 与原生一致，可被 vendor cluster-output-analysis 直接消费。
 5. `--no-native` 整体禁用原生（全部使用内置实现）；`--msprof-cli` 兼容保留为 no-op。

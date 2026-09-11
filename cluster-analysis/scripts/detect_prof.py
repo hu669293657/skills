@@ -3,6 +3,12 @@
 
 Detects single/multi-card layout, data format (db/text), framework,
 existing analysis outputs, and produces a workflow plan.
+
+Modes:
+  single              单卡数据
+  cluster             多卡数据（有可用卡目录）
+  cluster_output_only 输入仅含 cluster_analysis_output（无任何卡目录），
+                      只生成独立报告，不走完整 workflow
 """
 import argparse
 import json
@@ -207,7 +213,8 @@ def main():
 
     frameworks = {c['framework'] for c in cards if c['framework']}
     mixed = len([f for f in frameworks if f in ('pytorch', 'mindspore')]) > 1
-    mode = 'cluster' if len([c for c in cards if c['usable']]) > 1 else 'single'
+    usable_n = len([c for c in cards if c['usable']])
+    mode = 'cluster' if usable_n > 1 else 'single'
 
     cluster = None
     cluster_root = None
@@ -217,8 +224,41 @@ def main():
         cluster_root = parents.pop() if len(parents) == 1 else root
         cluster = check_cluster_output(cluster_root)
         cluster['expected_path'] = os.path.join(cluster_root, 'cluster_analysis_output')
+    elif usable_n == 0:
+        # 无可用卡目录：输入可能仅为 cluster_analysis_output 文件夹
+        # （兼容 db 新格式/旧格式 cluster.db/TEXT 模式）
+        cluster = check_cluster_output(root)
+        cluster['expected_path'] = os.path.join(root, 'cluster_analysis_output')
+        has_data = (cluster['has_db'] or cluster['text_files']
+                    or os.path.isfile(os.path.join(root, 'cluster_analysis_output', 'cluster.db'))
+                    or os.path.isfile(os.path.join(root, 'cluster.db')))
+        if has_data:
+            mode = 'cluster_output_only'
+            cluster_root = root
 
     existing = check_existing_outputs(root)
+
+    if mode == 'cluster_output_only':
+        # 独立报告模式：只调用 cluster-output-analysis 出报告，不走完整 workflow
+        steps = {
+            'advisor': 'skip: no card dirs',
+            'swimlane': 'skip: no card dirs',
+            'cluster': 'skip: output exists',
+            'recipes': 'skip: standalone report only',
+            'compare': 'skip: no card dirs',
+            'report_mode': 'standalone',
+        }
+    else:
+        steps = {
+            'advisor': 'run per card',
+            'swimlane': 'run per card',
+            'cluster': ('skip: output exists' if cluster and cluster['exists'] and (
+                cluster['has_db'] or cluster['text_files']) else 'generate') if mode == 'cluster' else 'skip: single card',
+            'recipes': ('check and run missing' if not (cluster and cluster['recipes_done'])
+                        else 'skip: already done') if mode == 'cluster' else 'skip: single card',
+            'compare': 'select max/min comm-ratio cards and compare' if mode == 'cluster' else 'skip: single card',
+            'report_mode': mode,
+        }
 
     result = {
         'input': root,
@@ -228,16 +268,7 @@ def main():
         'cluster_root': cluster_root,
         'cluster_output': cluster,
         'existing_outputs': existing,
-        'steps': {
-            'advisor': 'run per card',
-            'swimlane': 'run per card',
-            'cluster': ('skip: output exists' if cluster and cluster['exists'] and (
-                cluster['has_db'] or cluster['text_files']) else 'generate') if mode == 'cluster' else 'skip: single card',
-            'recipes': ('check and run missing' if not (cluster and cluster['recipes_done'])
-                        else 'skip: already done') if mode == 'cluster' else 'skip: single card',
-            'compare': 'select max/min comm-ratio cards and compare' if mode == 'cluster' else 'skip: single card',
-            'report_mode': mode,
-        },
+        'steps': steps,
     }
     if mixed:
         result['error'] = 'PyTorch and MindSpore data mixed in one root; analyze separately.'
@@ -247,6 +278,8 @@ def main():
         json.dump(result, f, ensure_ascii=False, indent=2)
 
     print(f"mode={mode} cards={len(cards)} formats={[c['format'] for c in cards]}")
+    if mode == 'cluster_output_only':
+        print('standalone: 输入仅含 cluster_analysis_output，将只生成独立报告')
     if cluster:
         print(f"cluster_output exists={cluster['exists']} recipes_done={cluster['recipes_done']}")
     for c in cards:

@@ -5,7 +5,8 @@ HTML 渲染见 report_html.py
 import os
 import io
 from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, IRQ_NAME_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
-from .report_html import render_html
+from .diagnosis import THRESHOLDS
+from .report_html import render_html, _cs_limit
 
 SEV_COLOR = {"CRITICAL": "#d64545", "WARNING": "#d98f00", "INFO": "#6b7280", "OK": "#2e9e5b"}
 SEV_CN = {"CRITICAL": "严重", "WARNING": "警告", "INFO": "提示", "OK": "健康"}
@@ -159,8 +160,9 @@ def render_md(m, diag):
                          "⚠️ 饱和" if st["max_util"] >= 90 else "正常"))
     sch = m.get("sched", {})
     if sch.get("cs_rate") is not None:
-        A(_md_metric_row("上下文切换率", "%.0f 次/秒" % sch["cs_rate"], "单核>2000/s 偏高",
-                         "偏高" if sch["cs_rate"] > 2000 * max(st["n_cpus"], 1) else "正常"))
+        A(_md_metric_row("上下文切换率", "%.0f 次/秒" % sch["cs_rate"],
+                         "全机 > %.0f×核数/s 偏高" % THRESHOLDS["cs_rate_high"],
+                         "偏高" if sch["cs_rate"] > _cs_limit(st["n_cpus"]) else "正常"))
     if sch.get("lat_p99") is not None:
         A(_md_metric_row("调度延迟 P99", "%.2f ms" % sch["lat_p99"], "≥5ms 警告 / ≥20ms 严重",
                          "异常" if sch["lat_p99"] >= 5 else "正常"))
@@ -205,12 +207,20 @@ def render_md(m, diag):
     A("|-----|-------:|-------:|------------:|----------:|----------:|")
     for c in sorted(m["per_cpu"].keys()):
         pc = m["per_cpu"][c]
-        A("| CPU %s | %.1f%% | %.1f%% | %.0f | %.1f%% | %.1f%% |"
-          % (c, pc["util"], pc["idle_ratio"], pc["cs_rate"], pc["irq_ratio"], pc["softirq_ratio"]))
+        _k = pc.get("util_known", True)
+        util_s = ("%.1f%%" % pc["util"]) if _k else "N/A"
+        idle_s = ("%.1f%%" % pc["idle_ratio"]) if _k else "N/A"
+        A("| CPU %s | %s | %s | %.0f | %.1f%% | %.1f%% |"
+          % (c, util_s, idle_s, pc["cs_rate"], pc["irq_ratio"], pc["softirq_ratio"]))
+    n_unk = sum(1 for pc in m["per_cpu"].values() if not pc.get("util_known", True))
+    if n_unk:
+        A("")
+        A("> 注：%d 个核心无 idle 证据（静默核），利用率记为 N/A。" % n_unk)
     A("")
-    hot = max(m["per_cpu"].items(), key=lambda kv: kv[1]["util"]) if m["per_cpu"] else (None, None)
+    known_pcs = {c: pc for c, pc in m["per_cpu"].items() if pc.get("util_known", True)}
+    hot = max(known_pcs.items(), key=lambda kv: kv[1]["util"]) if known_pcs else (None, None)
     if hot[1]:
-        cold = min(m["per_cpu"].items(), key=lambda kv: kv[1]["util"])
+        cold = min(known_pcs.items(), key=lambda kv: kv[1]["util"])
         A("最高负载：%s（%.1f%%），最低：%s（%.1f%%）。%s"
           % (hot[0], hot[1]["util"], cold[0], cold[1]["util"],
              "**存在明显不均衡，详见问题详情。**" if hot[1]["util"] - cold[1]["util"] >= 40 else "负载分布尚可。"))
@@ -219,7 +229,7 @@ def render_md(m, diag):
     A("")
     A("- 上下文切换总计 **%s** 次（%.0f 次/秒）%s" % (
         format(sch.get("cs_total", 0), ","), sch.get("cs_rate", 0) or 0,
-        "— 上下文切换率过高会增加调度开销，任务碎片化明显。" if (sch.get("cs_rate") or 0) > 2000 * max(st["n_cpus"], 1) else ""))
+        "— 上下文切换率过高会增加调度开销，任务碎片化明显。" if (sch.get("cs_rate") or 0) > _cs_limit(st["n_cpus"]) else ""))
     A("- 唤醒总计 **%s** 次（%.0f 次/秒）— 唤醒率反映任务碎片化程度。" % (
         format(sch.get("wakeup_total", 0), ","), sch.get("wakeup_rate", 0) or 0))
     if sch.get("lat_avg") is not None:

@@ -271,6 +271,60 @@ def _load_dir_into_td(dirpath, td):
                 td.metadata[k.strip()] = v.strip()
     return total_parsed > 0
 
+def _finalize_events(td):
+    """统一按时间戳稳定排序。
+
+    采集脚本并行导出 per_cpu 缓冲区后拼接, 以及目录内多个 trace 文件合并时,
+    跨文件行序可能与真实时序不同; 中断/唤醒配对与时间窗统计依赖全局时序,
+    因此在加载完成后统一排序 (稳定排序保证同时间戳事件相对次序不变)。
+    """
+    td.events.sort(key=lambda e: e.ts)
+    return td
+
+# ---------------------------------------------------------------
+# 安全解压 (防 Zip Slip / Tar Slip 与 zip bomb)
+# ---------------------------------------------------------------
+_EXTRACT_MAX_TOTAL_BYTES = 512 * 1024 * 1024   # 累计解压大小上限: 512 MB
+
+
+def _check_member_name(name):
+    """校验压缩包成员名, 拒绝绝对路径与路径穿越。"""
+    n = (name or "").replace("\\", "/")
+    if not n:
+        raise ValueError("空成员名")
+    if n.startswith("/") or (len(n) >= 2 and n[1] == ":"):
+        raise ValueError("拒绝绝对路径成员: %r" % name)
+    if any(seg == ".." for seg in n.split("/")):
+        raise ValueError("拒绝路径穿越成员: %r" % name)
+
+
+def _safe_extract_tar(tf, dest):
+    """安全解压 tar: 先遍历校验成员名与累计大小, 再落盘。"""
+    total = 0
+    members = []
+    for m in tf.getmembers():
+        _check_member_name(m.name)
+        total += int(m.size or 0)
+        if total > _EXTRACT_MAX_TOTAL_BYTES:
+            raise ValueError("累计解压大小超过上限 %d MB" % (_EXTRACT_MAX_TOTAL_BYTES // (1024 * 1024)))
+        members.append(m)
+    try:
+        tf.extractall(dest, members=members, filter="data")  # py3.12+: 二次兜底
+    except TypeError:      # 旧版本解释器无 filter 参数
+        tf.extractall(dest, members=members)
+
+
+def _safe_extract_zip(zf, dest):
+    """安全解压 zip: 先遍历校验成员名与累计大小, 再落盘。"""
+    total = 0
+    for info in zf.infolist():
+        _check_member_name(info.filename)
+        total += int(info.file_size or 0)
+        if total > _EXTRACT_MAX_TOTAL_BYTES:
+            raise ValueError("累计解压大小超过上限 %d MB" % (_EXTRACT_MAX_TOTAL_BYTES // (1024 * 1024)))
+    zf.extractall(dest)
+
+
 def load_input(path):
     """入口: 任意路径 -> TraceData (自动识别格式)"""
     td = TraceData()
@@ -282,7 +336,7 @@ def load_input(path):
         ok = _load_dir_into_td(path, td)
         if not ok:
             td.warnings.append("目录中未解析出任何事件")
-        return td
+        return _finalize_events(td)
 
     low = path.lower()
     # 压缩包
@@ -291,25 +345,25 @@ def load_input(path):
         td.trace_root = tmp
         try:
             with tarfile.open(path, "r:*") as tf:
-                tf.extractall(tmp)
+                _safe_extract_tar(tf, tmp)
         except Exception as e:
             shutil.rmtree(tmp, ignore_errors=True)
             raise IOError("解压 tar 失败: %s" % e)
         td.format_name = "tar 压缩包"
         _load_dir_into_td(tmp, td)
-        return td
+        return _finalize_events(td)
     if zipfile.is_zipfile(path):
         tmp = tempfile.mkdtemp(prefix="cpu_trace_")
         td.trace_root = tmp
         try:
             with zipfile.ZipFile(path) as zf:
-                zf.extractall(tmp)
+                _safe_extract_zip(zf, tmp)
         except Exception as e:
             shutil.rmtree(tmp, ignore_errors=True)
             raise IOError("解压 zip 失败: %s" % e)
         td.format_name = "zip 压缩包"
         _load_dir_into_td(tmp, td)
-        return td
+        return _finalize_events(td)
 
     # 单文件: JSON 或文本
     head = _read_head(path)
@@ -327,7 +381,7 @@ def load_input(path):
 
     if not td.events and not td.warnings:
         td.warnings.append("文件中未识别出任何支持的事件, 请确认是 ftrace/trace-cmd/JSON trace")
-    return td
+    return _finalize_events(td)
 
 def cleanup_temp(td):
     if td.trace_root and os.path.isdir(td.trace_root):

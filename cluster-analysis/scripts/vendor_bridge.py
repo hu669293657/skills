@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""vendor 子技能桥接器：调用 vendor/ 下的 cluster-analysis 与 prof-compare。
+"""vendor 子技能桥接器：调用 vendor/ 下的 cluster-output-analysis 与 prof-compare。
 
 子命令：
-  cluster  生成 cluster-analysis 子报告
+  cluster  生成 cluster-output-analysis 子报告
            cluster_data_extractor.py 提取 JSON -> generate_cluster_report.py 渲染
            输出: <reports-dir>/cluster_analysis_report.html
 
@@ -25,8 +25,8 @@ import subprocess
 import sys
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VENDOR_CLUSTER = os.path.join(SKILL_DIR, 'vendor', 'cluster-analysis', 'scripts')
-VENDOR_CLUSTER_TPL = os.path.join(SKILL_DIR, 'vendor', 'cluster-analysis', 'templates')
+VENDOR_CLUSTER = os.path.join(SKILL_DIR, 'vendor', 'cluster-output-analysis', 'scripts')
+VENDOR_CLUSTER_TPL = os.path.join(SKILL_DIR, 'vendor', 'cluster-output-analysis', 'templates')
 VENDOR_COMPARE = os.path.join(SKILL_DIR, 'vendor', 'prof-compare', 'scripts')
 
 
@@ -109,7 +109,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest='cmd', required=True)
 
-    p1 = sub.add_parser('cluster', help='生成 cluster-analysis 子报告')
+    p1 = sub.add_parser('cluster', help='生成 cluster-output-analysis 子报告')
     p1.add_argument('--data-dir', required=True,
                     help='cluster_analysis_output 目录（或其父目录）')
     p1.add_argument('--reports-dir', required=True,

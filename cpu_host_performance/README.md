@@ -54,6 +54,8 @@ sudo bash cpu_trace_collect.sh -t 60 -c 0-47          # 指定时长与 CPU 列�
 
 产物 `cpu_trace_YYYYMMDD_HHMMSS.tar.gz` 直接回传即可。脚本不修改业务进程，采集结束自动恢复 tracing 原配置（onoff/tracing_on/当前_tracer）。
 
+导出提速：脚本并行读取各 CPU 独立缓冲区（`per_cpu/cpu*/trace`）后拼接为 trace.txt，多核机器上比读取全局 trace 明显更快（核心越多提速越接近线性）；分析器加载后会按时间戳全局稳定排序，分析结果与传统 `cat trace` 方式完全一致。
+
 ## 报告结构（14 节固定）
 
 1. Executive Summary（结论摘要：Host 状态、核心问题、影响、方案）
@@ -73,6 +75,8 @@ sudo bash cpu_trace_collect.sh -t 60 -c 0-47          # 指定时长与 CPU 列�
 
 骨架模板见 `templates/report_template.md`（供数据缺失时人工撰写或结构定制）；真实样例见 `examples/sample_report.md` 与 `examples/sample_report.html`。
 
+HTML 报告左侧带有固定导航栏（宽屏可见）：列出全部 14 节，点击平滑跳转，滚动时自动高亮当前章节；窄屏（≤1024px）与打印时自动隐藏，不影响排版与导出。
+
 ## 诊断类型清单
 
 | 诊断类型 | 触发条件（组合判断） | 典型处置方向 |
@@ -85,6 +89,8 @@ sudo bash cpu_trace_collect.sh -t 60 -c 0-47          # 指定时长与 CPU 列�
 | `SCHEDULER_LATENCY` | 调度延迟 p95/p99 超阈值 | 降低 runnable 队列长度 |
 | `CPU_FREQUENCY_LOW` | 高负载核长期低频（低频样本占比≥阈值） | governor 改 performance、查温控 |
 | `TASK_MIGRATION_HIGH` | 任务迁移频率过高 | 绑核 / CPU affinity 优化 |
+| `TASK_AFFINITY_PROBLEM` | 任务集中在少数饱和核上运行且存在空闲核（绑核受限风险） | 检查 taskset/cgroup cpuset，迁移到空闲核 |
+| `NUMA_RISK` | 多 NUMA 节点拓扑 + 任务跨节点运行或迁移频繁（风险提示，非根因） | numactl 节点内绑定，补采内存侧证据 |
 | `HOST_NOT_BOTTLENECK` | CPU 空闲但业务差 | 明确 CPU 不是主瓶颈，勿强行归因 |
 | `CPU_IDLE_EXCESSIVE` | 多数核心空闲但存在热点核 | 负载均衡 / 队列分布检查 |
 | `INSUFFICIENT_EVIDENCE` | 采集数据维度有限 | 兜底声明，置信度不得标 HIGH |

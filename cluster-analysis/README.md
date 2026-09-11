@@ -11,6 +11,7 @@
 - Host 侧下发瓶颈：CANN API 汇总、Device 侧大块空闲时间归因（free_analysis）。
 - 出正式报告：训练/推理性能调优后需要一份可直接汇报的 HTML/MD 性能分析报告。
 - 数据已有 `cluster_analysis_output`：直接复用并做进阶分析与报告生成，不重复解析。
+- 数据**仅有** `cluster_analysis_output`（无任何卡目录）：走独立报告模式，只调用 vendor cluster-output-analysis 生成独立集群分析报告，不生成完整 HTML 总报告。
 
 ## 解决什么问题
 
@@ -100,7 +101,7 @@ flowchart TD
     E1 --> H
     G --> H
     F --> H
-    H --> H1[P5 vendor cluster-analysis<br/>集群 HTML 子报告]
+    H --> H1[P5 vendor cluster-output-analysis<br/>集群 HTML 子报告]
     H --> I[Wave 4: P7 最终 HTML 汇总报告<br/>report_generator.py 概览→结论→可折叠详情<br/>内嵌 vendor 子报告]
 ```
 
@@ -137,6 +138,14 @@ flowchart TD
 用 cluster-analysis 对 D:\prof_data\8p 做泳道算子统计，
 输出每张卡的 Thread/Stream/Communication 泳道最长算子表，
 并做跨卡比对，找出耗时最异常的 rank。
+```
+
+只有 cluster_analysis_output（独立报告模式）：
+
+```text
+这个目录 D:\prof_data\16p_output 里只有 cluster_analysis_output，
+请用 cluster-output-analysis 直接生成一份独立的集群分析报告即可，
+不需要完整 HTML 总报告。
 ```
 
 一键脚本直跑（不经过 agent 调度）：

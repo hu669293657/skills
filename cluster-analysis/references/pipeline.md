@@ -16,7 +16,7 @@
 | `cluster_analysis_output/recipes_summary.{md,json}` | recipe_fallback.py | recipe 汇总（同时写入 DB 表 RecipeSummary） |
 | `compare/compare_analysis_result.json` | compare_fallback.py | 卡间对比明细 |
 | `compare/performance_comparison_result_*.xlsx` | 原生 msprof-analyze（归一化复制）或 compare_fallback.py | 对比 Excel（vendor compare 消费此文件） |
-| `reports/cluster_analysis_report.html` | vendor_bridge（cluster） | vendor 单模式报告（最终报告 iframe 内嵌） |
+| `reports/cluster_analysis_report.html` | vendor_bridge（cluster） | vendor 单模式报告（最终报告 iframe 内嵌；独立报告模式下为唯一交付） |
 | `reports/compare_analysis_report.html` | vendor_bridge（compare） | vendor 对比报告（iframe 内嵌） |
 | `reports/cluster_data.json`、`reports/chinese_xlsx/` | vendor_bridge 附带产物 | 报告数据与中文表 |
 | `swimlane/swimlane_rank{N}.{md,json}` | swimlane_analyzer.py | 每卡泳道分析 |
@@ -32,6 +32,8 @@
 python scripts/detect_prof.py --path <输入路径> --output <mw>/detect_result.json --skill-dir <skill根>
 ```
 - 失败处理：中止流水线（无输入类型无法继续）。
+- 模式判定：`single`（单卡）/ `cluster`（多卡，有可用卡目录）/ `cluster_output_only`（输入仅含 `cluster_analysis_output`、无任何卡目录）。
+- **独立报告模式（cluster_output_only）**：跳过 P1–P4、P6、P7，只执行 P5 vendor cluster 子报告；**不生成总报告 performance_report.html**。
 
 ### P1 advisor（原生留档 + 内置归一化）
 探测到 `msprof-analyze` 时先执行原生 `advisor all`（产物 mstt_advisor_* 仅留档），随后**始终**运行内置实现归一化（advisor.md/advisor.json 为总报告契约件，保证两种路径产物一致）：
@@ -70,6 +72,7 @@ python scripts/vendor_bridge.py compare --compare-dir <mw>/compare --reports-dir
 - vendor_bridge 固定以 `--mode single` 调 vendor/generate_cluster_report.py；compare 模式 glob `performance_comparison_result_*.xlsx` 取第一个交 main_analyzer.py。
 - 返回码：0 = 成功；2 = 输入缺失/不支持 → 跳过并继续（不算失败）；其他 = 失败。
 - 产物写入 reports/ 子目录，最终报告以相对路径 iframe 内嵌。
+- **独立报告模式**下 `vendor_bridge.py cluster` 是唯一执行阶段，`reports/cluster_analysis_report.html` 即最终交付。
 
 ### P6 swimlane
 ```bash
@@ -98,7 +101,7 @@ python scripts/run_workflow.py --input <Prof数据路径> --output-dir <输出�
 ## 4. 全局纪律
 
 1. **原生 CLI 优先（默认）**：run_workflow 以 `shutil.which('msprof-analyze')` 探测；可用则 P1 `advisor all`（留档）、P2/P3 `cluster` 子命令、P4 `compare` 均优先原生，失败或产物缺口（db/summary/json）自动回退或由 fallback 补齐；`--no-native` 整体禁用（能力对照见 msprof_cli.md）。
-2. **单卡模式**：P2/P3/P4/P6 跳过；advisor 只做单卡；P7 `--mode single`。**多卡模式**：P1 对**所有卡**聚合 advisor（不是每卡一个）；比对卡对 = **通信占比最大 vs 最小**两张卡。
+2. **单卡模式**：P2/P3/P4/P6 跳过；advisor 只做单卡；P7 `--mode single`。**多卡模式**：P1 对**所有卡**聚合 advisor（不是每卡一个）；比对卡对 = **通信占比最大 vs 最小**两张卡。**独立报告模式（输入仅含 cluster_analysis_output）**：只执行 P5 vendor cluster 子报告（vendor/cluster-output-analysis），不生成总报告。
 3. **进阶分析全量执行**：23 正式 + 1 扩展 recipe 全跑；部分数据缺失的 recipe 输出「不支持/数据缺失」说明，不算失败。
 4. **unit 纪律**：db 内时间为 μs，text-CSV 为 μs，text-JSON 为 ms；写报告时统一换算为 ms 并标注。
 5. **泳道分类纪律**：Thread xxx / Stream xxx / Communication 域（Group 内非 Plane 泳道，如 dp:xx）三类汇总；Plane 泳道不单独成节。
@@ -108,7 +111,7 @@ python scripts/run_workflow.py --input <Prof数据路径> --output-dir <输出�
 
 分析任务多且相互独立，按「波次（Wave）」调度子 agent，每波最多 3 个并行：
 
-- **Wave 0**：主 agent 运行 P0 检测，确定模式（单卡/多卡）与后续步骤清单。
+- **Wave 0**：主 agent 运行 P0 检测，确定模式（单卡/多卡/仅 cluster_analysis_output）与后续步骤清单。若判定为独立报告模式（cluster_output_only），直接执行 P5 vendor cluster 子报告后结束（无 Wave 1–4、无总报告）。
 - **Wave 1**（互不依赖，3 个子 agent 并行）：
   - 子 agent A：P1 全卡 advisor
   - 子 agent B：P2 集群输出件生成（多卡且缺失时；单卡跳过）
@@ -133,6 +136,7 @@ python scripts/run_workflow.py --input <Prof数据路径> --output-dir <输出�
 6. `reports/` 下至少一份 vendor HTML；vendor SKIP 属预期时最终报告应有标注。
 7. 多卡时 swimlane_rank{N}.md 覆盖全部参与卡，swimlane_compare.md 存在。
 8. `performance_report.html` 可直接打开，内嵌子报告可见（相对路径未断）。
+9. 独立报告模式（cluster_output_only）：只要求 `detect_result.json` + `reports/cluster_analysis_report.html` 存在，**不得**生成 `performance_report.html`。
 
 ## 7. 扩展守则（新增阶段 / recipe 的固定模式）
 

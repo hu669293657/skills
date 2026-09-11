@@ -17,7 +17,7 @@ def route(args):
         "tool": "ftrace",
         "required": True,
         "reason": "所有 HostBound 结论的基础证据：调度、抢占、IRQ/SoftIRQ、迁移与 CPU idle。",
-        "action": "使用 scripts/hostbound_collect.sh；默认全量模式。",
+        "action": "使用 scripts/cpu_trace_collect.sh；默认全量模式；需要进程/线程证据时追加 --pid <PID>。",
     }]
     if signals & {"python", "gil", "thread", "thread-contention"}:
         plan.append({

@@ -12,7 +12,6 @@ skills/
 ├── ascend-field-issue-analyzer/   # 现网问题文本日志取证分析
 ├── cluster-analysis/              # 昇腾 NPU 训练性能一站式分析（含 vendor 子技能）
 ├── cluster-compare/               # 两集群 profiling 数据比对与劣化归因
-├── cpu-host-performance/          # Linux CPU Host ftrace 采集与离线分析
 ├── cpu_host_performance/          # ftrace 采集数据 CPU Host 自动分析（中文报告）
 ├── cpu-trace-analyzer/            # Host 侧 CPU trace 瓶颈定位
 ├── host-bound-analyzer/           # CPU/Host Bound 采集与离线诊断（18 章节报告）
@@ -78,18 +77,7 @@ skills/
 - **模式二（xlsx 分析）**：直接解析已有的 `performance_comparison_result_*.xlsx`
 - **多格式输出**：JSON（结构化）+ HTML 报告（改善亮点/劣化风险）+ 中文 xlsx 与 CSV
 
-### 6. cpu-host-performance
-
-**Linux CPU Host ftrace 离线分析技能**（[README](cpu-host-performance/README.md)）
-
-分析训练/推理负载（含昇腾 NPU 场景）是否被宿侧 CPU 拖慢：CPU 高占用或不均衡、调度延迟、数据加载停顿、HCCL/通信压力、IRQ/SoftIRQ 负载、CPU 频率异常或 NUMA 亲和性问题。
-
-- **现场采集**：客户侧只需 root + Bash，`cpu_trace_collect.sh` 仅使用 tracefs/debugfs、/proc、/sys，采集后保存并恢复 ftrace 配置，不改动客户环境
-- **离线分析**：纯 Python 3 标准库解析 `cpu_trace_*.tar.gz` 采集包（或解包目录），输出 Markdown 与自包含离线 HTML 报告
-- **证据约束**：调度延迟按 sched_wakeup→sched_switch 匹配度量并声明局限；无直接证据时输出 `INSUFFICIENT_EVIDENCE` 并指明需补充的采集项
-- **默认脱敏**：报告自动隐去命令行参数与主机名，保留指标证据
-
-### 7. cpu_host_performance
+### 6. cpu_host_performance
 
 **Linux ftrace CPU Host 性能自动化分析**（[README](cpu_host_performance/README.md)）
 
@@ -98,9 +86,10 @@ skills/
 - **输入零转换**：自动识别 tar.gz / zip / 目录 / 裸 ftrace 文本 / trace-cmd report / Chrome Tracing JSON，精简与全量模式均可分析
 - **组合判定**：拒绝单指标下结论，CPU_SATURATION / SCHEDULER_CONTENTION / CPU_IMBALANCE 等问题均需多指标交叉验证
 - **中文报告**：每个指标附中文释义（取自 `analyzer/metrics.py` 的 `METRIC_EXPLANATIONS`），未知事件按兜底释义标注
+- **现场采集**：`scripts/cpu_trace_collect.sh` 客户侧一键采集，仅使用 tracefs/debugfs、/proc、/sys，采集后保存并恢复 ftrace 配置
 - **运行**：`python3 -m cpu_host_performance analyze <输入路径> --output-dir <输出目录>`
 
-### 8. cpu-trace-analyzer
+### 7. cpu-trace-analyzer
 
 **Host 侧 CPU trace 瓶颈定位工具**（[README](cpu-trace-analyzer/README.md)）
 
@@ -111,7 +100,7 @@ skills/
 - **多格式支持**：Chrome JSON / ftrace / msprof / perf / Perfetto 五种 trace 格式统一解析，内置完整 Python 包（CLI 一键运行）
 - **输出**：JSON 诊断结果 + HTML 诊断报告
 
-### 9. host-trace-diagnosis
+### 8. host-trace-diagnosis
 
 **Host 侧 trace 规则化智能诊断工具**（[README](host-trace-diagnosis/README.md)）
 
@@ -121,7 +110,7 @@ skills/
 - **规则可扩展**：内置 7 个 YAML 规则文件（CPU / Host NPU / IO / 内存 / NUMA / 运行时 / 调度），可自定义扩展
 - **结论可复核**：命中结果关联规则 ID 与证据事件
 
-### 10. host-bound-analyzer
+### 9. host-bound-analyzer
 
 **CPU/Host Bound 性能瓶颈离线诊断技能**（[README](host-bound-analyzer/README.md)）
 
@@ -133,7 +122,7 @@ skills/
 - **安全合规**：分析只读、默认脱敏（`--sanitize`），结论均挂证据（metric/value/来源文件行号可回溯）
 - **质量保障**：内置冒烟与金标用例测试，仅依赖 Python ≥3.6 标准库
 
-### 11. ibmc_analyzer
+### 10. ibmc_analyzer
 
 **iBMC 服务器日志分析与故障定位工具**（[README](ibmc_analyzer/README.md)）
 
@@ -144,7 +133,7 @@ skills/
 - **集群对比**：多节点配置 Diff，识别网卡固件、PCIe 带宽等木桶效应
 - **输出**：结构化 JSON + HTML 诊断报告（单机深度分析 + 多机集群对比）
 
-### 12. vllm-ascend-tuning
+### 11. vllm-ascend-tuning
 
 **vLLM-Ascend 全链路性能调优技能**（[README](vllm-ascend-tuning/README.md)）
 
@@ -164,7 +153,6 @@ skills/
 | 训练性能一站式分析、找慢卡 | cluster-analysis |
 | 比对两个集群（正常 vs 异常） | cluster-compare |
 | 对比两组 Prof 数据（GPU vs NPU / 调优前后） | prof-compare |
-| 分析 ftrace 采集包（CPU 拖慢 / 调度 / 频率 / NUMA） | cpu-host-performance |
 | ftrace/trace 采集数据自动出中文诊断报告（MD/HTML） | cpu_host_performance |
 | 定位 Host 侧瓶颈（Gap 归因） | cpu-trace-analyzer |
 | trace 规则化健康检查 | host-trace-diagnosis |

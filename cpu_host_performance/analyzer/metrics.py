@@ -121,6 +121,9 @@ def _pop_any_pending(pending, cpu):
     return v
 
 
+WAKE_MAX_AGE_S = 30.0   # 唤醒等待老化阈值 (秒): 超时未运行的唤醒记录视为陈旧
+
+
 def compute_metrics(td):
     """输入 parser.TraceData -> Metrics dict (全中文注释字段)"""
     events = sorted(td.events, key=lambda e: (e.ts if e.ts is not None else 0))
@@ -136,6 +139,7 @@ def compute_metrics(td):
     for ev in events:
         m["available"].add(ev.etype)
     if not events:
+        m["events_ok"] = False
         m["warnings"].append("无任何可分析事件")
         return m
 
@@ -143,6 +147,14 @@ def compute_metrics(td):
     m["t_end"] = events[-1].ts
     m["duration"] = max(m["t_end"] - m["t_start"], 1e-9)
     dur = m["duration"]
+
+    # 事件流健康度: 解析成功率 (供诊断报告区分 "确实无问题" 与 "数据不可信")
+    _ps = td.parse_stats or {}
+    _tot = int(_ps.get("total", 0) or 0)
+    _okn = int(_ps.get("parsed", 0) or 0)
+    m["events_ok"] = _tot == 0 or _okn * 2 >= _tot   # 成功率 >= 50% 视为可用
+    if not m["events_ok"]:
+        m["warnings"].append("事件流不完整 (成功解析 %d/%d 行), 分析结论可信度低" % (_okn, _tot))
 
     cpus = sorted({ev.cpu for ev in events if ev.cpu is not None})
     m["cpu_list"] = cpus
@@ -155,7 +167,6 @@ def compute_metrics(td):
 
     has_idle_ev = "cpu_idle" in m["available"]
     # ---------- per-cpu 累计容器 ----------
-    util   = defaultdict(float)   # busy 时间
     idle   = defaultdict(float)   # idle 时间
     cs     = defaultdict(int)     # sched_switch 次数
     wake   = defaultdict(int)     # wakeup 类事件次数
@@ -182,6 +193,8 @@ def compute_metrics(td):
     task_wake = defaultdict(int)    # (comm) -> 唤醒次数
     task_migr = defaultdict(int)    # pid -> 迁移次数
     last_cpu_of = {}                # pid -> 最近运行 cpu
+    task_comm = {}                  # pid -> 最近使用的 comm (task_name_of 查询表)
+    task_cpus = defaultdict(set)    # (pid, comm) -> 运行过的 cpu 集合 (绑核/NUMA 分析用)
     migrate_ev = defaultdict(int)   # sched_migrate_task 显式事件
     cstate_dist = defaultdict(float)  # (cstate) -> 累计时长
     # softirq / irq 名称分布
@@ -192,6 +205,12 @@ def compute_metrics(td):
     for ev in events:
         dt = ev.ts - prev_ts
         cpu = ev.cpu
+        # 老化清理: 唤醒后超过阈值仍未运行的记录视为陈旧 (进程退出/PID 复用/丢事件),
+        # 否则会一直计入 runnable 加权, 高估平均可运行队列长度
+        if pending_wake:
+            _cut = ev.ts - WAKE_MAX_AGE_S
+            for _p in [p for p, w in pending_wake.items() if w < _cut]:
+                del pending_wake[_p]
         runnable_weighted += len(pending_wake) * max(dt, 0)
         prev_ts = ev.ts
         et = ev.etype
@@ -223,8 +242,11 @@ def compute_metrics(td):
                 lc = last_cpu_of.get(next_pid)
                 if lc is not None and cpu is not None and lc != cpu:
                     task_migr[next_pid] += 1
+                if next_comm:
+                    task_comm[next_pid] = next_comm
                 if cpu is not None:
                     last_cpu_of[next_pid] = cpu
+                    task_cpus[(next_pid, next_comm)].add(cpu)
             if prev_pid > 0:
                 if cpu is not None:
                     task_cs[(prev_pid, prev_comm)] += 1
@@ -327,12 +349,16 @@ def compute_metrics(td):
     all_cpus = cpus if cpus else (list(range(m["n_cpus_report"] or 0)))
     # ---------- per_cpu 汇总 ----------
     for c in all_cpus:
-        busy = util[c] if c in util else max(dur - idle.get(c, 0.0), 0.0)
-        # 若 idle==0 且无任何 idle 证据: 保守用 1 - busy_unknown, 这里直接 busy=dur-idle
-        busy = max(dur - idle.get(c, 0.0), 0.0) if (has_idle_ev or idle.get(c)) else dur - idle.get(c, 0.0)
-        m["per_cpu"][c] = {
-            "util": 100.0 * busy / dur if dur else 0.0,
-            "idle_ratio": 100.0 * idle.get(c, 0.0) / dur if dur else 0.0,
+        # idle 证据判定:
+        #   a) 该核出现 cpu_idle 记录 (已累计或未配对挂起);
+        #   b) swapper 近似模式进入过 idle (idle_start 挂起或已累计);
+        #   c) 该核有 sched_switch —— 有切换而无 idle 记录, 说明观测期内从未 idle, busy=dur 成立。
+        # 三者皆无 (静默核, 如 per-cpu buffer 为空) => 无法判定, 记 UNKNOWN (None), 不再按 100% 计。
+        idle_known = bool(idle.get(c)) \
+            or idle_start.get(c) is not None \
+            or (in_idle is not None and in_idle.get(c) is not None) \
+            or cs.get(c, 0) > 0
+        pc = {
             "cs": cs.get(c, 0), "cs_rate": cs.get(c, 0) / dur if dur else 0.0,
             "wakeups": wake.get(c, 0), "wakeup_rate": wake.get(c, 0) / dur if dur else 0.0,
             "irq_time": irq_t.get(c, 0.0),
@@ -343,6 +369,16 @@ def compute_metrics(td):
             "softirq_count": soft_c.get(c, 0),
             "preempt": preempt.get(c, 0),
         }
+        if idle_known:
+            busy = max(dur - idle.get(c, 0.0), 0.0)
+            pc["util"] = 100.0 * busy / dur if dur else 0.0
+            pc["idle_ratio"] = 100.0 * idle.get(c, 0.0) / dur if dur else 0.0
+            pc["util_known"] = True
+        else:
+            pc["util"] = None
+            pc["idle_ratio"] = None
+            pc["util_known"] = False
+        m["per_cpu"][c] = pc
     # migration per-cpu 近似: 用 last_cpu_of 无法回溯; 用 sched_migrate_task 数量计入整体
     m["migration_total"] = sum(task_migr.values()) + sum(migrate_ev.values())
 
@@ -413,9 +449,14 @@ def compute_metrics(td):
                               key=lambda x: -x[2])[:8],
         "top_cs": _top(task_cs), "top_wakeup": sorted(
             ((c, n) for c, n in task_wake.items()), key=lambda x: -x[1])[:8],
-        "top_migration": sorted(((p, task_name_of(p), v) for p, v in
+        "top_migration": sorted(((p, task_name_of(p, task_comm), v) for p, v in
                                  list(task_migr.items()) + list(migrate_ev.items())),
                                 key=lambda x: -x[2])[:8],
+        # 绑核/NUMA 分析: 任务 -> 运行过的 cpu 集合 (按累计运行时间排序取前 8)
+        "task_cpus": sorted(((p, c, sorted(cp), task_runtime.get((p, c), 0.0))
+                             for (p, c), cp in task_cpus.items()
+                             if task_runtime.get((p, c), 0.0) > 0),
+                            key=lambda x: -x[3])[:8],
     }
     # ---------- 时间序列 (120 桶) ----------
     n_bucket = 120
@@ -446,6 +487,11 @@ def compute_metrics(td):
         cpu = ev.cpu
         et = ev.etype
         f = ev.fields
+        # 老化清理: 与主循环口径一致, 避免陈旧唤醒在落桶时产生超长"延迟"样本
+        if pw2:
+            _cut = ev.ts - WAKE_MAX_AGE_S
+            for _p in [p for p, w in pw2.items() if w < _cut]:
+                del pw2[_p]
         if has_idle_ev and et == "cpu_idle":
             if f.get("idle_exit"):
                 if in_idl.get(cpu) is not None:
@@ -514,7 +560,12 @@ def _to_int(v):
     except Exception:
         return -1
 
-def task_name_of(pid):
+def task_name_of(pid, task_comm=None):
+    """查 task_comm 表 (pid -> comm) 返回任务名; 无记录时回退 pid:xxx。"""
+    if task_comm:
+        c = (task_comm.get(pid) or "").strip()
+        if c and not c.startswith("pid:"):
+            return c
     return "pid:%d" % pid
 
 def _pid_disp(comm, pid):

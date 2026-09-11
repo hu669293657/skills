@@ -16,10 +16,10 @@ description: "定位 Linux 服务器训练或推理的 HostBound：统一采集�
 默认发给客户的入口是：
 
 ```bash
-sudo bash scripts/hostbound_collect.sh --duration 30 --output /tmp --pid <业务PID>
+sudo bash scripts/cpu_trace_collect.sh --duration 30 --output /tmp --pid <业务PID>
 ```
 
-它调用原有 `scripts/cpu_trace_collect.sh`，不会改变其采集事件和恢复行为；在其结果上增加只读快照：CPU/NUMA 拓扑、IRQ/SoftIRQ、NPU 拓扑、目标进程及线程 affinity。默认使用全量模式；仅在存储或风险限制明确时才使用 `--minimal`。采集包内的 `hostbound/collection_manifest.json` 必须记录未运行的外部工具，避免把缺失数据误当作正常。
+`scripts/cpu_trace_collect.sh` 是唯一采集脚本。默认全量 ftrace，不改变采集事件和恢复行为；追加 `--pid <PID[,PID...]>` 时在采集包内增加只读快照：CPU/NUMA 拓扑、IRQ/SoftIRQ、NPU 拓扑、目标进程及线程 affinity（写入 `cpu_trace/hostbound/`）。默认使用全量模式；仅在存储或风险限制明确时才使用 `--minimal`。采集包内的 `hostbound/collection_manifest.json` 必须记录未运行的外部工具，避免把缺失数据误当作正常。
 
 采集前根据现象生成只读工具计划：
 

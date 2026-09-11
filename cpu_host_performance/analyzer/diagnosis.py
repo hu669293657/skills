@@ -7,13 +7,15 @@ IRQ_HOTSPOT / SOFTIRQ_HOTSPOT / CPU_FREQUENCY_LOW / CPU_IDLE_EXCESSIVE /
 TASK_AFFINITY_PROBLEM / TASK_MIGRATION_HIGH / NUMA_RISK / HOST_NOT_BOTTLENECK /
 INSUFFICIENT_EVIDENCE
 """
+import re
+
 from .metrics import METRIC_EXPLANATIONS, freq_to_mhz
 
 # 经验阈值 (报告中展示, 单位见说明)
 THRESHOLDS = {
     "util_critical": 90.0,      # 单核利用率 % 超过则视为饱和
     "util_imbalance_gap": 40.0, # 最高核与均值差 % 超过视为不均衡
-    "cs_rate_high": 2000.0,     # 单核上下文切换 /s
+    "cs_rate_high": 2000.0,     # 单核上下文切换基线 /s; 全机判定 = 基线 × 核数
     "wakeup_rate_high": 1000.0, # 单核唤醒 /s
     "lat_p99_warn_ms": 5.0,     # 调度延迟 P99 ms
     "lat_p99_crit_ms": 20.0,
@@ -24,6 +26,46 @@ THRESHOLDS = {
     "low_freq_ratio": 50.0,     # 低频样本占比 %
     "migration_rate_high": 50.0,# 全机迁移 /s
 }
+
+
+def _parse_cpulist(s):
+    """展开 "0-31,64" 形式的 cpulist 为 cpu 编号集合。"""
+    cpus = set()
+    for part in (s or "").replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                cpus.update(range(int(a), int(b) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                cpus.add(int(part))
+            except ValueError:
+                pass
+    return cpus
+
+
+def _numa_node_cpus(snapshot):
+    """从 numa.txt 快照解析 NUMA 节点 -> cpu 集合; 无拓扑时返回 {}。"""
+    txt = (snapshot or {}).get("numa.txt", "") or ""
+    nodes, cur = {}, None
+    for line in txt.splitlines():
+        s = line.strip()
+        mm = re.match(r"^==\s*/sys/devices/system/node/node(\d+)/cpulist\s*==\s*$", s)
+        if mm:
+            cur = int(mm.group(1))
+            nodes[cur] = ""
+            continue
+        if cur is not None:
+            if s.startswith("=="):
+                cur = None
+            elif s and not nodes[cur]:
+                nodes[cur] = s
+    return {n: _parse_cpulist(v) for n, v in nodes.items() if v}
+
 
 DIAG_EXPLANATIONS = {
     "CPU_SATURATION":        "CPU 饱和：整体 CPU 已接近打满，算力不足",
@@ -66,7 +108,9 @@ def diagnose(m):
     av = m.get("available", set())
     T = THRESHOLDS
 
-    utils = [per_cpu[c]["util"] for c in cpus] if cpus else []
+    # 无 idle 证据 (util_known=False) 的核不参与统计, 避免 UNKNOWN(None) 混入数值运算
+    known_cpus = [c for c in cpus if per_cpu[c].get("util_known", True)]
+    utils = [per_cpu[c]["util"] for c in known_cpus]
     avg_util = sum(utils) / len(utils) if utils else None
     max_cpu = max(utils) if utils else None
     min_cpu = min(utils) if utils else None
@@ -113,9 +157,9 @@ def diagnose(m):
     # ============ 2. CPU_IMBALANCE ============
     elif avg_util is not None and cpus and max_cpu is not None and \
             (max_cpu - med_util) >= T["util_imbalance_gap"] and max_cpu >= T["util_critical"]:
-        hot = [c for c in cpus if per_cpu[c]["util"] >= T["util_critical"]]
-        cold = [c for c in cpus if per_cpu[c]["util"] <= 30.0]
-        top_c = max(cpus, key=lambda c: per_cpu[c]["util"])
+        hot = [c for c in known_cpus if per_cpu[c]["util"] >= T["util_critical"]]
+        cold = [c for c in known_cpus if per_cpu[c]["util"] <= 30.0]
+        top_c = max(known_cpus, key=lambda c: per_cpu[c]["util"])
         ev = [{"metric": "最高核利用率 (%s)" % cpu_label(top_c), "value": "%.1f%%" % per_cpu[top_c]["util"],
                "threshold": "≥%.0f%%" % T["util_critical"]},
               {"metric": "核心利用率中位数", "value": "%.1f%%" % med_util, "threshold": "差值≥%.0f%% 判定不均衡" % T["util_imbalance_gap"]},
@@ -205,8 +249,10 @@ def diagnose(m):
     if freq_per:
         low_cpus = [c for c, fv in freq_per.items()
                     if fv["max"] and fv["low_ratio"] >= T["low_freq_ratio"]]
-        # 优先观察高负载核
-        hot_low = [c for c in low_cpus if per_cpu.get(c, {}).get("util", 0) >= 50]
+        # 优先观察高负载核 (无 idle 证据的核不参与)
+        hot_low = [c for c in low_cpus
+                   if isinstance(per_cpu.get(c, {}).get("util"), (int, float))
+                   and per_cpu[c]["util"] >= 50]
         if hot_low or (low_cpus and len(low_cpus) >= max(1, len(freq_per) // 2)):
             cs = hot_low or low_cpus
             cc = cs[0]
@@ -237,6 +283,63 @@ def diagnose(m):
                 "负载均衡器频繁搬移任务或任务未绑核",
                 ["将关键线程固定核心 (taskset -c / numactl --physcpubind)",
                  "调小内核调度域负载均衡激进度 (如 sched_migration_cost_ns 调大)"])
+    # ============ 6b. TASK_AFFINITY_PROBLEM / NUMA_RISK ============
+    idle_cpus = [c for c in known_cpus if per_cpu[c]["util"] <= 30.0]
+    # 任务绑核风险: 任务仅在极少数核心运行 + 这些核心饱和 + 存在空闲核 (仅报风险)
+    if idle_cpus:
+        hot_util = {c: per_cpu[c]["util"] for c in known_cpus
+                    if per_cpu[c]["util"] >= T["util_critical"]}
+        max_span = max(2, len(cpus) // 8)
+        for p, comm, t_cpus, t_rt in m.get("tasks", {}).get("task_cpus", []):
+            if not t_cpus or len(t_cpus) > max_span:
+                continue
+            if not all(c in hot_util for c in t_cpus):
+                continue
+            aff_keys = [k for k in (m.get("snapshot", {}) or {})
+                        if k.endswith("pid_%d_affinity.txt" % p)]
+            add("TASK_AFFINITY_PROBLEM", "WARNING", "MEDIUM",
+                "任务绑核风险: %s 只在 %d 个核心上运行" % (comm or ("pid%s" % p), len(t_cpus)),
+                [{"metric": "任务 (pid)", "value": "%s (pid %s), 观测内运行 %.1f 秒" % (comm or "?", p, t_rt),
+                  "threshold": "-"},
+                 {"metric": "运行过的核心", "value": ",".join(str(c) for c in t_cpus), "threshold": "-"},
+                 {"metric": "这些核心的利用率", "value": ", ".join("cpu%s=%.0f%%" % (c, hot_util[c]) for c in t_cpus),
+                  "threshold": "≥%.0f%% 视为饱和" % T["util_critical"]},
+                 {"metric": "空闲核心", "value": "%d 个 (cpu %s)" % (len(idle_cpus), ",".join(str(c) for c in idle_cpus[:8])),
+                  "threshold": "-"}]
+                + ([{"metric": "affinity 快照", "value": aff_keys[0], "threshold": "-"}] if aff_keys else []),
+                "任务被限制在饱和核心上运行而其他核心空闲, 算力未被充分利用",
+                "taskset/cgroup cpuset 限制或调度配置导致任务无法迁移到空闲核",
+                ["查看绑核配置: taskset -pc %s; cat /proc/%s/status | grep Cpus_allowed_list" % (p, p),
+                 "将关键线程绑定/迁移到空闲核心 (taskset -c / numactl --physcpubind), 执行前保存当前 affinity",
+                 "如为有意绑核 (如 cache 亲和), 确认该核饱和是否为业务预期"])
+            break  # 只报最显著 (运行时间最长) 的一个, 避免噪音
+    # NUMA 风险: 多节点拓扑 + 任务跨节点运行或迁移频繁 (仅报风险, 不可称根因)
+    node_cpus = _numa_node_cpus(m.get("snapshot", {}))
+    if len(node_cpus) >= 2 and dur:
+        cpu2node = {}
+        for nd, nd_cpus in node_cpus.items():
+            for c in nd_cpus:
+                cpu2node.setdefault(c, nd)
+        cross_tasks = []
+        for p, comm, t_cpus, _t_rt in m.get("tasks", {}).get("task_cpus", []):
+            ns = sorted({cpu2node.get(c) for c in t_cpus if c in cpu2node} - {None})
+            if len(ns) >= 2:
+                cross_tasks.append("%s (节点 %s)" % (comm or ("pid%s" % p), "/".join(str(x) for x in ns)))
+        mig_rate = (m.get("migration_total", 0) or 0) / dur
+        if cross_tasks or mig_rate >= T["migration_rate_high"]:
+            add("NUMA_RISK", "WARNING", "LOW", "NUMA 风险: 存在跨 NUMA 节点访问的可能性",
+                [{"metric": "NUMA 节点拓扑", "value": "%d 个节点: %s" % (
+                    len(node_cpus),
+                    "; ".join("node%d(%d核)" % (nd, len(nd_cpus)) for nd, nd_cpus in sorted(node_cpus.items()))),
+                  "threshold": "-"},
+                 {"metric": "跨节点运行的任务", "value": "; ".join(cross_tasks[:3]) or "-", "threshold": "-"},
+                 {"metric": "迁移速率", "value": "%.1f 次/秒" % mig_rate,
+                  "threshold": "≥%.0f 次/秒 视为频繁" % T["migration_rate_high"]}],
+                "跨节点访存延迟高, 任务/内存在节点间漂移可能带来性能抖动",
+                "未绑核或内存策略未指定节点, 由调度器/内存分配器自行分布",
+                ["结合 numactl -H 与 numastat 快照确认内存分布 (本报告仅有拓扑与迁移旁证)",
+                 "对关键线程做节点内绑定 (numactl --cpunodebind/--membind), 执行前保存现状",
+                 "此结论为风险提示, 不应直接认定跨 NUMA 为根因"])
     # ============ 7. CPU_IDLE_EXCESSIVE / HOST_NOT_BOTTLENECK ============
     if avg_util is not None and avg_util <= (100 - T["idle_high"]) / 100 * 100:
         pass  # 条件等价改写, 见下方清晰分支
@@ -294,7 +397,11 @@ def diagnose(m):
     crit = [f for f in findings if f["severity"] == "CRITICAL"]
     warn = [f for f in findings if f["severity"] == "WARNING"]
     oktype = [f for f in findings if f["severity"] == "OK"]
-    if not m.get("events_ok", True) and not findings:
+    # 数据不可信 (events_ok=False) 时, 若除数据质量提示 (INSUFFICIENT_EVIDENCE)
+    # 与肯定性结论 (OK) 外没有任何真实发现, 则整机状态标 UNKNOWN,
+    # 避免基于不完整数据给出误导性的 HEALTHY/DEGRADED 结论
+    _real = [f for f in findings if f["type"] != "INSUFFICIENT_EVIDENCE" and f["severity"] != "OK"]
+    if not m.get("events_ok", True) and not _real:
         host = "UNKNOWN"
     elif crit:
         host = "CRITICAL"

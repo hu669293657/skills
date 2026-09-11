@@ -1,11 +1,13 @@
 ---
-name: "cluster-analysis"
-description: "Ascend cluster performance analysis and comparison tool. Invoke when user asks to analyze cluster profiling data (DB or TEXT format), generate cluster analysis reports, or compare two cluster datasets."
+name: "cluster-output-analysis"
+description: "Ascend cluster analysis output report generator. Invoke when the input contains only a cluster_analysis_output directory (DB or TEXT format, no card dirs): extract data, generate a standalone single-cluster or two-cluster compare HTML/MD report."
 ---
 
 # Ascend 集群性能分析与比对
 
 面向华为昇腾 NPU 集群 profiling 数据的性能分析工具。支持从 `cluster_analysis_output` 目录（DB 或 TEXT 格式）提取数据，生成全景数据总结 MD 文件，并根据用户需求生成**单集群整体分析**或**双集群比对分析** HTML 报告。
+
+> 定位说明：当上级技能（cluster-analysis）检测到输入**仅含 `cluster_analysis_output`（无任何卡目录）**时，只调用本子技能产出独立报告，不生成完整 HTML 总报告。
 
 ## 触发场景
 

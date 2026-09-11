@@ -1,6 +1,6 @@
 # 最终 HTML 报告模板规范（P7 report_generator.py）
 
-> 本规范同时适用于 skill 产出的**所有 HTML 模板**：P7 最终报告（report_generator.py 内嵌模板）、vendor/cluster-analysis 的 2 个集群模板、vendor/prof-compare 的 HTML 报告。任何新增/修改 HTML 模板时必须遵守下述"模板交互规范"。
+> 本规范同时适用于 skill 产出的**所有 HTML 模板**：P7 最终报告（report_generator.py 内嵌模板）、vendor/cluster-output-analysis 的 2 个集群模板、vendor/prof-compare 的 HTML 报告。任何新增/修改 HTML 模板时必须遵守下述"模板交互规范"。
 
 ## 布局硬性要求
 
