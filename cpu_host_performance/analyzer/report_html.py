@@ -5,7 +5,7 @@
 """
 import io
 import re
-from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
+from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp, _coverage_limitations
 from .diagnosis import THRESHOLDS
 
 
@@ -397,11 +397,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         format(m["parse_stats"]["total"], ","), format(m["parse_stats"]["parsed"], ","),
         format(m["parse_stats"]["failed"], ",")))
     A("<p>buffer 溢出：%s</p></div>" % esc(m.get("buffer_overrun") or "0（未检测到溢出）"))
-    A("<h3>分析限制</h3><div class='card'><ul style='margin-left:20px'>"
-      "<li>trace 仅覆盖采集窗口，不代表长期行为。</li>"
-      "<li>利用率基于 idle 事件/swapper 近似；user/system 区分依赖 /proc/stat（开机累计）。</li>"
-      "<li>调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。</li>"
-      "<li>频率单位自动换算可能存在平台差异，仅作相对比较。</li></ul></div>")
+    _lim_items = "".join("<li>%s</li>" % esc(l) for l in _coverage_limitations(m))
+    A("<h3>分析限制</h3><div class='card'><ul style='margin-left:20px'>%s</ul></div>" % _lim_items)
     A("<h3>指标解释（每个指标是什么）</h3>")
     A("<table><tr><th>指标</th><th>解释</th></tr>")
     for k, v in METRIC_EXPLANATIONS.items():

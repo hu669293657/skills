@@ -83,6 +83,59 @@ TASK_HINTS = [
     ("ffmpeg", "音视频处理进程"),
 ]
 
+# 采集包补充数据（GIL/PMU/msprof 等）存在性说明。
+# 契约（SKILL.md）：分析器不应因缺少 GIL、PMU、msprof 而失败；
+# 必须在报告的数据覆盖与限制章节明确这些数据是否存在。
+# 数据来源：hostbound/collection_manifest.json 的 external_tools 状态。
+_EXTERNAL_TOOL_CN = {
+    "gil_tracer": "GIL 事件数据（官方 gil_tracer）",
+    "function_monitor": "函数耗时/PMU 数据（官方 function_monitor）",
+    "msprof": "msprof Host/Device 时间线数据",
+    "host_analyzer": "host_analyzer 分析/优化建议数据",
+}
+
+def _coverage_limitations(m):
+    """第 14 节「分析限制」条目列表：通用限制 + 补充数据（GIL/PMU/msprof 等）存在性。
+
+    从快照中的 collection_manifest.json 读取 external_tools 状态：
+    - not_run    → 明确声明"本次采集未包含该数据，相关结论受限"；
+    - 其他状态   → 声明数据已包含，可在相应章节引用；
+    - manifest 缺失/不可解析 → 按均缺失处理并明确声明。
+    """
+    limits = [
+        "trace 仅覆盖采集窗口，不代表长期行为。",
+        "利用率基于 idle 事件/swapper 近似；user/system 区分依赖 /proc/stat（开机累计）。",
+        "调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。",
+        "频率单位自动换算可能存在平台差异，仅作相对比较。",
+    ]
+    import json as _json
+    snap = m.get("snapshot", {}) or {}
+    manifest_txt = None
+    for k, v in snap.items():
+        if str(k).replace("\\", "/").endswith("collection_manifest.json"):
+            manifest_txt = v
+            break
+    external = None
+    if isinstance(manifest_txt, str) and manifest_txt.strip():
+        try:
+            _mj = _json.loads(manifest_txt)
+            _et = _mj.get("external_tools")
+            if isinstance(_et, dict):
+                external = _et
+        except Exception:
+            external = None
+    if external is None:
+        limits.append("GIL/PMU/msprof 数据存在性：采集包未提供可解析的 collection_manifest.json，"
+                      "无法确认上述补充数据是否存在，按均缺失处理，相关维度结论受限。")
+    else:
+        for tool, cn in _EXTERNAL_TOOL_CN.items():
+            status = str(external.get(tool, "not_run"))
+            if status == "not_run":
+                limits.append("%s：本次采集未运行，报告中无对应数据，相关维度结论受限。" % cn)
+            else:
+                limits.append("%s：已包含（状态：%s），可在相应章节引用。" % (cn, status))
+    return limits
+
 def _explain_irq_name(name):
     n = str(name).lower()
     for k, v in IRQ_NAME_EXPLANATIONS.items():

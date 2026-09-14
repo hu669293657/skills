@@ -4,7 +4,7 @@ HTML 渲染见 report_html.py
 """
 import os
 import io
-from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, IRQ_NAME_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
+from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, IRQ_NAME_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp, _coverage_limitations
 from .diagnosis import THRESHOLDS
 from .report_html import render_html, _cs_limit
 
@@ -403,10 +403,8 @@ def render_md(m, diag):
     A("")
     A("### 分析限制")
     A("")
-    A("- trace 仅覆盖采集窗口，不代表长期行为。")
-    A("- 利用率基于 idle 事件/swapper 近似；user/system 区分依赖 /proc/stat（开机累计）。")
-    A("- 调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。")
-    A("- 频率单位自动换算可能存在平台差异，仅作相对比较。")
+    for _lim in _coverage_limitations(m):
+        A("- %s" % _lim)
     A("")
     A("### 指标解释（每个指标是什么）")
     A("")

@@ -54,7 +54,7 @@ sudo bash cpu_trace_collect.sh -t 60 -c 0-47          # 指定时长与 CPU 列�
 
 产物 `cpu_trace_YYYYMMDD_HHMMSS.tar.gz` 直接回传即可。脚本不修改业务进程，采集结束自动恢复 tracing 原配置（onoff/tracing_on/当前_tracer）。
 
-导出提速：脚本并行读取各 CPU 独立缓冲区（`per_cpu/cpu*/trace`）后拼接为 trace.txt，多核机器上比读取全局 trace 明显更快（核心越多提速越接近线性）；分析器加载后会按时间戳全局稳定排序，分析结果与传统 `cat trace` 方式完全一致。
+导出路径：脚本默认以单次读取全局 trace 为主路径（实测中该方式常反而更快、开销最低）；仅当全局读取失败或结果为空时，才降级为并行读取各 CPU 独立缓冲区（`per_cpu/cpu*/trace`）后拼接为 trace.txt（受控并发，并发度由脚本自动选择）。如需指定行为可用 `--export-mode global|percpu`，或用 `--benchmark-export` 在目标机器实测 A/B/C 三种方式后按 `--export-mode percpu` 固化方案（以本机实测为准）。分析器加载后会按时间戳全局稳定排序，各种导出方式的分析结果完全一致。
 
 ## 报告结构（14 节固定）
 
