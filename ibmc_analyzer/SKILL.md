@@ -1,6 +1,6 @@
 ---
 name: ibmc_analyzer
-description: 分析华为 iBMC 一键收集/带外日志，产出结构化 JSON 与精美 HTML 诊断报告（单机深度分析+多机集群对比）。当用户给出 dump_info 目录或 BMC 日志压缩包，要求判断机器/BMC 是否健康、汇总问题、对比多机或生成诊断报告时使用。触发词：BMC日志、iBMC日志、一键收集、bmc log、带外日志、分析BMC、BMC健康、BMC诊断报告、BMC对比、多机BMC。
+description: 分析华为 iBMC 一键收集/带外日志，判断服务器硬件健康（BMC 层）。当用户给出 dump_info 目录或 BMC 日志压缩包，要求判断机器/BMC 是否健康、汇总硬件问题、多机对比找配置木桶效应、或生成诊断报告时使用。触发词：BMC日志、iBMC日志、一键收集、bmc log、带外日志、分析BMC、BMC健康、BMC诊断报告、BMC对比、多机BMC。不用于 OS/应用层日志故障排查（用 issue-analyzer）；不用于昇腾环境配置快照与比对（用 ascend-dump-analyzer）。
 ---
 
 # BMC 一键收集日志 → 结构化 JSON + 精美 HTML 报告

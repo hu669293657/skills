@@ -1,6 +1,6 @@
 ---
 name: "prof-compare"
-description: "Compares two Prof datasets (GPU vs NPU / NPU vs NPU) by auto-installing and calling msprof-analyze compare, then parses the result xlsx into HTML report and Chinese xlsx. Invoke when user provides two prof dirs to compare, or has a compare result xlsx to analyze/translate."
+description: "两份单卡 Prof 数据细粒度比对（GPU vs NPU / NPU vs NPU / 调优前后）。当用户在单卡/单机场景要求对比两份 Prof 的总体性能、算子、模块、内存、Kernel、通信、API 差异，或已有 compare 输出的 performance_comparison_result_*.xlsx 需要分析翻译时使用，例如'对比这两个 prof'、'GPU 和 NPU 跑同一模型差多少'。自动检测并安装 msprof-analyze compare，输出 HTML 报告与中文 xlsx。不用于多卡/集群级比对（用 cluster-compare）；不用于单份数据的独立性能分析（用 cluster-analysis）。"
 ---
 
 # Prof Compare

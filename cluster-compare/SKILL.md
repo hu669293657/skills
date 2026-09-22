@@ -1,6 +1,6 @@
 ---
 name: "cluster-compare"
-description: "Ascend cluster comparison tool. Invoke when user asks to compare two cluster datasets (DB or TEXT), or to generate cluster_analysis_output from raw profiling data via msprof-analyze and then compare."
+description: "昇腾两集群/多卡 Prof 数据比对（集群级对比）。当用户要求对比两份集群级（多卡）Prof 数据、定位性能差异与劣化原因时使用，例如'对比这两个集群'、'对比正常和异常环境'、'cluster compare'。支持 DB/TEXT 格式的 cluster_analysis_output；无现成数据时自动安装并调用 msprof-analyze cluster 生成后再比对。不用于单卡/单机两份 Prof 的算子级细粒度比对（用 prof-compare）；不用于单份数据的独立分析（用 cluster-analysis）；不用于现网故障排查（用 issue-analyzer）。"
 ---
 
 # 昇腾集群比对分析

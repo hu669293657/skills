@@ -1,6 +1,6 @@
 ---
 name: cluster-analysis
-description: 昇腾（Ascend）NPU 训练性能问题分析与定位技能。当用户提供 Prof 采集数据目录（单卡或多卡/集群），要求做性能分析、瓶颈定位、慢卡/慢算子排查、通信问题分析、advisor 诊断、集群分析对比，或要求生成性能分析 HTML/MD 报告时触发。自动识别输入形态（单卡/多卡、db/text、仅含 cluster_analysis_output），缺失时生成 cluster_analysis_output，执行五大类全部进阶 recipe，泳道算子统计与跨卡比对，通信占比最大/最小卡对比，最终产出含左侧固定导航、可折叠分区、子报告嵌入的完整 HTML 报告；若输入仅含 cluster_analysis_output（无任何卡目录），则只调用 vendor cluster-output-analysis 生成独立报告，不生成完整 HTML 报告。
+description: 昇腾（Ascend）NPU Prof 性能分析（单份数据）。当用户提供一份 Prof 采集数据目录（单卡或多卡/集群），要求分析性能、定位瓶颈、排查慢卡/慢算子/通信问题、advisor 诊断，或生成性能分析 HTML/MD 报告时使用，例如"分析这个 prof 的性能问题"、"看看这个 Prof 哪里慢"。自动识别输入形态（单卡/多卡、db/text、仅含 cluster_analysis_output），缺失时自动生成 cluster_analysis_output，执行八阶段流水线与全部进阶 recipe，产出含左侧导航与子报告嵌入的完整 HTML 报告。不用于对比两份 Prof 或两个集群（多卡/集群对比用 cluster-compare，单卡对比用 prof-compare）；不用于现网报错/中断等故障日志排查（用 issue-analyzer）；不用于 Host 侧 ftrace/系统级瓶颈诊断（用 cpu-host-performance）。
 ---
 
 # 昇腾 NPU 训练性能分析技能（cluster-analysis）

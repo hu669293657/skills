@@ -1,6 +1,6 @@
 ---
 name: "ascend-dump-analyzer"
-description: "采集、分析和比对昇腾 NPU 环境信息。当用户需要在 Ascend 服务器上采集环境信息、分析 dump JSON、分析 预检信息、或比对两个 dump 文件以检测配置漂移时触发。"
+description: "昇腾服务器环境信息采集与分析（环境体检/配置漂移）。当用户要求在 Ascend 服务器上采集环境快照（dump）、分析 dump/预检 JSON、或比对两个/多个环境 dump 检测配置漂移时使用，例如'体检这台服务器环境'、'两个环境之间有什么变化'。不用于现网故障日志取证（用 issue-analyzer）；不用于 Prof 性能分析（用 cluster-analysis）；不用于 BMC 硬件健康诊断（用 ibmc_analyzer）。"
 ---
 
 # Ascend 环境分析器

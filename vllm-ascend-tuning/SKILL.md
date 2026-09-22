@@ -2,7 +2,7 @@
 
 name: vllm-ascend-tuning
 
-description: "vLLM-Ascend 性能调优技能。当用户需要对 vLLM-Ascend 推理服务进行性能调优、优化推理速度/吞吐量、调整系统参数以获得最佳性能时触发。涵盖并行策略选择、编译优化、OS 级调优、torch_npu 配置、CANN/HCCL 调优、vLLM 参数调优、Graph Mode 优化、Speculative Decoding、量化调优、PD 分离架构和性能基准测试。不用于部署服务（见 vllm-ascend-server）或事后 Profiling 分析（见 profiling-analysis）。"
+description: "vLLM-Ascend 推理服务全链路性能调优。当用户要求提升 vLLM-Ascend 推理速度/吞吐量、降低延迟（TTFT/TPOT）、选择并行策略（TP/DP/EP）、配置 Graph Mode/Speculative Decoding/量化/PD 分离、或做性能基准测试时使用。涵盖并行策略、编译优化、OS 级调优、torch_npu、CANN/HCCL、vLLM 参数等 Phase 0–11，内置主流模型已验证 YAML 配置。不用于 Prof 数据的事后分析与瓶颈定位（用 cluster-analysis）；不用于故障报错排查（用 issue-analyzer）；不包含服务部署启动本身。"
 
 keywords:
 
@@ -104,17 +104,13 @@ keywords:
 
 \*\*不适用场景（请使用其他技能）：\*\*
 
-\- 部署/启动 vLLM 服务 -> vllm-ascend-server
-
-\- 分析 Profiling 数据找瓶颈 -> profiling-analysis
-
-\- 集群快慢卡对比 -> cluster-fast-slow-rank-detector
+\- 分析 Profiling 数据找瓶颈 -> cluster-analysis
 
 \- 集群性能对比 -> cluster-compare
 
-\- 单算子 MFU 计算 -> op-mfu-calculator
+\- 两份单卡 Prof 对比 -> prof-compare
 
-\- 训练 MFU 计算 -> training-mfu-calculator
+\- 现网故障/报错排查 -> issue-analyzer
 
 
 
