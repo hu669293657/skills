@@ -18,6 +18,7 @@ import json
 import os
 import sqlite3
 import sys
+from pathlib import Path
 from datetime import datetime
 
 
@@ -46,7 +47,9 @@ def detect_format(data_dir):
             break
 
     # 2. cluster_analysis.db (新格式) — 在 cluster_analysis_output/ 下
-    new_db = os.path.join(data_dir, "cluster_analysis_output", "cluster_analysis.db")
+    new_db = os.path.join(data_dir, "cluster_analysis.db")
+    if not os.path.isfile(new_db):
+        new_db = os.path.join(data_dir, "cluster_analysis_output", "cluster_analysis.db")
     if os.path.exists(new_db):
         if result["format"] == "db_old":
             result["format"] = "mixed"
@@ -160,7 +163,7 @@ def build_step_summary(rows, f_step, f_compute, f_comm, f_free, f_stage, f_overl
 
 def extract_db_old(db_path):
     data = {"format": "db_old", "tables_found": [], "tables_empty": []}
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro&immutable=1', uri=True)
     conn.row_factory = sqlite3.Row
     tables = get_table_list(conn)
     data["tables_found"] = tables
@@ -224,10 +227,23 @@ def extract_db_old(db_path):
 
 def extract_db_new(db_path):
     data = {"format": "db_new", "tables_found": [], "tables_empty": []}
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro&immutable=1', uri=True)
     conn.row_factory = sqlite3.Row
     tables = get_table_list(conn)
     data["tables_found"] = tables
+    if 'ClusterBaseInfo' in tables:
+        data['base_info'] = {r['key']: r['value'] for r in query_to_dicts(conn, 'SELECT key, value FROM ClusterBaseInfo')}
+        distributed = data['base_info'].get('distributed_args')
+        if distributed:
+            try:
+                args = json.loads(distributed)
+                data['base_info'].update({k: str(v) for k, v in args.items()})
+                for key, source in [('tp_size', 'tensor_model_parallel_size'), ('pp_size', 'pipeline_model_parallel_size')]:
+                    data['base_info'][key] = str(args.get(source, 1))
+            except (TypeError, ValueError):
+                data.setdefault('warnings', []).append('ClusterBaseInfo.distributed_args invalid JSON')
+    # New ClusterCommunicationTime schema stores ms (also verified against native output).
+    data['units'] = {'step_time': 'us', 'communication_time': data.get('base_info', {}).get('communication_time_unit', 'ms')}
 
     # 确定步骤表名
     step_table = None
@@ -274,7 +290,7 @@ def extract_db_new(db_path):
             "AVG(wait_time) as avg_wait, AVG(synchronization_time) as avg_sync, AVG(idle_time) as avg_idle "
             "FROM ClusterCommunicationTime GROUP BY hccl_op_name ORDER BY avg_elapsed DESC LIMIT 20")
         if rows:
-            data["comm_time_ops"] = rows
+            data["comm_time_ops"] = [r for r in rows if r['hccl_op_name'] not in ('Total Op Info', 'Total', 'total', 'all')]
         else:
             data["tables_empty"].append("ClusterCommunicationTime")
 

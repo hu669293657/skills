@@ -18,22 +18,15 @@ import sys
 
 from lib.common import is_junk, iter_csv, read_csv_rows, read_json, to_f, us_to_ms
 from lib.config import AGG_ROWS, COMM_NAME_PATTERN
+from lib import prof_data
+from lib import analysis_scope
 
-CORE_NUM_DEFAULT = 50  # Ascend 910B; 310P is 8. Heuristic if unknown.
 
 
 def find_cards(root):
     """Root itself a card dir, or children card dirs (one level deep)."""
-    if os.path.isdir(os.path.join(root, 'ASCEND_PROFILER_OUTPUT')):
-        return [root]
-    cards = []
-    for d in sorted(os.listdir(root)):
-        if is_junk(d):
-            continue
-        p = os.path.join(root, d)
-        if os.path.isdir(p) and os.path.isdir(os.path.join(p, 'ASCEND_PROFILER_OUTPUT')):
-            cards.append(p)
-    return cards
+    from detect_prof import find_card_dirs
+    return find_card_dirs(root)
 
 
 def card_rank(card_dir):
@@ -52,16 +45,32 @@ def card_rank(card_dir):
 # ---------------- per-card loaders ----------------
 
 def load_step_trace(apo):
-    rows = read_csv_rows(os.path.join(apo, 'step_trace_time.csv'))
+    """step/window 摘要：TEXT CSV 优先，缺失时回退 analysis.db::StepTraceTime。
+
+    返回 dict（含固定指标键）或 None。附带 source 与 scope：
+    scope='whole_prof' 表示整个无分步 prof 合为一个汇总 step，不是训练迭代，
+    结论必须按采集窗口径解释（单位 us，与 CSV 同）。
+    """
+    rows = analysis_scope.load_steps(apo)
     if not rows:
         return None
+    source, scope = rows[0]['_source'], analysis_scope.scope_of(rows)
+    null_metrics = sum(1 for r in rows for key in analysis_scope.METRIC_KEYS
+                       if key in r and analysis_scope.number(r.get(key)) is None)
+    required = ('Stage', 'Computing', 'Communication(Not Overlapped)', 'Free')
+    missing_required = sorted({key for r in rows for key in required
+                               if analysis_scope.number(r.get(key)) is None})
     agg = {k: 0.0 for k in ('Computing', 'Communication(Not Overlapped)', 'Communication',
                             'Free', 'Stage', 'Bubble', 'Preparing')}
     for r in rows:
         for k in agg:
             agg[k] += to_f(r.get(k))
     n = len(rows)
-    return {k: v / n for k, v in agg.items()} | {'steps': n}
+    return {k: v / n for k, v in agg.items()} | {'steps': n, 'source': source,
+                                                 'step_ids': sorted({r['Step'] for r in rows}),
+                                                 'scope': scope,
+                                                 'null_metrics': null_metrics,
+                                                 'missing_required': missing_required}
 
 
 def load_ops(apo):
@@ -83,19 +92,22 @@ def load_kernel_findings(apo):
         if core in ('AI_CORE', 'MIX_AIC'):
             aicore_ops += 1
             if dur >= 20:
-                mac = to_f(r.get('aic_mac_ratio'))
-                fix = to_f(r.get('aic_fixpipe_ratio'))
-                mte2 = to_f(r.get('aic_mte2_ratio'))
+                mac = to_f(r.get('aic_mac_ratio'), None)
+                fix = to_f(r.get('aic_fixpipe_ratio'), None)
+                mte2 = to_f(r.get('aic_mte2_ratio'), None)
+                if any(v is None for v in (mac, fix, mte2)):
+                    continue  # Missing counters are not measured zero utilization.
                 if mac < 0.8 and fix < 0.75 and mte2 < 0.95:
                     no_bound.append((r.get('Name', ''), dur, mac, fix, mte2))
-        bd = to_f(r.get('Block Dim'))
-        if bd > 0 and core in ('AI_CORE', 'MIX_AIC', 'AI_VECTOR_CORE', 'MIX_AIV'):
-            if bd % CORE_NUM_DEFAULT != 0:
-                bad_blockdim.append((r.get('Name', ''), int(bd)))
+        # Block Dim alone cannot establish utilization without device/core capability.
     return no_bound, bad_blockdim, aicore_ops
 
 
 def load_comm_ops(apo):
+    """通信算子汇总：communication.json 优先，缺失时回退 analysis.db::CommAnalyzerTime。
+
+    两个来源的时间均为 ms，返回 (comm_ops, wait_ratios)。
+    """
     cj = read_json(os.path.join(apo, 'communication.json'))
     comm_ops, wait_ratios = [], []
     if cj:
@@ -113,6 +125,16 @@ def load_comm_ops(apo):
                     comm_ops.append((name, elapse, wait, transit, idle))
                     if elapse > 0:
                         wait_ratios.append(wait / elapse)
+        return comm_ops, wait_ratios
+    for r in prof_data.read_comm_time(apo):
+        name = str(r['op'] or '').split('@')[0]
+        if not name or name in AGG_ROWS or re.match(r'^Plan\d+$', name):
+            continue
+        elapse, wait = to_f(r['elapse_ms']), to_f(r['wait_ms'])
+        transit, idle = to_f(r['transit_ms']), to_f(r['idle_ms'])
+        comm_ops.append((name, elapse, wait, transit, idle))
+        if elapse > 0:
+            wait_ratios.append(wait / elapse)
     return comm_ops, wait_ratios
 
 
@@ -133,6 +155,8 @@ def advisor_overall(per_rank):
     ratio = {'computing': comp / stage if stage else 0,
              'communication': comm / stage if stage else 0,
              'free': free / stage if stage else 0}
+    if any(st.get('missing_required') for st in per_rank.values()):
+        return ratio, '证据不足', '部分摘要指标缺失或无效，仅保留已有绝对耗时与事件证据'
     if ratio['free'] > 0.5:
         dominant, reason = '空闲主导', 'Free 占比超过 50%，存在 Host 下发间隙、等待或流水线空泡，优先排查调度与数据供给'
     elif ratio['communication'] > 0.3:
@@ -244,6 +268,11 @@ def analyze(cards):
 def build_advice(res):
     """Merged advice list [(level, text)] across ranks."""
     items = []
+    missing = sorted({key for rank in res['per_rank'].values()
+                      for key in rank.get('missing_required', [])})
+    if missing:
+        return [('Medium', '摘要指标证据不足：' + '、'.join(missing)
+                 + ' 未提供或无效；相关占比和正常判定不可用，优先查看已有事件热点。')]
     ranks = sorted(res['per_rank'], key=lambda r: str(r))
     ratio = res['ratio']
     multi = len(ranks) > 1
@@ -268,11 +297,13 @@ def build_advice(res):
                                   f"（{us_to_ms(stages[fastest])}ms），差距 {spread:.1f}%"))
     if res['top_ops']:
         name, e = res['top_ops'][0]
-        comp = sum(res['per_rank'][r]['Computing'] for r in ranks) / len(ranks)
-        share = e['total'] / len(ranks) / comp if comp else 0
+        comp = sum(res['per_rank'][r]['Computing'] * res['per_rank'][r]['steps'] for r in ranks)
+        total = sum(v['total'] for r, v in e['per_rank'].items() if r in res['per_rank'])
+        share = total / comp if comp else 0
         if share >= 0.1:
             items.append(('High', f"Top1 计算算子 {name} 占计算时间 {share*100:.1f}%"
-                                  f"（{us_to_ms(e['total']/len(ranks))}ms/{e['count']}次），"
+                                  f"（同一采集窗口累计，kernel 时长/Computing 近似比；"
+                                  f"{us_to_ms(total/len(ranks))}ms/卡，合计{e['count']}次），"
                                   f"优先针对性优化（融合/替换实现/检查 shape）"))
         elif share >= 0.05:
             items.append(('Medium', f"Top1 计算算子 {name} 占计算时间 {share*100:.1f}%，可考虑优化"))
@@ -285,10 +316,6 @@ def build_advice(res):
         if avg_wait > 0.5:
             items.append(('High', f"通信算子平均等待占比 {avg_wait*100:.0f}%（等待型通信），"
                                   f"各卡到达时间差异大，优先解决慢卡/负载不均"))
-    if res['bb_top']:
-        items.append(('Low', f"发现 {len(res['bb_top'])} 类算子 block_dim 不为 {CORE_NUM_DEFAULT} 整数倍"
-                             f"（如 {res['bb_top'][0][0]} block_dim={res['bb_top'][0][1]}），"
-                             f"可能存在核利用率损失"))
     if res['top_comm']:
         name, e = res['top_comm'][0]
         items.append(('Low', f"耗时最大通信算子 {name}：elapse {e['elapse']:.3f}ms "
@@ -314,6 +341,8 @@ def write_report(res, cards, out_dir, root):
            for k in ('Stage', 'Computing', 'Communication(Not Overlapped)', 'Free',
                      'Bubble', 'Preparing')}
     total_steps = sum(res['per_rank'][r]['steps'] for r in ranks)
+    unique_steps = sorted({step for r in ranks for step in res['per_rank'][r]['step_ids']})
+    missing_required = {key for r in ranks for key in res['per_rank'][r]['missing_required']}
 
     lines = []
     title = f"专家建议报告（整体 · {len(cards)} 卡）" if multi else '专家建议报告（单卡）'
@@ -321,7 +350,21 @@ def write_report(res, cards, out_dir, root):
     lines.append('')
     lines.append(f'- 数据根目录：`{root}`')
     lines.append(f'- 覆盖 Rank：{", ".join(str(r) for r in ranks)}')
-    lines.append(f'- Step 总数：{total_steps}（{"样本量小，置信度低" if total_steps < 3 else "样本充足"}）')
+    lines.append(f'- Rank-step 样本数：{total_steps}；每 rank 的 step 数见下表，不代表独立训练 step 总数')
+    scopes = {res['per_rank'][r].get('scope') for r in ranks}
+    sources = {res['per_rank'][r].get('source') for r in ranks}
+    if 'whole_prof' in scopes:
+        lines.append('- 分步口径：**整个 prof 作为一个汇总 step（prof）**；'
+                     '每卡一次汇总，不代表一次训练迭代或一个推理请求。'
+                     '不同卡按各自提供的采集范围比较，时窗对齐与负载等价需另行核验。')
+    elif 'capture_window' in scopes:
+        lines.append('- 数据口径：**采集窗（capture window）**：摘要行来自 NULL-step 采集窗'
+                     '（analysis.db），不是训练 step；指标为采集窗口径，不能输出迭代吞吐或按 step 结论')
+    elif 'analysis.db:StepTraceTime' in sources:
+        lines.append('- 数据来源：analysis.db::StepTraceTime（TEXT 导出缺失时的 DB 适配；'
+                     '单位 us，与 step_trace_time.csv 同口径）')
+    if any(res['per_rank'][r].get('null_metrics') for r in ranks):
+        lines.append('- 警告：部分 DB 摘要行存在 NULL 指标，按 0 参与均值统计，不代表实测为 0')
     lines.append(f'- 主导瓶颈：**{res["dominant"]}**')
     lines.append('')
 
@@ -332,6 +375,9 @@ def write_report(res, cards, out_dir, root):
     for key, label in [('Stage', 'E2E Stage'), ('Computing', '计算'),
                        ('Communication(Not Overlapped)', '未掩盖通信'), ('Free', '空闲'),
                        ('Bubble', 'Bubble'), ('Preparing', 'Preparing')]:
+        if key in missing_required:
+            lines.append(f'| {label} | 未知 | 未知 |')
+            continue
         pct = avg[key] / avg['Stage'] * 100 if avg['Stage'] else 0
         lines.append(f'| {label} | {us_to_ms(avg[key])} | {pct:.1f}% |')
     lines.append('')
@@ -430,14 +476,21 @@ def write_report(res, cards, out_dir, root):
 
     summary = {
         'scope': 'all_cards' if multi else 'single_card',
+        'step_scope': next(iter(scopes)) if len(scopes) == 1 else 'mixed',
+        'synthetic_step': 'whole_prof' in scopes,
         'ranks': [str(r) for r in ranks],
         'dominant': res['dominant'],
         'stage_ms': us_to_ms(avg['Stage']),
         'steps': total_steps,
-        'computing_ratio': round(res['ratio']['computing'], 4),
-        'communication_ratio': round(res['ratio']['communication'], 4),
-        'free_ratio': round(res['ratio']['free'], 4),
+        'unique_step_count': len(unique_steps),
+        'step_ids': unique_steps,
+        'computing_ratio': None if {'Computing', 'Stage'} & missing_required else round(res['ratio']['computing'], 4),
+        'communication_ratio': None if {'Communication(Not Overlapped)', 'Stage'} & missing_required else round(res['ratio']['communication'], 4),
+        'free_ratio': None if {'Free', 'Stage'} & missing_required else round(res['ratio']['free'], 4),
         'per_rank': {str(r): {'stage_ms': us_to_ms(res['per_rank'][r]['Stage']),
+                              'step_scope': res['per_rank'][r]['scope'],
+                              'source': res['per_rank'][r]['source'],
+                              'missing_required': res['per_rank'][r]['missing_required'],
                               'steps': res['per_rank'][r]['steps'],
                               'comm_ratio': round(res['per_rank'][r]['Communication(Not Overlapped)']
                                                   / res['per_rank'][r]['Stage'], 4)
@@ -473,7 +526,8 @@ def main():
                   'apo': os.path.join(c, 'ASCEND_PROFILER_OUTPUT')} for c in cards]
     res = analyze(card_list)
     if not res:
-        print('ERROR: step_trace_time.csv missing or empty for every card', file=sys.stderr)
+        print('ERROR: 无可用 step/window 摘要：step_trace_time.csv 与 '
+              'analysis.db StepTraceTime 均缺失或为空', file=sys.stderr)
         sys.exit(1)
     write_report(res, card_list, args.output, root)
 

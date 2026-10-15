@@ -37,8 +37,9 @@ def parse_statistic(wb) -> dict:
     top10 = operators[:10]
 
     total_diff = sum(o['diff_duration'] for o in operators)
-    top10_diff = sum(o['diff_duration'] for o in top10)
-    concentration = abs(top10_diff) / abs(total_diff) * 100 if total_diff != 0 else 0
+    total_degraded = sum(max(o['diff_duration'], 0) for o in operators)
+    top10_diff = sum(max(o['diff_duration'], 0) for o in top10)
+    concentration = top10_diff / total_degraded * 100 if total_degraded else 0
 
     degraded_count = sum(1 for o in operators if o['diff_duration'] > 0)
     improved_count = sum(1 for o in operators if o['diff_duration'] < 0)

@@ -18,6 +18,8 @@ import sys
 
 from lib.common import is_junk, read_csv_rows, read_json as _read_json, to_f
 from lib.config import AGG_ROWS, COMM_NAME_PATTERN
+from lib import prof_data
+from lib import analysis_scope
 
 CARD_DIR_PATTERN = re.compile(r'.*_ascend_(pt|ms)$')
 
@@ -28,22 +30,20 @@ def read_json(path):
 
 
 def find_cards(root):
-    cards = []
-    for dirpath, dirnames, _ in os.walk(root):
-        rel = os.path.relpath(dirpath, root)
-        if rel.count(os.sep) >= 3:
-            dirnames[:] = []
-            continue
-        dirnames[:] = [d for d in dirnames if not is_junk(d)]
-        for d in dirnames:
-            if CARD_DIR_PATTERN.match(d):
-                cards.append(os.path.join(dirpath, d))
+    """收集可比较的卡：TEXT step CSV 优先，缺失时回退 analysis.db StepTraceTime。
+
+    采集窗行（NULL step）使用 wN 标签参与窗口对齐比较；scope 标记随卡返回，
+    结论须按 step / capture_window 分别解释。单位 us（两来源同口径）。
+    """
+    from detect_prof import find_card_dirs
+    cards = find_card_dirs(root)
     out = []
     for cd in sorted(cards):
         apo = os.path.join(cd, 'ASCEND_PROFILER_OUTPUT')
-        st = read_csv_rows(os.path.join(apo, 'step_trace_time.csv'))
+        st = analysis_scope.load_steps(apo)
         if not st:
             continue
+        scope, step_source = analysis_scope.scope_of(st), st[0]['_source']
         rank = None
         for fn in sorted(os.listdir(cd)):
             m = re.match(r'^profiler_info_(\d+)\.json$', fn)
@@ -51,11 +51,18 @@ def find_cards(root):
                 info = read_json(os.path.join(cd, fn))
                 rank = int(info.get('rank_id', m.group(1)))
                 break
-        agg = {k: sum(to_f(r.get(k)) for r in st) / len(st) for k in
-               ('Computing', 'Communication(Not Overlapped)', 'Communication', 'Free', 'Stage')}
+        agg = {}
+        for key in ('Computing', 'Communication(Not Overlapped)', 'Communication', 'Free', 'Stage'):
+            values = [analysis_scope.number(row.get(key)) for row in st]
+            agg[key] = sum(values) / len(values) if all(v is not None for v in values) else None
+        # Selecting by communication ratio requires an actual numerator and denominator.
+        if agg['Stage'] is None or agg['Stage'] <= 0 or agg['Communication(Not Overlapped)'] is None:
+            continue
         out.append({'dir': cd, 'apo': apo, 'rank': rank if rank is not None else len(out),
                     'trace': agg, 'comm_ratio': agg['Communication(Not Overlapped)'] / agg['Stage']
-                    if agg['Stage'] else 0, 'steps': len(st)})
+                    if agg['Stage'] else 0, 'steps': len(st),
+                    'step_ids': sorted(str(r.get('Step')) for r in st),
+                    'scope': scope, 'step_source': step_source})
     out.sort(key=lambda c: c['rank'])
     return out
 
@@ -72,6 +79,8 @@ def compare_overall(base, comp):
     stage_b, stage_c = base['trace']['Stage'], comp['trace']['Stage']
     for label, key in dims:
         b_us, c_us = base['trace'][key], comp['trace'][key]
+        if b_us is None or c_us is None:
+            continue
         b, c = b_us / 1000, c_us / 1000
         ratio = (c - b) / b if b else None
         # 列序对齐 vendor overall_metrics.py: 0 维度名, 1-3 base duration(ms)/
@@ -128,6 +137,8 @@ def compare_op_statistic(base, comp):
 
 
 def compare_kernel(base, comp):
+    if not all(os.path.isfile(os.path.join(c['apo'], 'kernel_details.csv')) for c in (base, comp)):
+        return []  # Unavailable on either side; do not fabricate a one-sided regression.
     def agg(card):
         out = {}
         with open(os.path.join(card['apo'], 'kernel_details.csv'), encoding='utf-8',
@@ -135,10 +146,13 @@ def compare_kernel(base, comp):
             for r in csv.DictReader(f):
                 name = r.get('Name', '')
                 d = to_f(r.get('Duration(us)'))
-                e = out.setdefault(name, {'total': 0.0, 'count': 0, 'max': 0.0,
+                shape = r.get('Input Shapes') or r.get('Input Shape') or r.get('Shape') or ''
+                dtype = r.get('Input Data Types') or r.get('Input Data Type') or ''
+                key = (name, shape, dtype, r.get('Accelerator Core', ''))
+                e = out.setdefault(key, {'total': 0.0, 'count': 0, 'max': 0.0,
                                           'min': float('inf'),
                                           'core': r.get('Accelerator Core', ''),
-                                          'shape': ''})
+                                          'shape': shape, 'dtype': dtype})
                 e['total'] += d
                 e['count'] += 1
                 e['max'] = max(e['max'], d)
@@ -152,8 +166,9 @@ def compare_kernel(base, comp):
         return out
     a, b = agg(base), agg(comp)
     rows = []
-    for name in set(a) | set(b):
-        va, vb = a.get(name), b.get(name)
+    for key in sorted(set(a) | set(b)):
+        name = key[0]
+        va, vb = a.get(key), b.get(key)
         t_base = va['total'] if va else 0
         t_comp = vb['total'] if vb else 0
         diff = t_comp - t_base
@@ -182,6 +197,7 @@ def compare_kernel(base, comp):
                      'Diff Total(us)': round(diff, 1),
                      'Diff Total Ratio': round(ratio, 4) if ratio is not None else 'NEW',
                      'is_comm': bool(COMM_NAME_PATTERN.search(name))})
+        rows[-1]['Input Data Type'] = (va or vb)['dtype']
     rows.sort(key=lambda r: r['Diff Total(us)'], reverse=True)
     return rows
 
@@ -229,22 +245,38 @@ def compare_communication(base, comp):
     def agg(card):
         cj = read_json(os.path.join(card['apo'], 'communication.json'))
         out = {}
-        for step, groups in cj.items():
-            for gtype in ('collective', 'p2p'):
-                for op_key, info in (groups.get(gtype) or {}).items():
-                    name = op_key.split('@')[0]
-                    if name in AGG_ROWS:
-                        continue
-                    ti = info.get('Communication Time Info', {})
-                    e = out.setdefault(name, {'total': 0.0, 'wait': 0.0, 'transit': 0.0,
-                                              'count': 0, 'max': 0.0, 'min': float('inf')})
-                    ms = to_f(ti.get('Elapse Time(ms)'))
-                    e['total'] += ms
-                    e['max'] = max(e['max'], ms)
-                    e['min'] = min(e['min'], ms)
-                    e['wait'] += to_f(ti.get('Wait Time(ms)'))
-                    e['transit'] += to_f(ti.get('Transit Time(ms)'))
-                    e['count'] += 1
+        if cj:
+            for step, groups in cj.items():
+                for gtype in ('collective', 'p2p'):
+                    for op_key, info in (groups.get(gtype) or {}).items():
+                        name = op_key.split('@')[0]
+                        if name in AGG_ROWS:
+                            continue
+                        ti = info.get('Communication Time Info', {})
+                        e = out.setdefault(name, {'total': 0.0, 'wait': 0.0, 'transit': 0.0,
+                                                  'count': 0, 'max': 0.0, 'min': float('inf')})
+                        ms = to_f(ti.get('Elapse Time(ms)'))
+                        e['total'] += ms
+                        e['max'] = max(e['max'], ms)
+                        e['min'] = min(e['min'], ms)
+                        e['wait'] += to_f(ti.get('Wait Time(ms)'))
+                        e['transit'] += to_f(ti.get('Transit Time(ms)'))
+                        e['count'] += 1
+            return out
+        # communication.json 缺失：回退 analysis.db CommAnalyzerTime（同为 ms）
+        for r in prof_data.read_comm_time(card['apo']):
+            name = str(r['op'] or '').split('@')[0]
+            if not name or name in AGG_ROWS:
+                continue
+            e = out.setdefault(name, {'total': 0.0, 'wait': 0.0, 'transit': 0.0,
+                                      'count': 0, 'max': 0.0, 'min': float('inf')})
+            ms = to_f(r['elapse_ms'])
+            e['total'] += ms
+            e['max'] = max(e['max'], ms)
+            e['min'] = min(e['min'], ms)
+            e['wait'] += to_f(r['wait_ms'])
+            e['transit'] += to_f(r['transit_ms'])
+            e['count'] += 1
         for e in out.values():
             if e['min'] == float('inf'):
                 e['min'] = 0
@@ -358,7 +390,8 @@ def main():
     root = os.path.abspath(args.root)
     cards = find_cards(root)
     if len(cards) < 2:
-        print('ERROR: need >=2 cards with step_trace_time.csv', file=sys.stderr)
+        print('ERROR: need >=2 cards with step/window summary '
+              '(step_trace_time.csv or analysis.db StepTraceTime)', file=sys.stderr)
         sys.exit(1)
 
     by_ratio = sorted(cards, key=lambda c: (c['comm_ratio'], c['trace']['Communication(Not Overlapped)']))
@@ -380,6 +413,16 @@ def main():
 
     print(f"baseline(min comm): rank {min_card['rank']} comm_ratio={min_card['comm_ratio']:.4f}")
     print(f"compare(max comm):  rank {max_card['rank']} comm_ratio={max_card['comm_ratio']:.4f}")
+    if min_card['rank'] == max_card['rank']:
+        print('ERROR: baseline and compare must be different ranks', file=sys.stderr)
+        sys.exit(1)
+    if min_card['scope'] != max_card['scope']:
+        print('ERROR: compare requires matching analysis scopes; '
+              'whole-prof synthetic steps cannot be compared to training steps', file=sys.stderr)
+        sys.exit(1)
+    if min_card['step_ids'] != max_card['step_ids']:
+        print('ERROR: compare requires identical step windows; select/export aligned ranks', file=sys.stderr)
+        sys.exit(1)
 
     overall_rows, overall_insights = compare_overall(min_card, max_card)
     op_rows = compare_op_statistic(min_card, max_card)
@@ -422,11 +465,29 @@ def main():
         print('json-only: 跳过 xlsx 与 CSV mirrors（原生 compare 产物保持不变）')
 
     # middleware json (prof-compare style)
+    scopes = {min_card.get('scope'), max_card.get('scope')}
     middleware = {
+        'warnings': ([] if all(os.path.isfile(os.path.join(c['apo'], 'kernel_details.csv')) for c in (min_card, max_card))
+                     else ['kernel comparison unavailable: kernel_details.csv missing on one or both ranks'])
+                    + (['整个 prof 作为一个汇总 step（prof）；按各卡采集范围比较，'
+                        '标签相同不证明时窗、请求数量和负载一致；不能解释为单次迭代吞吐']
+                       if scopes == {'whole_prof'} else [])
+                    + (['比较口径为采集窗（capture window）：step 标识为 wN 派生标签，'
+                        '不是训练 step；结论不能按迭代吞吐解释']
+                       if scopes == {'capture_window'} else []),
+        'unavailable_dimensions': [key for key in ('Computing', 'Free', 'Communication')
+                                   if min_card['trace'].get(key) is None or max_card['trace'].get(key) is None],
+        'step_ids': min_card['step_ids'],
+        'step_scope': next(iter(scopes)) if len(scopes) == 1 else 'mixed',
+        'synthetic_step': scopes == {'whole_prof'},
         'base_card': {'rank': min_card['rank'], 'dir': min_card['dir'],
-                      'comm_ratio': round(min_card['comm_ratio'], 4)},
+                      'comm_ratio': round(min_card['comm_ratio'], 4),
+                      'scope': min_card.get('scope', 'step'),
+                      'step_source': min_card.get('step_source', 'step_trace_time.csv')},
         'compare_card': {'rank': max_card['rank'], 'dir': max_card['dir'],
-                         'comm_ratio': round(max_card['comm_ratio'], 4)},
+                         'comm_ratio': round(max_card['comm_ratio'], 4),
+                         'scope': max_card.get('scope', 'step'),
+                         'step_source': max_card.get('step_source', 'step_trace_time.csv')},
         'overall_metrics': overall_rows,
         'insights': insights,
     }

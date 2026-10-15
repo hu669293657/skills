@@ -141,8 +141,8 @@ Step 级别时间统计，每个 rank 每个 step 一行。
 | hccl_op_name | TEXT | HCCL 操作名 |
 | group_name | TEXT | 通信组名 |
 | start_timestamp | REAL | 开始时间戳 |
-| elapsed_time | REAL | 总耗时（μs） |
-| transit_time | REAL | 传输时间（μs） |
+| elapsed_time | REAL | 总耗时（ms；优先使用 ClusterBaseInfo.communication_time_unit 声明） |
+| transit_time | REAL | 传输时间（ms） |
 | wait_time | REAL | 等待时间（μs） |
 | synchronization_time | REAL | 同步时间（μs） |
 | idle_time | REAL | 空闲时间（μs） |

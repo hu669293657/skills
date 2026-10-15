@@ -89,12 +89,66 @@ def esc(v):
     return html.escape(str(v if v is not None else ''))
 
 
+def ratio_text(value):
+    return f'{value*100:+.1f}%' if isinstance(value, (int, float)) else str(value if value is not None else '—')
+
+
+def overall_direction(compare):
+    row = next((r for r in compare.get('overall_metrics', []) if r.get('Dimension') == 'E2E Time'), None)
+    if not row or not isinstance(row.get('Diff(ms)'), (int, float)):
+        return '整体快慢证据不足'
+    delta = row['Diff(ms)']
+    return f'E2E {"增加" if delta > 0 else "减少" if delta < 0 else "持平"} {abs(delta):.3f}ms（仅限对齐采集窗口）'
+
+
+HEADER_ZH = {
+    'step': '迭代', 'rank': '卡号', 'rank_id': '卡号', 'rankId': '卡号',
+    'rank_set': '参与卡号', 'op': '算子', 'name': '名称', 'module': '模块',
+    'group': '通信组', 'group_name': '通信组', 'pg_name': '并行组名',
+    'hccl_op_name': '通信算子', 'votes': '候选次数', 'vote_ratio': '候选占比',
+    'free(us)': '空闲时间(μs)', 'stage(us)': '阶段时间(μs)',
+    'computing(us)': '计算时间(μs)', 'communication(us)': '通信时间(μs)',
+    'overlapped(us)': '掩盖时间(μs)', 'not_overlapped(us)': '未掩盖通信时间(μs)',
+    'free_ratio': '空闲占比', 'free_vs_computing': '空闲与计算时间比',
+    'potential_gain(%)': '空闲占阶段时间(%，非收益承诺)',
+    'masking_ratio': '通信掩盖率', 'wait_ratio': '等待占比',
+    'bottleneck_type': '瓶颈类型', 'total_elapse(ms)': '累计通信时间(ms)',
+    'total_wait(ms)': '累计等待时间(ms)', 'total_transit(ms)': '累计传输时间(ms)',
+    'total_idle(ms)': '累计空转时间(ms)', 'count': '次数', 'total(ms)': '累计时间(ms)',
+    'op_kinds': '算子种类数', 'metric': '指标', 'value(MHz)': '频率(MHz)',
+    'api': '接口', 'transport_type': '传输类型', 'Input Shapes': '输入形状',
+    'Input Data Types': '输入数据类型', 'Input Formats': '输入格式',
+    'Output Shapes': '输出形状', 'Output Data Types': '输出数据类型',
+    'Output Formats': '输出格式', 'Accelerator Core': '加速器核',
+    'Block Dim': 'Block数量', 'Kernel': '核函数', '通信 Kernel': '通信核函数',
+    'Diff(ms)': '差值(ms)', 'Diff(us)': '差值(μs)', 'Diff Ratio': '变化比例',
+}
+
+
+def chinese_header(value):
+    value = str(value)
+    if value in HEADER_ZH:
+        return HEADER_ZH[value]
+    if value.lower() in HEADER_ZH:
+        return HEADER_ZH[value.lower()]
+    m = re.fullmatch(r'rank(\d+)_(total\(ms\)|count|elapse\(ms\)|wait\(ms\)|transit\(ms\))', value)
+    if m:
+        label = {'total(ms)': '累计时间(ms)', 'count': '次数',
+                 'elapse(ms)': '通信时间(ms)', 'wait(ms)': '等待时间(ms)',
+                 'transit(ms)': '传输时间(ms)'}[m[2]]
+        return f'{m[1]}卡{label}'
+    for old, new in (('Rank 数', '卡数'), ('Step', '迭代'), ('Rank', '卡号'),
+                     ('Stage', '阶段时间'), ('(us)', '(μs)')):
+        value = value.replace(old, new)
+    return value
+
+
 def html_table(header, rows, cls='tbl', max_rows=None):
     if not header:
         return ''
     shown = rows[:max_rows] if max_rows else rows
     out = [f'<div class="tw"><table class="{cls}"><thead><tr>']
-    out += [f'<th>{esc(h)}</th>' for h in header]
+    out += [f'<th>{esc(chinese_header(h))}</th>' for h in header]
     out.append('</tr></thead><tbody>')
     for r in shown:
         cells = []
@@ -132,9 +186,11 @@ def cluster_dir(mw):
         return d2
     det = read_json(os.path.join(mw, 'detect_result.json')) or {}
     co = det.get('cluster_output')
-    if isinstance(co, dict) and co.get('path') and os.path.isdir(co['path']):
-        return co['path']
-    root = det.get('input') or det.get('cluster_root')
+    if isinstance(co, dict):
+        for key in ('path', 'expected_path'):
+            if co.get(key) and os.path.isdir(co[key]):
+                return co[key]
+    root = det.get('cluster_root') or det.get('input')
     if root:
         d3 = os.path.join(root, 'cluster_analysis_output')
         if os.path.isdir(d3):
@@ -192,7 +248,48 @@ def steps_ranks(ts_rows):
 
 # ---------- section builders ----------
 
-def sec_conclusions(advisor, cluster_summary, compare, mode, num='2'):
+def sec_diagnosis(locator, num='2', title='瓶颈定位与解决'):
+    """The only promoted findings are concrete, ranked Insight locations."""
+    parts = [f'<section id="conclusions"><h2>{num}. {title}</h2>',
+             '<h3>瓶颈定位与解决</h3>' if title != '瓶颈定位与解决' else '',
+             f'<div class="card p-5"><p><b>{esc(locator.get("summary", "定位证据不足"))}</b></p></div>']
+    for key, title in (('communication', '通信'), ('compute', '计算'), ('free', 'Free（设备空闲）')):
+        findings = locator.get(key) or []
+        parts.append(f'<div class="card p-5 mt-4"><h3>{title}</h3>')
+        if findings:
+            rows = [[r.get('location', '定位信息不足'), r.get('issue', ''),
+                     r.get('impact', ''), r.get('cause', '')] for r in findings[:3]]
+            parts.append(html_table(['Insight 定位', '主要问题', '影响程度', '可能原因与处理方向'], rows))
+        else:
+            parts.append(f'<p>{esc(locator.get(key + "_reason") or "当前证据未定位可确认的异常；数据不足不代表没有瓶颈。")}</p>')
+        parts.append('</div>')
+    limits = locator.get('limitations') or []
+    if limits:
+        parts.append('<p class="text-slate-400 text-sm mt-3">结论范围：' +
+                     esc('；'.join(str(x) for x in limits)) + '</p>')
+    parts.append('</section>')
+    return ''.join(parts)
+
+
+def compact_diagnosis_html(locator):
+    """Offline entry point: three short evidence sections, no statistical appendix."""
+    css = '''body{margin:0;background:#f5f7fb;color:#152238;font:15px/1.7 "Microsoft YaHei",sans-serif}
+main{max-width:1440px;margin:auto;padding:32px}h1{font-size:25px;margin:0 0 8px}h2{font-size:21px}
+h3{font-size:18px;color:#215794}p{margin:10px 0}.card{background:white;border:1px solid #dce4ef;border-radius:12px;padding:20px;margin:16px 0}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{padding:12px;text-align:left;border-bottom:1px solid #e5eaf2;vertical-align:top;overflow-wrap:anywhere}
+th{background:#eef3f9}th:first-child{width:39%}th:nth-child(2){width:14%}th:nth-child(3){width:18%}
+.text-slate-400{color:#596a80}.text-sm{font-size:13px}@media(max-width:700px){main{padding:16px}table{min-width:900px}}'''
+    return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<title>Insight 关键瓶颈定位</title><style>' + css + '</style></head>'
+            '<body><main><h1>Insight 关键瓶颈定位</h1>'
+            '<p>按卡号、泳道、完整算子名和起始时间定位；每类只列最关键的点。</p>'
+            + sec_diagnosis(locator, '1') + '</main></body></html>')
+
+
+def sec_conclusions(advisor, cluster_summary, compare, mode, num='2', locator=None):
+    if locator is not None:
+        return sec_diagnosis(locator, num, title='结论与建议')
     items = []
     if advisor:
         a = advisor['data']
@@ -218,15 +315,15 @@ def sec_conclusions(advisor, cluster_summary, compare, mode, num='2'):
                                   f"平均空闲占比 {avg_free*100:.1f}%，"
                                   f"未掩盖通信占比 {avg_comm*100:.1f}%"))
             if slow:
-                items.append(('High', f"慢卡分析：rank {slow[0]['rank']} 在 "
+                items.append(('Medium', f"集合通信短耗时候选：rank {slow[0]['rank']} 在 "
                                       f"{slow[0]['vote_ratio']*100:.0f}% 的集合通信中"
-                                      f"耗时最短（最晚到达集合点），其他卡在通信中等待它"))
+                                      f"耗时最短；需到达时间戳交叉验证，不能直接认定慢卡"))
         bott = [r for r in cluster_summary.get('top_bottleneck_ops', [])
                 if str(r.get('bottleneck_type', '')).startswith('wait')]
         if bott:
             items.append(('Medium', f"存在 {len(bott)} 个等待型通信算子"
                                     f"（如 {bott[0]['op']}）：各卡到达时间差大，"
-                                    f"属于负载不均而非带宽问题"))
+                                    f"需结合到达时间与链路数据验证原因"))
     if compare:
         ins = compare.get('insights', {})
         ov = ins.get('overall', {})
@@ -236,7 +333,7 @@ def sec_conclusions(advisor, cluster_summary, compare, mode, num='2'):
             if dm:
                 dim = dm.get('dimension') or dm.get('Dimension')
                 items.append(('Medium', f"双卡比对：{dim} 劣化 {dm['diff_ratio']*100:+.1f}%"
-                                        f"（{dm['diff_ms']}ms），通信占比最大卡整体更慢"))
+                                        f"（{dm['diff_ms']}ms）；{overall_direction(compare)}"))
             if im:
                 dim = im.get('dimension') or im.get('Dimension')
                 items.append(('Low', f"双卡比对：{dim} 改善 {im['diff_ratio']*100:+.1f}%"))
@@ -245,7 +342,7 @@ def sec_conclusions(advisor, cluster_summary, compare, mode, num='2'):
             t = op_ins['top_degraded'][0]
             items.append(('Medium', f"比对劣化最大算子：{t['Op Type']}"
                                     f"（{t['Diff Duration(ms)']}ms，"
-                                    f"{t['Diff Ratio']*100:+.0f}%）"))
+                                    f"{ratio_text(t.get('Diff Ratio'))}）"))
     if not items:
         items.append(('Low', '无可用中间件结论，详见各章节明细。'))
     order = {'High': 0, 'Medium': 1, 'Low': 2}
@@ -263,6 +360,29 @@ def sec_conclusions(advisor, cluster_summary, compare, mode, num='2'):
 def sec_overview(detect, advisor, cluster_summary, mode, num='1'):
     cards = detect.get('cards', [])
     a = (advisor or {}).get('data') or {}
+    coverage = detect.get('coverage') or {}
+    world = coverage.get('expected_world_size')
+    observed = coverage.get('observed_ranks', [])
+    missing = coverage.get('missing_ranks', [])
+    coverage_html = ('<div class="card p-5 mt-4"><h3>数据覆盖与结论范围</h3>'
+                     f'<p>已提供 {len(observed)}/{world if world is not None else "未知"} rank；'
+                     f'唯一 step：{coverage.get("unique_step_count", "未知")}；'
+                     f'rank-step 样本：{coverage.get("rank_step_samples", "未知")}。'
+                     f'缺失 rank：{esc(missing if missing else "无或未知")}。'
+                     '结论仅限已提供的 rank 与采集窗口；不据此定位未提供 rank 的瓶颈。</p></div>') if coverage else ''
+    whole_ranks = coverage.get('synthetic_step_ranks', [])
+    if whole_ranks:
+        coverage_html += ('<div class="card p-5 mt-4"><h3>整段 prof 汇总口径</h3>'
+                          f'<p>rank {esc(whole_ranks)} 未提供分步标识，整个 prof 作为一个汇总 step（prof）。'
+                          '每卡只计 1 个分析 step；它不代表一次训练迭代或一个推理请求。'
+                          f'原始有效 step 标识数：{coverage.get("known_step_count", 0)}。'
+                          '比较以各卡提供的采集范围为准；时窗和负载等价需另行核验。</p></div>')
+    missing_metrics = {rank: value.get('missing_required') for rank, value in (a.get('per_rank') or {}).items()
+                       if value.get('missing_required')}
+    if missing_metrics:
+        coverage_html += ('<div class="card p-5 mt-4"><h3>部分摘要指标未知</h3>'
+                          f'<p>{esc(missing_metrics)}。相关占比不具备诊断依据；'
+                          '兼容表中的缺省数字不是实测值，请使用已有绝对时间与事件证据。</p></div>')
     kpis = []
     ts = (cluster_summary or {}).get('time_summary', [])
     if mode != 'single' and ts:
@@ -291,6 +411,13 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1'):
             ('空闲占比', f"{(a.get('free_ratio') or 0)*100:.1f}", '%',
              'text-amber-400', '💤'),
         ]
+    if missing_metrics:
+        keys = {key for values in missing_metrics.values() for key in values}
+        mapping = {'计算占比': 'Computing', '未掩盖通信占比': 'Communication(Not Overlapped)',
+                   '通信占比': 'Communication(Not Overlapped)', '空闲占比': 'Free'}
+        kpis = [(k[0], '未知', '', k[3], k[4])
+                if mapping.get(k[0]) in keys or ('Stage' in keys and k[0] in mapping)
+                else k for k in kpis]
     kpi_html = ''.join(
         f'<div class="card p-5 relative overflow-hidden"><div class="text-slate-400 text-sm mb-1">'
         f'{k[0]}</div><div class="text-3xl font-bold {k[3]}">{k[1]}'
@@ -298,7 +425,11 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1'):
         f'<div class="absolute -right-3 -bottom-4 opacity-10 text-6xl">{k[4]}</div></div>'
         for k in kpis)
     # 概览小结：自动解读 KPI 结构，给出最可能的问题方向
-    if mode != 'single' and ts:
+    if missing_metrics:
+        ov_summary = ('<div class="card p-5 mt-4"><h3>概览小结</h3>'
+                      '<p>部分摘要指标未知；不能确定时间结构或主导瓶颈。'
+                      '整个 prof 的范围和已有绝对事件证据仍可查看。</p></div>')
+    elif mode != 'single' and ts:
         c_pct = sum(t['computing_ratio'] for t in ts) / len(ts)
         m_pct = sum(t['comm_ratio'] for t in ts) / len(ts)
         f_pct = sum(t['free_ratio'] for t in ts) / len(ts)
@@ -338,6 +469,7 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1'):
     return f'''
 <section id="overview">
   <h2>{num}. 数据概览</h2>
+  {coverage_html}
   <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">{kpi_html}</div>
   {ov_summary}
   {cards_html}
@@ -407,10 +539,10 @@ def sec_cluster(cluster_summary, num='3'):
     slow_html = ''
     if slow:
         s0 = slow[0]
-        slow_html = (f'<div class="card p-5 mt-4"><h3>慢卡识别（slow_rank 投票）</h3>'
+        slow_html = (f'<div class="card p-5 mt-4"><h3>短通信耗时候选（需验证到达时间）</h3>'
                      f'<p>rank <b class="text-red-400">{s0["rank"]}</b> 在 '
-                     f'{s0["vote_ratio"]*100:.1f}% 的集合通信中耗时最短（最晚到达集合点），'
-                     f'其前序计算/下发最慢；其他卡在通信算子内等待它'
+                     f'{s0["vote_ratio"]*100:.1f}% 的集合通信中耗时最短。'
+                     f'这仅提供慢卡候选，需要结合各卡到达时间和下发/设备依赖验证'
                      f'（共 {s0["votes"]} 次投票）。</p>'
                      + html_table(['Rank', '投票数', '占比'],
                                   [[r['rank'], r['votes'], f"{r['vote_ratio']*100:.1f}%"]
@@ -464,12 +596,17 @@ def sec_advisor(advisor, mw, num='4'):
     if advisor['unified']:
         scope = '整体（全部卡）' if len(a.get('ranks', [])) > 1 else '单卡'
         ranks = ', '.join(str(r) for r in a.get('ranks', []))
+        step_text = (f'每卡 1 个整段汇总 step；{a.get("steps")} 个 rank-step 样本'
+                     if a.get('step_scope') == 'whole_prof' else f'{a.get("steps")} 个 rank-step 样本')
+        def ratio_text(key):
+            value = a.get(key)
+            return '未知' if value is None else f'{value * 100:.0f}%'
         inner = (f'<p>分析范围：<b>{esc(scope)}</b> · 覆盖 Rank：{esc(ranks)} · '
                  f'主导瓶颈：{badge(a.get("dominant", "—"), "warn")} · '
-                 f'Stage {a.get("stage_ms")} ms · {a.get("steps")} steps · '
-                 f'计算 {(a.get("computing_ratio") or 0)*100:.0f}% / '
-                 f'通信 {(a.get("communication_ratio") or 0)*100:.0f}% / '
-                 f'空闲 {(a.get("free_ratio") or 0)*100:.0f}% · '
+                 f'Stage {a.get("stage_ms")} ms · {step_text} · '
+                 f'计算 {ratio_text("computing_ratio")} / '
+                 f'通信 {ratio_text("communication_ratio")} / '
+                 f'空闲 {ratio_text("free_ratio")} · '
                  f'Top 算子 <code>{esc(a.get("top_op") or "—")}</code></p>')
     else:
         cards_html = []
@@ -605,7 +742,7 @@ def sec_compare(compare, num='6'):
     comp = compare.get('compare_card', {})
     ov = compare.get('overall_metrics', [])
     ins = compare.get('insights', {})
-    rows = [[r['Dimension'], r.get('Baseline(us)'), r.get('Compare(us)'),
+    rows = [[r['Dimension'], r.get('Baseline(ms)'), r.get('Compare(ms)'),
              r.get('Diff(ms)'),
              f"{r['Diff Ratio']*100:+.1f}%" if isinstance(r.get('Diff Ratio'),
                                                             (int, float))
@@ -614,9 +751,9 @@ def sec_compare(compare, num='6'):
     comp_pct = f"{comp.get('comm_ratio')*100:.1f}%" if comp.get('comm_ratio') is not None else '?'
     parts = [f'''<section id="compare"><h2>{num}. 双卡比对（通信占比最大 vs 最小）</h2>
 <div class="card p-5">
-<p>基线（通信占比最小）：rank <b>{base.get('rank')}</b>（{base_pct}）
-&nbsp;⇄&nbsp; 比对（通信占比最大）：rank <b>{comp.get('rank')}</b>（{comp_pct}）</p>
-<h3>总体指标</h3>{html_table(['维度', '基线(us)', '比对(us)', 'Diff(ms)', 'Diff Ratio'], rows)}</div>''']
+<p>基线：rank <b>{base.get('rank')}</b>（通信占比 {base_pct}）
+&nbsp;⇄&nbsp; 比对：rank <b>{comp.get('rank')}</b>（通信占比 {comp_pct}）</p>
+<h3>总体指标</h3>{html_table(['维度', '基线(ms)', '比对(ms)', 'Diff(ms)', 'Diff Ratio'], rows)}</div>''']
     op_ins = ins.get('operator', {})
     if op_ins.get('top_degraded'):
         rows = [[r['Op Type'], r['Baseline Total Time(ms)'], r['Compare Total Time(ms)'],
@@ -669,9 +806,9 @@ def sec_compare(compare, num='6'):
         top_bad = max(worse, key=lambda r: r['Diff Ratio'])
         pts.append(f"总体指标中 <b>{esc(str(top_bad['Dimension']))}</b> 劣化最明显"
                    f"（{top_bad['Diff Ratio']*100:+.1f}%），"
-                   f"rank {comp.get('rank')}（通信占比大卡）整体更慢")
+                   f"{overall_direction(compare)}")
     else:
-        pts.append('总体指标未见明显劣化维度，两卡水平接近')
+        pts.append(overall_direction(compare))
     if op_ins.get('top_degraded'):
         t0 = op_ins['top_degraded'][0]
         ratio = t0.get('Diff Ratio')
@@ -872,10 +1009,12 @@ def main():
     args = parser.parse_args()
 
     mw_dir = os.path.abspath(args.middleware)
+    workflow = read_json(os.path.join(mw_dir, 'workflow_status.json')) or {}
     detect = read_json(os.path.join(mw_dir, 'detect_result.json')) or {}
     cluster_summary = read_json(os.path.join(cluster_dir(mw_dir), 'recipes_summary.json'))
     compare = read_json(os.path.join(mw_dir, 'compare', 'compare_analysis_result.json'))
     advisor = load_advisor(mw_dir)
+    locator = read_json(os.path.join(mw_dir, 'insight_bottlenecks.json'))
     if args.mode in ('cluster', 'compare') and not cluster_summary:
         print('WARN: cluster/compare mode but recipes_summary.json missing; '
               'cluster sections will be thin')
@@ -887,7 +1026,7 @@ def main():
     if args.mode == 'cluster':
         sections = [
             sec_overview(detect, advisor, cluster_summary, 'cluster', '1'),
-            sec_conclusions(advisor, cluster_summary, compare, 'cluster', '2'),
+            sec_conclusions(advisor, cluster_summary, compare, 'cluster', '2', locator=locator),
             sec_cluster(cluster_summary, '3'),
             sec_advisor(advisor, mw_dir, '4'),
             sec_recipes(cluster_summary, mw_dir, '5'),
@@ -908,7 +1047,7 @@ def main():
     elif args.mode == 'compare':
         sections = [
             sec_overview(detect, advisor, cluster_summary, 'compare', '1'),
-            sec_conclusions(advisor, cluster_summary, compare, 'compare', '2'),
+            sec_conclusions(advisor, cluster_summary, compare, 'compare', '2', locator=locator),
             sec_advisor(advisor, mw_dir, '3'),
             sec_compare(compare, '4'),
             sec_swimlane('compare', mw_dir, '5'),
@@ -926,7 +1065,7 @@ def main():
     else:
         sections = [
             sec_overview(detect, advisor, None, 'single', '1'),
-            sec_conclusions(advisor, None, None, 'single', '2'),
+            sec_conclusions(advisor, None, None, 'single', '2', locator=locator),
             sec_advisor(advisor, mw_dir, '3'),
             sec_swimlane('single', mw_dir, '4'),
             sec_appendix(mw_dir, '5'),
@@ -949,10 +1088,19 @@ def main():
         exec_mode=exec_mode, nav=nav, css=PAGE_CSS, spy_js=PAGE_JS,
         body='\n'.join(body_parts))
 
+    if workflow.get('status') in ('partial', 'failed'):
+        banner = ('<section class="card p-5"><h2>分析未完整完成</h2>'
+                  f'<p>{esc("; ".join(workflow.get("errors", [])))}</p>'
+                  '<p>缺失章节不代表健康；请查看 workflow_status.json。</p></section>')
+        html_out = html_out.replace('<section', banner + '<section', 1)
     out = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, 'w', encoding='utf-8') as f:
         f.write(html_out)
+    if locator is not None:
+        compact = os.path.join(out_dir, 'insight_bottlenecks.html')
+        with open(compact, 'w', encoding='utf-8') as f:
+            f.write(compact_diagnosis_html(locator))
     print(f'report written: {out} ({len(html_out)/1024:.1f} KB)')
 
 

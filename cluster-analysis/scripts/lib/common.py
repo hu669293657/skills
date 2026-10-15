@@ -11,12 +11,14 @@ read_csv_rows x4、iter_csv x2、us_to_ms/us_ms 同逻辑异名 x2）收敛于�
 import csv
 import json
 import os
+import math
 
 
 def to_f(v, default=0.0):
     """字符串/数值转 float，失败返回 default。"""
     try:
-        return float(str(v).strip())
+        number = float(str(v).strip())
+        return number if math.isfinite(number) else default
     except (TypeError, ValueError):
         return default
 
@@ -30,7 +32,7 @@ def read_json(path, default=None):
     if not os.path.isfile(path):
         return default
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8-sig') as f:
             return json.load(f)
     except Exception:
         return default
@@ -40,7 +42,7 @@ def read_csv_rows(path):
     """读取 CSV 为 list[dict]；文件缺失返回 []。"""
     if not os.path.isfile(path):
         return []
-    with open(path, encoding='utf-8', errors='replace') as f:
+    with open(path, encoding='utf-8-sig', errors='replace') as f:
         return list(csv.DictReader(f))
 
 
@@ -48,7 +50,7 @@ def iter_csv(path):
     """流式迭代 CSV 行（大文件友好）；文件缺失时不产出任何行。"""
     if not os.path.isfile(path):
         return
-    with open(path, encoding='utf-8', errors='replace') as f:
+    with open(path, encoding='utf-8-sig', errors='replace') as f:
         for row in csv.DictReader(f):
             yield row
 

@@ -27,13 +27,33 @@ Complete schema for dump JSON files produced by `msprechecker_dump.py` or `mspre
 }
 ```
 
-Only `_meta`, `system`, `hardware`, `npu`, `ascend`, `env`, `runtime`, `network` are always present (Linux-specific sub-fields degrade gracefully on unsupported platforms). Other sections appear only when the corresponding CLI argument was provided.
+Core collectors are always attempted on Linux; their data sections can be absent on failure. Use `_meta.collection` to distinguish success, partial, failed, and skipped. Older dumps without this metadata have unknown coverage; absence alone does not establish that a collector was not requested.
 
 ---
 
 ## _meta
 
-Collection metadata. Exclude from comparison, include in report header.
+Collection metadata. Exclude the exact `_meta` section from comparison, include relevant fields in the report header.
+
+Version 1.1 adds (existing data section names remain unchanged):
+
+- `schema_version`: `"1.1"`.
+- `status`: `success` or `partial`; any failed/partial collector makes the dump partial.
+- `collection`: section name to `{status, errors, command_failures, reason?}`. `success` means the collector completed without a recorded failure, not that every possible field was observed or that the host is healthy. Inspect field evidence before diagnosing.
+- Status `skipped` means an optional input was not supplied; `failed` means a requested operation failed; `partial` means some data remains usable. Errors inside structured sub-results and external command failures are retained.
+- `collection.env`: additionally records `scope` (`all`/`filtered`), `included_keys`, and `critical_keys_in_scope`. Only the explicitly covered keys can be interpreted as unset when absent and collection succeeded.
+- `collection.npu/link/vnic/tls/hccl.device_ids`: actual visible device IDs, sorted. For `link/vnic/tls` lists, index maps through this array, not directly to the device number.
+- `redaction`: describes sharing safeguards and omitted process arguments. Sensitive fields, credential URLs, common credential assignments and known secret copies are masked. This is not a guarantee that arbitrary raw text is safe to share.
+- NPU per-device `queries`: return code/status per subcommand. Ascend components add `source`, `collection_status` (`success`/`unavailable`/`failed`), and optional `reason`/`error`.
+
+Compatibility and report rules:
+
+- Old dump data remains readable. A component `{}` or a missing section means insufficient evidence unless a collection status explains it.
+- New comparator paths use typed brackets: `$["ascend"]["driver"]["version"]`; literal dict keys are JSON-escaped strings and list indices are integers. Empty containers retain their JSON types; missing is distinct from null.
+- Comparison outputs list only loaded inputs in `files`/`file_paths`; `requested_files`, `skipped_files`, and `status` expose incomplete coverage. Colliding basenames receive unique display labels.
+- Sensitive changes can retain a difference count while values are masked; identical masked values cannot establish equality of the original credentials.
+- Similarity measures field agreement, not compatibility, health, or the safety of critical differences.
+
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -61,8 +81,8 @@ System information collected from `lscpu`, `/proc/cpuinfo`, `platform.uname()`, 
 | `version` | string | Kernel version string | — |
 | `machine` | string | Architecture (`aarch64` / `x86_64`) | — |
 | `processor` | string | CPU architecture | — |
-| `transparent_hugepage` | string | THP status | `[always]` |
-| `page_size` | int | Memory page size in bytes | `4096` |
+| `transparent_hugepage` | string | THP status | Workload-specific; value is `always`, `madvise`, or `never` |
+| `page_size` | int | Memory page size in bytes | Architecture/software-specific |
 | `overcommit_memory` | string | Memory overcommit policy | `0` |
 
 ---
@@ -95,15 +115,15 @@ Ascend component versions. Each component is a dict with version/timestamp/commi
 | `mindie` | `$MINDIE_LLM_HOME_PATH/../version.info` | `ascend-mindie` | Default: `.../mindie/latest/mindie-llm` |
 | `atb-models` | `$ATB_SPEED_HOME_PATH/version.info` | `atb-models version` | Default: `/usr/local/Ascend/atb-models` |
 
-An empty `{}` for a component means the version.info file was not found.
+An empty `{}` in older dumps means no version evidence was obtained. It does not establish that the component is uninstalled. Version 1.1 records the attempted path and collection status.
 
 ---
 
 ## env
 
-All environment variables (`dict(os.environ)`) or filtered Ascend-related subset.
+All environment variables or the filtered Ascend-related subset, with sensitive values masked. This is the collector process environment, not necessarily the service environment. Optional tuning variables being unset is not by itself a failure.
 
-When `--filter` is used, only variables containing these substrings are kept:
+When `--filter` is used, the critical variables listed below are retained when set, in addition to names containing these substrings:
 `ASCEND`, `MINDIE`, `ATB_`, `HCCL_`, `MIES`, `RANKTABLE`, `GE_`, `TORCH`, `ACL_`, `NPU_`, `LCCL_`, `LCAL_`, `OPS`, `INF_`
 
 ### Critical Environment Variables
@@ -158,8 +178,8 @@ Key fields to analyze:
 
 Key fields:
 - `model_type` — model architecture type
-- `torch_dtype` — should be `float16`
-- `transformers_version` — must not exceed installed version
+- `torch_dtype` — validate against the actual model and runtime support; do not assume only `float16` is valid
+- `transformers_version` — metadata to check against actual compatibility requirements, not a universal installed-version bound
 - `hidden_size`, `num_attention_heads`, `num_hidden_layers`
 
 ---
@@ -191,7 +211,7 @@ Ping results for each host in the rank table.
 }
 ```
 
-Good: contains `0% packet loss` and `3 received`
+Parse the complete loss percentage; substring matching `0% packet loss` also matches `100% packet loss`. Check command/collection errors first.
 Bad: contains `100% packet loss`, `ping failed`, or error message
 
 ---
@@ -227,7 +247,7 @@ Link status for each NPU device (output of `hccn_tool -i N -link -g`).
 ]
 ```
 
-Array index = device ID. Good: all entries contain `link status: UP`.
+For version 1.1, array position maps through `_meta.collection.link.device_ids`; device IDs can be sparse. Older dumps used a contiguous-ID assumption. Check collection errors before interpreting link output.
 
 ---
 
@@ -273,7 +293,7 @@ Hardware resources: CPU topology/runtime state, memory, kernel tunables, clock, 
 | `disk` | dict | `filesystems` (df) / `block_devices` (lsblk) / `bios_bmc` (dmidecode) / raw | weight disk free > model size |
 | `pcie_numa` | dict | `npu_pcie_devices` / `npu_numa_map` / `nic_pcie` / `numactl_raw` / `lspci_npu_raw` | NPU/NIC NUMA affinity consistent |
 
-Kernel parameter expectations:
+Illustrative tuning values, not universal pass/fail requirements. Apply only with workload-specific deployment evidence:
 - `vm.swappiness` = `0`~`10` for inference/training hosts
 - `kernel.numa_balancing` = `0` (avoid NUMA migration jitter)
 - `ulimit nofile` >= `655350`, `memlock` = `unlimited`

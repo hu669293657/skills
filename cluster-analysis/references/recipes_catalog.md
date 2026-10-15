@@ -7,7 +7,7 @@
 | 拆解对比类 | module_statistic | 自动解析 PyTorch 模型层级结构，精准定位瓶颈 | module 层级耗时 CSV |
 | 拆解对比类 | calibrate_npu_gpu | NPU/GPU 性能数据对比校准与瓶颈分析 | 校准对比 CSV |
 | 计算类 | compute_op_sum | device 侧计算类算子汇总 | 算子统计 CSV |
-| 计算类 | freq_analysis | 识别 AI Core 空闲（800MHz）或异常频率 | 频率统计 CSV |
+| 计算类 | freq_analysis | 使用 AICORE_FREQ 实测频率；不以跨核累计 cycles/平均核时间推算 | 频率统计与逐卡样本 CSV |
 | 计算类 | ep_load_balance | MoE 负载信息汇总分析 | 专家负载 CSV |
 | 计算类 | computational_op_masking | 算子耗时掩盖计算，分析线性度 | 掩盖分析 CSV |
 | 计算类 | operator_mfu | 基于 FLOPs 与 kernel 耗时计算 kernel/module 级 MFU | MFU CSV |
@@ -33,3 +33,5 @@
 2. 输出统一落在 `<root>/cluster_analysis_output/recipes/<recipe_name>/`。
 3. 汇总 `recipes_summary.md/json` 必须覆盖全部 24 项（23 正式 + 1 扩展）与五大类归类，供最终报告"进阶分析"分区集中展示。
 4. 单位纪律（db μs / text-CSV μs / text-JSON ms；CSV 列名带单位；报告层统一 ms）统一以 SKILL.md「执行规则」为准，本文件不再重复。
+
+通信等待的精确实例去重与下发归因、计算关键热点、Free 具体区间由 P6a Insight 定位器补充；聚合 recipe 不等同于已经找到根因，输出口径见 references/insight_localization.md。

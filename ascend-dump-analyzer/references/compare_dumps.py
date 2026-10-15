@@ -24,10 +24,89 @@ import os
 import sys
 import json
 import argparse
+import re
+from html import escape
 from collections import defaultdict, OrderedDict
 from datetime import datetime
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+
+# Keep this helper identical in both standalone scripts; no deployment dependency.
+SENSITIVE_KEY = re.compile(
+    r'password|passwd|(?:^|[_\-])pwd(?:$|[_\-])|token$|secret$|'
+    r'(?:^|[_\-])(?:token|secret)(?:$|[_\-])|'
+    r'api[_\-]?key|access[_\-]?key|credential|private[_\-]?key|authorization',
+    re.IGNORECASE,
+)
+MASKED_VALUE = "***MASKED***"
+
+
+def sensitive_values(data):
+    """Collect known credentials so copies in raw text are masked too."""
+    values = set()
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if SENSITIVE_KEY.search(str(key)) and isinstance(value, str) and value:
+                values.add(value)
+            values.update(sensitive_values(value))
+    elif isinstance(data, (list, tuple)):
+        for value in data:
+            values.update(sensitive_values(value))
+    return values
+
+
+def redact_sensitive(data, secrets=None):
+    """Mask sensitive fields, known secret copies, assignments, and URL credentials.
+
+    This is a sharing safeguard, not proof that arbitrary raw text is secret-free.
+    Process arguments are deliberately omitted because positional secrets cannot
+    be identified reliably. Keys and evidence paths remain available.
+    """
+    secrets = sensitive_values(data) if secrets is None else secrets
+
+    def scrub(value):
+        if isinstance(value, dict):
+            sensitive_path = SENSITIVE_KEY.search(str(value.get('path', '')))
+            result = {}
+            for key, item in value.items():
+                if key == 'values' and sensitive_path and isinstance(item, dict):
+                    result[key] = {label: MASKED_VALUE for label in item}
+                elif str(key).startswith('$[') and SENSITIVE_KEY.search(str(key)) and isinstance(item, dict):
+                    result[key] = {label: MASKED_VALUE for label in item}
+                elif str(key) in ('cmd', 'cmdline', 'ps_raw'):
+                    result[key] = MASKED_VALUE + ' (process arguments omitted)'
+                elif SENSITIVE_KEY.search(str(key)):
+                    result[key] = MASKED_VALUE
+                else:
+                    result[key] = scrub(item)
+            return result
+        if isinstance(value, (list, tuple)):
+            result = []
+            hide_next = False
+            for item in value:
+                result.append(MASKED_VALUE if hide_next else scrub(item))
+                hide_next = (isinstance(item, str) and item.startswith('-')
+                             and '=' not in item and bool(SENSITIVE_KEY.search(item)))
+            return result
+        if not isinstance(value, str):
+            return value
+        # Very short values are masked by field/assignment, never global substring:
+        # TOKEN=x must not rewrite every letter x in evidence paths and timestamps.
+        for secret in sorted(secrets, key=len, reverse=True):
+            if len(secret) >= 4 and secret != MASKED_VALUE:
+                value = value.replace(secret, MASKED_VALUE)
+        value = re.sub(r'(?i)(https?://)[^/\s@]+@', r'\1***MASKED***@', value)
+        value = re.sub(r'(?i)(\bbearer\s+)[^\s,;"\']+', r'\1***MASKED***', value)
+        value = re.sub(
+            r'(?i)((?:--)?[\w-]*(?:password|passwd|token|secret|api[_-]?key|access[_-]?key)'
+            r'[\w-]*["\']?\s*(?:=|:|\s)\s*)(?:"[^"\n]*"|\'[^\'\n]*\'|[^\s,;&]+)',
+            r'\1***MASKED***', value,
+        )
+        return value
+
+    return scrub(data)
+
+
 
 # ============================================================================
 # 颜色
@@ -51,29 +130,79 @@ def pwarn(msg):
 # 扁平化
 # ============================================================================
 
-def flatten(data, prefix="", sep="."):
+MISSING = object()
+
+
+def top_section(path):
+    """Decode the first typed bracket segment without splitting literal keys."""
+    if path == '$':
+        return ''
+    return str(json.JSONDecoder().raw_decode(path[2:])[0])
+
+
+def path_keys(path):
+    """Decode typed path segments, keeping array indices distinct from field names."""
+    keys = []
+    index = 1
+    decoder = json.JSONDecoder()
+    while index < len(path):
+        if path[index] != '[':
+            raise ValueError('invalid typed path')
+        key, end = decoder.raw_decode(path, index + 1)
+        if end >= len(path) or path[end] != ']':
+            raise ValueError('invalid typed path')
+        if isinstance(key, str):
+            keys.append(key)
+        index = end + 1
+    return keys
+
+
+def redact_comparison(result, secrets=None):
+    """Redact payload values without treating file IDs or statistic keys as data fields."""
+    safe = dict(result)
+    safe['meta'] = {label: redact_sensitive(meta, secrets) for label, meta in result['meta'].items()}
+    safe['skipped_files'] = redact_sensitive(result.get('skipped_files', []), secrets)
+
+    def values_for(path, values):
+        keys = path_keys(path)
+        private = any(SENSITIVE_KEY.search(key) for key in keys)
+        process_args = any(key in ('cmd', 'cmdline', 'ps_raw') for key in keys)
+        return {label: (value if value is MISSING else
+                        MASKED_VALUE if private or process_args else
+                        redact_sensitive(value, secrets)) for label, value in values.items()}
+
+    safe['all_diffs'] = {path: values_for(path, values) for path, values in result.get('all_diffs', {}).items()}
+    safe['diffs'] = {}
+    for category, group in result['diffs'].items():
+        safe['diffs'][category] = {}
+        for kind, items in group.items():
+            safe['diffs'][category][kind] = [dict(item, values=values_for(item['path'], item['values'])) for item in items]
+    return safe
+
+
+def flatten(data, prefix="$", sep=None):
     """
     递归扁平化任意 JSON 结构为 {path: value} 字典。
-    dict 用 .key，list 用 [index]。
+    dict 用 ["JSON escaped key"]，list 用 [index]，根为 $。
     叶子节点（str/int/bool/None）直接作为值。
-    空字典 {} 和空列表 [] 保留为特殊标记。
+    空字典 {} 和空列表 [] 保留原类型，不与字符串混淆。
     """
     result = {}
 
     if isinstance(data, dict):
         if not data:
-            result[prefix] = "{}"
+            result[prefix] = {}
         else:
             for k, v in data.items():
-                path = f"{prefix}{sep}{k}" if prefix else k
-                result.update(flatten(v, path, sep))
+                path = f"{prefix}[{json.dumps(k, ensure_ascii=False)}]"
+                result.update(flatten(v, path))
     elif isinstance(data, list):
         if not data:
-            result[prefix] = "[]"
+            result[prefix] = []
         else:
             for i, v in enumerate(data):
                 path = f"{prefix}[{i}]"
-                result.update(flatten(v, path, sep))
+                result.update(flatten(v, path))
     else:
         result[prefix] = data
 
@@ -82,6 +211,8 @@ def flatten(data, prefix="", sep="."):
 
 def truncate(value, max_len=120):
     """截断超长值用于显示"""
+    if value is MISSING:
+        return "<missing>"
     if value is None:
         return "null"
     s = str(value)
@@ -92,11 +223,9 @@ def truncate(value, max_len=120):
 
 def value_repr(value):
     """获取值的可比较表示"""
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, sort_keys=True)
-    return str(value)
+    if value is MISSING:
+        return ('missing', '')
+    return (type(value).__name__, json.dumps(value, sort_keys=True, ensure_ascii=False))
 
 
 # ============================================================================
@@ -135,26 +264,45 @@ class DumpComparator:
         self.flat_dumps = {}
         self.sections_per_file = {}
         self.meta_per_file = {}
+        self.loaded_paths = []
+        self.skipped_files = []
 
     def load_files(self):
         """加载所有 JSON 文件，容错处理"""
-        for path in self.file_paths:
-            label = os.path.basename(path)
+        self.dumps.clear()
+        self.flat_dumps.clear()
+        self.sections_per_file.clear()
+        self.meta_per_file.clear()
+        self.loaded_paths = []
+        self.skipped_files = []
+        used_labels = set()
+        basenames = [os.path.basename(p) for p in self.file_paths]
+        for index, path in enumerate(self.file_paths):
+            base = os.path.basename(path)
+            label = base if basenames.count(base) == 1 else f"[{index + 1}] {base}"
+            while label in used_labels:
+                label = '[' + label + ']'
+            used_labels.add(label)
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     raw = f.read()
                 # 尝试修复常见的 JSON 格式问题（markdown 转义等）
                 data = self._try_parse_json(raw)
                 if data is None:
-                    pwarn(f"文件 {label} JSON 解析失败，跳过")
-                    continue
+                    raise ValueError('JSON 解析失败')
+                if not isinstance(data, dict):
+                    raise ValueError('dump 顶层必须为 JSON object')
+                flat = flatten(data)
                 self.dumps[label] = data
-                self.flat_dumps[label] = flatten(data)
+                self.flat_dumps[label] = flat
                 self.sections_per_file[label] = set(data.keys())
-                self.meta_per_file[label] = data.get("_meta", {})
+                meta = data.get("_meta", {})
+                self.meta_per_file[label] = meta if isinstance(meta, dict) else {}
+                self.loaded_paths.append(path)
                 pinfo(f"已加载 {label}: {len(self.flat_dumps[label])} 个路径")
             except Exception as e:
                 pwarn(f"加载 {label} 失败: {e}")
+                self.skipped_files.append({'path': path, 'label': label, 'error': str(e)})
 
         if len(self.dumps) < 2:
             pwarn("需要至少 2 个有效文件进行比对")
@@ -191,7 +339,7 @@ class DumpComparator:
             all_paths.update(flat.keys())
 
         # 排除 _meta 路径
-        compare_paths = {p for p in all_paths if not p.startswith("_meta")}
+        compare_paths = {p for p in all_paths if top_section(p) != "_meta"}
 
         # 收集每个路径在所有文件中的值
         path_values = {}
@@ -201,7 +349,7 @@ class DumpComparator:
                 if path in flat:
                     values[label] = flat[path]
                 else:
-                    values[label] = None  # 标记为缺失
+                    values[label] = MISSING
             path_values[path] = values
 
         # 过滤出有差异的路径
@@ -225,9 +373,12 @@ class DumpComparator:
         total = len(compare_paths)
         similarity = round(identical_count / total * 100, 1) if total > 0 else 0
 
-        return {
-            "files": self.file_labels,
-            "file_paths": self.file_paths,
+        result = {
+            "status": "partial" if self.skipped_files else "success",
+            "requested_files": self.file_paths,
+            "skipped_files": self.skipped_files,
+            "files": list(self.dumps),
+            "file_paths": self.loaded_paths,
             "meta": self.meta_per_file,
             "total_paths": total,
             "identical_paths": identical_count,
@@ -239,6 +390,8 @@ class DumpComparator:
             "all_diffs": diffs,
         }
 
+        return redact_comparison(result, sensitive_values(self.dumps))
+
     def _categorize_diffs(self, diffs):
         """将差异按 section 和子类别分类"""
         categorized = defaultdict(lambda: {
@@ -247,12 +400,12 @@ class DumpComparator:
         })
 
         for path, values in diffs.items():
-            top_section = path.split(".")[0].split("[")[0]
-            category = self.SECTION_CATEGORIES.get(top_section, "other")
+            section = top_section(path)
+            category = self.SECTION_CATEGORIES.get(section, "other")
 
             # 判断是修改还是仅在一侧
-            present_labels = [l for l, v in values.items() if v is not None]
-            absent_labels = [l for l, v in values.items() if v is None]
+            present_labels = [l for l, v in values.items() if v is not MISSING]
+            absent_labels = [l for l, v in values.items() if v is MISSING]
 
             if absent_labels:
                 # 某些文件中缺失
@@ -260,7 +413,7 @@ class DumpComparator:
                     "path": path,
                     "present_in": present_labels,
                     "absent_in": absent_labels,
-                    "values": {l: v for l, v in values.items() if v is not None},
+                    "values": {l: v for l, v in values.items() if v is not MISSING},
                 })
             else:
                 # 所有文件都有但值不同
@@ -276,7 +429,7 @@ class DumpComparator:
         section_stats = defaultdict(lambda: {"total": 0, "identical": 0, "diff": 0})
 
         for path in all_paths:
-            top = path.split(".")[0].split("[")[0]
+            top = top_section(path)
             section_stats[top]["total"] += 1
             reprs = {l: value_repr(v) for l, v in path_values[path].items()}
             if len(set(reprs.values())) == 1:
@@ -293,7 +446,10 @@ class DumpComparator:
 
 def output_text(result):
     """输出终端文本格式报告"""
+    result = redact_comparison(result)
     labels = result["files"]
+    if result.get("skipped_files"):
+        print("PARTIAL: skipped inputs:", redact_sensitive(result["skipped_files"]))
     print(f"\n{C.BOLD}{'='*60}{C.RST}")
     print(f"{C.BOLD}  Ascend Dump 对比报告{C.RST}")
     print(f"{C.BOLD}{'='*60}{C.RST}\n")
@@ -362,7 +518,11 @@ def output_text(result):
 def output_json(result, output_path):
     """输出 JSON 格式"""
     # 序列化差异结果
+    result = redact_comparison(result)
     serializable = {
+        "status": result.get("status", "success"),
+        "requested_files": result.get("requested_files", result["file_paths"]),
+        "skipped_files": result.get("skipped_files", []),
         "files": result["files"],
         "file_paths": result["file_paths"],
         "meta": result["meta"],
@@ -407,6 +567,7 @@ def output_json(result, output_path):
 
 def output_html(result, output_path):
     """生成自包含 HTML 报告"""
+    result = redact_comparison(result)
     labels = result["files"]
     n_files = len(labels)
 
@@ -448,12 +609,12 @@ def output_html(result, output_path):
             cells = ""
             for label in labels:
                 v = vals.get(label)
-                if v is None:
+                if v is MISSING:
                     cells += f'<td><span class="val-missing">—</span></td>'
                 else:
-                    tv = truncate(v, 80).replace('<', '&lt;').replace('>', '&gt;')
+                    tv = escape(truncate(v, 80))
                     cells += f'<td><code class="val-diff">{tv}</code></td>'
-            rows.append(f'<tr class="diff-modified"><td><code>{path}</code></td>{cells}</tr>')
+            rows.append(f'<tr class="diff-modified"><td><code>{escape(path)}</code></td>{cells}</tr>')
 
         # 仅在一侧
         for item in cat_data["only_in"]:
@@ -462,13 +623,13 @@ def output_html(result, output_path):
             for label in labels:
                 if label in item["values"]:
                     v = item["values"][label]
-                    tv = truncate(v, 80).replace('<', '&lt;').replace('>', '&gt;')
+                    tv = escape(truncate(v, 80))
                     cells += f'<td><code class="val-present">{tv}</code></td>'
                 else:
                     cells += f'<td><span class="val-missing">— (缺失)</span></td>'
-            rows.append(f'<tr class="diff-only"><td><code>{path}</code></td>{cells}</tr>')
+            rows.append(f'<tr class="diff-only"><td><code>{escape(path)}</code></td>{cells}</tr>')
 
-        header = f'<tr><th>路径</th>' + ''.join(f'<th>{l}</th>' for l in labels) + '</tr>'
+        header = f'<tr><th>路径</th>' + ''.join(f'<th>{escape(l)}</th>' for l in labels) + '</tr>'
         return f'<table><thead>{header}</thead><tbody>{"".join(rows)}</tbody></table>'
 
     # Section 统计行
@@ -479,7 +640,7 @@ def output_html(result, output_path):
         status_text = "一致" if stats["diff"] == 0 else f"{stats['diff']} 差异"
         in_all = all(section in result["sections"].get(l, set()) for l in labels)
         presence = "全部存在" if in_all else "部分缺失"
-        section_rows += f'<tr><td><code>{section}</code></td><td>{stats["total"]}</td><td>{stats["identical"]}</td><td style="color:{status_color};font-weight:600;">{status_text}</td><td>{presence}</td></tr>'
+        section_rows += f'<tr><td><code>{escape(section)}</code></td><td>{stats["total"]}</td><td>{stats["identical"]}</td><td style="color:{status_color};font-weight:600;">{status_text}</td><td>{presence}</td></tr>'
 
     # 文件卡片
     file_cards = ""
@@ -488,8 +649,8 @@ def output_html(result, output_path):
         file_cards += f'''
         <div class="file-card">
           <div class="f-label">文件 {letter}</div>
-          <div class="f-host">{fi['host']}</div>
-          <div class="f-meta">📅 {fi['timestamp']}<br>🐍 Python {fi['python']}<br>📄 {fi['label']}</div>
+          <div class="f-host">{escape(str(fi['host']))}</div>
+          <div class="f-meta">📅 {escape(str(fi['timestamp']))}<br>🐍 Python {escape(str(fi['python']))}<br>📄 {escape(str(fi['label']))}</div>
         </div>'''
         if i < n_files - 1:
             file_cards += '<div class="vs-badge">VS</div>'
@@ -536,13 +697,17 @@ def output_html(result, output_path):
 
     # 整体评估
     if total_diffs == 0:
-        assessment = '<div class="banner ok">✅ <div><strong>完全一致：</strong>所有采集项完全相同。</div></div>'
+        assessment = '<div class="banner ok">✅ <div><strong>完全一致：</strong>当前有效输入中的可比较字段一致；不代表环境健康或脱敏值相同。</div></div>'
     elif similarity >= 80:
-        assessment = f'<div class="banner ok">✅ <div><strong>{sim_text}：</strong>相似度 {similarity}%，{total_diffs} 项差异，主要差异不影响核心功能。</div></div>'
+        assessment = f'<div class="banner ok">✅ <div><strong>{sim_text}：</strong>相似度 {similarity}%，{total_diffs} 项差异，相似度仅表示字段一致比例，关键差异的影响仍需单独核验。</div></div>'
     elif similarity >= 50:
         assessment = f'<div class="banner warn">⚠️ <div><strong>{sim_text}：</strong>相似度 {similarity}%，{total_diffs} 项差异，需关注关键配置差异。</div></div>'
     else:
-        assessment = f'<div class="banner fail">🔴 <div><strong>{sim_text}：</strong>相似度仅 {similarity}%，{total_diffs} 项差异，环境差异巨大，可能是不同类型环境。</div></div>'
+        assessment = f'<div class="banner fail">🔴 <div><strong>{sim_text}：</strong>相似度仅 {similarity}%，{total_diffs} 项差异，需结合采集范围与具体字段判断影响。</div></div>'
+
+    if result.get('skipped_files'):
+        skipped = escape(json.dumps(result['skipped_files'], ensure_ascii=False))
+        assessment = '<div class="banner warn">部分输入未参与比对：' + skipped + '</div>' + assessment
 
     html = f'''<!DOCTYPE html>
 <html lang="zh-CN">

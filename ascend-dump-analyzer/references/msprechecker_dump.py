@@ -31,14 +31,91 @@ import socket
 import platform
 import subprocess
 import ipaddress
-import itertools
+import threading
 import argparse
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+
+# Keep this helper identical in both standalone scripts; no deployment dependency.
+SENSITIVE_KEY = re.compile(
+    r'password|passwd|(?:^|[_\-])pwd(?:$|[_\-])|token$|secret$|'
+    r'(?:^|[_\-])(?:token|secret)(?:$|[_\-])|'
+    r'api[_\-]?key|access[_\-]?key|credential|private[_\-]?key|authorization',
+    re.IGNORECASE,
+)
+MASKED_VALUE = "***MASKED***"
+
+
+def sensitive_values(data):
+    """Collect known credentials so copies in raw text are masked too."""
+    values = set()
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if SENSITIVE_KEY.search(str(key)) and isinstance(value, str) and value:
+                values.add(value)
+            values.update(sensitive_values(value))
+    elif isinstance(data, (list, tuple)):
+        for value in data:
+            values.update(sensitive_values(value))
+    return values
+
+
+def redact_sensitive(data, secrets=None):
+    """Mask sensitive fields, known secret copies, assignments, and URL credentials.
+
+    This is a sharing safeguard, not proof that arbitrary raw text is secret-free.
+    Process arguments are deliberately omitted because positional secrets cannot
+    be identified reliably. Keys and evidence paths remain available.
+    """
+    secrets = sensitive_values(data) if secrets is None else secrets
+
+    def scrub(value):
+        if isinstance(value, dict):
+            sensitive_path = SENSITIVE_KEY.search(str(value.get('path', '')))
+            result = {}
+            for key, item in value.items():
+                if key == 'values' and sensitive_path and isinstance(item, dict):
+                    result[key] = {label: MASKED_VALUE for label in item}
+                elif str(key).startswith('$[') and SENSITIVE_KEY.search(str(key)) and isinstance(item, dict):
+                    result[key] = {label: MASKED_VALUE for label in item}
+                elif str(key) in ('cmd', 'cmdline', 'ps_raw'):
+                    result[key] = MASKED_VALUE + ' (process arguments omitted)'
+                elif SENSITIVE_KEY.search(str(key)):
+                    result[key] = MASKED_VALUE
+                else:
+                    result[key] = scrub(item)
+            return result
+        if isinstance(value, (list, tuple)):
+            result = []
+            hide_next = False
+            for item in value:
+                result.append(MASKED_VALUE if hide_next else scrub(item))
+                hide_next = (isinstance(item, str) and item.startswith('-')
+                             and '=' not in item and bool(SENSITIVE_KEY.search(item)))
+            return result
+        if not isinstance(value, str):
+            return value
+        # Very short values are masked by field/assignment, never global substring:
+        # TOKEN=x must not rewrite every letter x in evidence paths and timestamps.
+        for secret in sorted(secrets, key=len, reverse=True):
+            if len(secret) >= 4 and secret != MASKED_VALUE:
+                value = value.replace(secret, MASKED_VALUE)
+        value = re.sub(r'(?i)(https?://)[^/\s@]+@', r'\1***MASKED***@', value)
+        value = re.sub(r'(?i)(\bbearer\s+)[^\s,;"\']+', r'\1***MASKED***', value)
+        value = re.sub(
+            r'(?i)((?:--)?[\w-]*(?:password|passwd|token|secret|api[_-]?key|access[_-]?key)'
+            r'[\w-]*["\']?\s*(?:=|:|\s)\s*)(?:"[^"\n]*"|\'[^\'\n]*\'|[^\s,;&]+)',
+            r'\1***MASKED***', value,
+        )
+        return value
+
+    return scrub(data)
+
+
 
 # ============================================================================
 # 颜色输出
@@ -109,17 +186,27 @@ class SimpleVersion:
 HCCN_TOOL_CMD = "/usr/local/Ascend/driver/tools/hccn_tool"
 
 
-def get_npu_count() -> int:
-    """通过 /dev/davinciN 设备文件检测 NPU 数量"""
-    for device_id in itertools.count(0):
-        device_path = f"/dev/davinci{device_id}"
+def get_npu_device_ids() -> List[int]:
+    """Enumerate visible character-device IDs, including sparse container mappings."""
+    ids = []
+    try:
+        names = os.listdir('/dev')
+    except OSError:
+        return ids
+    for name in names:
+        match = re.fullmatch(r'davinci(\d+)', name)
+        if not match:
+            continue
         try:
-            f_mode = os.stat(device_path).st_mode
-        except Exception:
-            break
-        if not stat.S_ISCHR(f_mode):
-            break
-    return device_id
+            if stat.S_ISCHR(os.stat(os.path.join('/dev', name)).st_mode):
+                ids.append(int(match.group(1)))
+        except OSError:
+            continue
+    return sorted(set(ids))
+
+
+def get_npu_count() -> int:
+    return len(get_npu_device_ids())
 
 
 def is_in_container() -> bool:
@@ -155,16 +242,37 @@ def which(cmd: str) -> Optional[str]:
     return shutil.which(cmd)
 
 
-def run_cmd(cmd: str, timeout: int = 15) -> Tuple[int, str]:
-    """执行 shell 命令，返回 (returncode, stdout)。任何异常都安全降级，不会中断采集。"""
+COMMAND_TIMEOUT = 15
+COMMAND_FAILURES = []
+COMMAND_FAILURE_LOCK = threading.Lock()
+
+
+def run_cmd(cmd, timeout=COMMAND_TIMEOUT) -> Tuple[int, str]:
+    """Bounded argv execution; drain stdout/stderr together and retain failures."""
+    argv = []
     try:
+        argv = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
         proc = subprocess.run(
-            cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, timeout=timeout,
+            argv, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors='replace', timeout=timeout,
         )
-        return proc.returncode, (proc.stdout or "").strip()
-    except Exception as e:
-        return -1, f"command failed: {e}"
+        rc, output = proc.returncode, (proc.stdout or '').strip()
+    except subprocess.TimeoutExpired:
+        rc, output = -1, f'command timeout after {timeout}s'
+    except Exception as exc:
+        rc, output = -1, f'command failed: {exc}'
+    if rc != 0:
+        with COMMAND_FAILURE_LOCK:
+            COMMAND_FAILURES.append({'command': argv, 'returncode': rc, 'output': output})
+    return rc, output
+
+
+def checked_output(cmd, timeout=COMMAND_TIMEOUT):
+    """Compatibility adapter for collectors that use check_output-style control flow."""
+    rc, output = run_cmd(cmd, timeout)
+    if rc != 0:
+        raise subprocess.CalledProcessError(rc, cmd, output=output)
+    return output
 
 
 def compress_ids(ids) -> str:
@@ -371,9 +479,7 @@ class SysCollector:
 
     def _collect_lscpu(self) -> dict:
         try:
-            output = subprocess.check_output(
-                ['/usr/bin/lscpu'], stderr=subprocess.DEVNULL, text=True
-            )
+            output = checked_output(['/usr/bin/lscpu'])
         except Exception:
             return {}
 
@@ -432,10 +538,7 @@ class SysCollector:
 
     def _check_dmidecode(self) -> bool:
         try:
-            output = subprocess.check_output(
-                shlex.split("dmidecode -t processor"),
-                stderr=subprocess.DEVNULL, text=True
-            )
+            output = checked_output(shlex.split("dmidecode -t processor"))
         except Exception:
             return False
         max_speeds = []
@@ -451,10 +554,7 @@ class SysCollector:
 
     def _check_cpupower(self) -> bool:
         try:
-            output = subprocess.check_output(
-                shlex.split("cpupower frequency-info"),
-                stderr=subprocess.DEVNULL, text=True
-            )
+            output = checked_output(shlex.split("cpupower frequency-info"))
         except Exception:
             return False
         max_m = re.search(r'hardware limits:\s*[\d\.]+\s*[GMK]?Hz\s*-\s*([\d\.]+\s*[GMK]?Hz)', output, re.IGNORECASE)
@@ -475,10 +575,7 @@ class SysCollector:
 
     def _check_lshw(self) -> bool:
         try:
-            output = subprocess.check_output(
-                shlex.split("lshw -c cpu"),
-                stderr=subprocess.DEVNULL, text=True
-            )
+            output = checked_output(shlex.split("lshw -c cpu"))
         except Exception:
             return False
         sizes = []
@@ -968,7 +1065,8 @@ class NPUCollector:
 
     def __init__(self):
         self.collect_type = "npu"
-        self.npu_count = get_npu_count()
+        self.device_ids = get_npu_device_ids()
+        self.npu_count = len(self.device_ids)
         self.smi_cmd = self._resolve_smi()
 
     def _resolve_smi(self) -> Optional[str]:
@@ -1026,9 +1124,10 @@ class NPUCollector:
     def _collect_smi(self) -> dict:
         out = {}
         if not self.smi_cmd:
-            out["note"] = "未找到 npu-smi 命令，跳过快照采集"
+            out['smi_collection'] = {'collection_status': 'unavailable', 'reason': '未找到 npu-smi 命令'}
             return out
         rc, raw = run_cmd(f"{self.smi_cmd} info", timeout=20)
+        out['smi_collection'] = {'collection_status': 'success' if rc == 0 else 'failed'}
         out["smi_rc"] = rc
         out["smi_raw"] = raw if raw else None
         if rc == 0 and raw:
@@ -1062,6 +1161,7 @@ class NPUCollector:
     def _collect_one_device(self, device_id: int) -> dict:
         dev = {"device_id": device_id}
         raw_map = {}
+        query_status = {}
         for subcmd in self.PER_DEVICE_QUERIES:
             rc, raw = run_cmd(
                 f"{self.smi_cmd} info -t {subcmd} -i {device_id}", timeout=20)
@@ -1072,6 +1172,8 @@ class NPUCollector:
                 if rc2 == 0 and raw2:
                     rc, raw = rc2, raw2
             raw_map[subcmd] = raw or ""
+            query_status[subcmd] = {"returncode": rc, "status": "success" if rc == 0 else "failed"}
+        dev["queries"] = query_status
         dev["raw"] = {k: v if v else None for k, v in raw_map.items()}
 
         common_kv = self._parse_kv(raw_map.get("common") or "")
@@ -1132,23 +1234,24 @@ class NPUCollector:
     def _collect_per_device(self) -> dict:
         out = {}
         if not self.smi_cmd:
-            out["note"] = "未找到 npu-smi 命令，跳过逐卡运行态采集"
+            out['per_device_collection'] = {'collection_status': 'unavailable', 'reason': '未找到 npu-smi 命令'}
             return out
         if self.npu_count <= 0:
-            out["note"] = "未检测到 /dev/davinci* 设备，跳过逐卡采集"
+            out['per_device_collection'] = {'collection_status': 'skipped', 'reason': '未检测到可见 NPU 设备'}
             return out
-        devices = [None] * self.npu_count
+        devices = {}
         max_workers = min(self.npu_count, os.cpu_count() or 4)
         with ThreadPoolExecutor(max_workers) as executor:
             futures = {executor.submit(self._collect_one_device, i): i
-                       for i in range(self.npu_count)}
+                       for i in self.device_ids}
             for future in as_completed(futures):
                 idx = futures[future]
                 try:
                     devices[idx] = future.result()
                 except Exception as e:
                     devices[idx] = {"device_id": idx, "error": str(e)}
-        out["devices"] = devices
+        out["devices"] = [devices[i] for i in self.device_ids]
+        out['per_device_collection'] = {'collection_status': 'success'}
         return out
 
     # ------------------------------------------------------------------
@@ -1225,7 +1328,7 @@ class NPUCollector:
         max_workers = min(self.npu_count, os.cpu_count() or 4)
         with ThreadPoolExecutor(max_workers) as executor:
             futures = {executor.submit(self._run_optical, i): i
-                       for i in range(self.npu_count)}
+                       for i in self.device_ids}
             for future in as_completed(futures):
                 idx = futures[future]
                 try:
@@ -1372,9 +1475,10 @@ class AscendCollector:
 
     @staticmethod
     def _parse_version_file(file_path, ver_keys, ts_key, commit_key):
-        result = {}
+        result = {'source': file_path, 'collection_status': 'success'}
         if not os.path.isfile(file_path):
-            return result
+            return {'source': file_path, 'collection_status': 'unavailable',
+                    'reason': 'version.info 不存在或不可访问；不能据此断言组件未安装'}
         try:
             with open(file_path, 'r') as f:
                 for line in f:
@@ -1395,8 +1499,10 @@ class AscendCollector:
                         result['timestamp'] = value
                     if commit_key and commit_key == key:
                         result['commit'] = value
-        except Exception:
-            pass
+        except Exception as exc:
+            result.update(collection_status='failed', error=str(exc))
+        if 'version' not in result and result['collection_status'] == 'success':
+            result.update(collection_status='unavailable', reason='未解析到版本字段')
         return result
 
     def collect(self) -> CollectorResult:
@@ -1417,12 +1523,15 @@ class EnvCollector:
     ]
 
     # 疑似敏感变量的 key 匹配模式（值脱敏，key 名保留用于环境一致性比对）
-    SENSITIVE_PATTERN = re.compile(
-        r'password|passwd|pwd|token|secret|api_key|apikey|access_key|'
-        r'secret_key|credential|private_key|certificate|authorization',
-        re.IGNORECASE,
-    )
+    SENSITIVE_PATTERN = SENSITIVE_KEY
     MASKED_VALUE = "***MASKED***"
+
+    CRITICAL_ENV = {
+        'ASCEND_HOME_PATH', 'ASCEND_TOOLKIT_HOME', 'LD_LIBRARY_PATH',
+        'MINDIE_LLM_HOME_PATH', 'ATB_HOME_PATH', 'ATB_SPEED_HOME_PATH',
+        'HCCL_BUFFSIZE', 'TASK_QUEUE_ENABLE', 'RANK_TABLE_FILE',
+        'OMP_NUM_THREADS', 'PYTORCH_NPU_ALLOC_CONF',
+    }
 
     def __init__(self, filter_env: bool = False):
         self.collect_type = "env"
@@ -1433,7 +1542,7 @@ class EnvCollector:
         if self.filter_env:
             env_items = {
                 k: v for k, v in env_items.items()
-                if any(f in k for f in self.ENV_FILTERS)
+                if k in self.CRITICAL_ENV or any(f in k for f in self.ENV_FILTERS)
             }
 
         # 敏感变量脱敏
@@ -1462,7 +1571,7 @@ class ConfigCollector:
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            return CollectorResult(data, self.collect_type)
+            return CollectorResult(redact_sensitive(data), self.collect_type)
         except FileNotFoundError:
             errors.append(f"配置文件不存在: {self.config_path!r}")
         except json.JSONDecodeError as e:
@@ -1494,10 +1603,7 @@ class PingCollector:
 
         def ping_one(host):
             try:
-                output = subprocess.check_output(
-                    shlex.split(f"/usr/bin/ping -c 3 -q -W 2 {host}"),
-                    stderr=subprocess.STDOUT, text=True, timeout=10
-                )
+                output = checked_output(shlex.split(f"/usr/bin/ping -c 3 -q -W 2 {host}"), timeout=10)
             except Exception:
                 output = "ping failed"
             return str(host), output
@@ -1519,16 +1625,15 @@ class HCCNCollector:
     def __init__(self, cmd_name: str, collect_type: str):
         self.cmd_name = cmd_name
         self.collect_type = collect_type
-        self.npu_count = get_npu_count()
+        self.device_ids = get_npu_device_ids()
+        self.npu_count = len(self.device_ids)
 
     def _run_cmd(self, device_id: int) -> str:
         cmd = f"{HCCN_TOOL_CMD} -i {device_id} -{self.cmd_name} -g"
         try:
-            return subprocess.check_output(
-                shlex.split(cmd), stderr=subprocess.DEVNULL, text=True
-            )
-        except Exception:
-            return "command failed"
+            return checked_output(shlex.split(cmd))
+        except subprocess.CalledProcessError as exc:
+            return "command failed: " + str(redact_sensitive(exc.output))
 
     def collect(self) -> CollectorResult:
         errors = []
@@ -1537,9 +1642,12 @@ class HCCNCollector:
             errors.append(f"{place}上没有找到 'hccn_tool' 命令")
             return CollectorResult([], self.collect_type, errors)
 
+        if not self.device_ids:
+            return CollectorResult([] if self.collect_type in ('link', 'vnic', 'tls') else {},
+                                   self.collect_type, ['未检测到可访问的 NPU 设备'])
         max_workers = min(self.npu_count, os.cpu_count() or 1)
         with ThreadPoolExecutor(max_workers) as executor:
-            futures = [executor.submit(self._run_cmd, i) for i in range(self.npu_count)]
+            futures = [executor.submit(self._run_cmd, i) for i in self.device_ids]
             results = [f.result() for f in futures]
 
         return CollectorResult(results, self.collect_type)
@@ -1551,7 +1659,8 @@ class HCCLCollector:
     def __init__(self, rank_table: RankTable):
         self.collect_type = "hccl"
         self.rank_table = rank_table
-        self.npu_count = get_npu_count()
+        self.device_ids = get_npu_device_ids()
+        self.npu_count = len(self.device_ids)
         self.option = (
             "-hccs_ping" if rank_table.version >= SimpleVersion("1.2") else "-ping"
         )
@@ -1564,14 +1673,7 @@ class HCCLCollector:
         else:
             return None, None
 
-        try:
-            proc = subprocess.Popen(
-                shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            )
-            ret = proc.wait()
-            output = proc.stdout.read()
-        except Exception:
-            ret, output = -1, "command failed"
+        ret, output = run_cmd(shlex.split(cmd))
         return cmd, (ret, output)
 
     def collect(self) -> CollectorResult:
@@ -1587,13 +1689,16 @@ class HCCLCollector:
             for dev_info in dev_list
         ]
 
+        if not self.device_ids:
+            return CollectorResult([] if self.collect_type in ('link', 'vnic', 'tls') else {},
+                                   self.collect_type, ['未检测到可访问的 NPU 设备'])
         max_workers = min(self.npu_count, os.cpu_count() or 1)
         results = {}
 
         with ThreadPoolExecutor(max_workers) as executor:
             futures = [
                 executor.submit(self._run_per_device, device_id, all_device_ips)
-                for device_id in range(self.npu_count)
+                for device_id in self.device_ids
             ]
             for future in as_completed(futures):
                 results.update(future.result())
@@ -1936,7 +2041,7 @@ class RuntimeCollector:
             "python_version": platform.python_version(),
             "python_executable": sys.executable,
         }
-        rc, out = run_cmd(f'"{sys.executable}" -m pip --version', timeout=20)
+        rc, out = run_cmd([sys.executable, '-m', 'pip', '--version'], timeout=20)
         if rc == 0 and out:
             result["pip"] = out.strip()
         conda_env = os.environ.get("CONDA_DEFAULT_ENV")
@@ -1959,7 +2064,7 @@ class RuntimeCollector:
                     result["watched"][name] = dist.version
         except Exception as e:
             result["watched_error"] = str(e)
-        rc, out = run_cmd(f'"{sys.executable}" -m pip list --format=freeze', timeout=60)
+        rc, out = run_cmd([sys.executable, '-m', 'pip', 'list', '--format=freeze'], timeout=60)
         if rc == 0 and out:
             result["pip_list_raw"] = out.splitlines()
         return result
@@ -1987,7 +2092,8 @@ class RuntimeCollector:
             low = cmd_join.lower()
             if not any(k in low for k in self.TARGET_PROCESS_KEYWORDS):
                 continue
-            info = {"pid": pid, "cmd": cmd_join[:512]}
+            info = {"pid": pid, "executable": os.path.basename(cmdline[0]),
+                    "cmd": MASKED_VALUE + " (process arguments omitted)"}
             status = self._read_proc_status(pid)
             if status:
                 if isinstance(status.get("PPid"), int):
@@ -2001,7 +2107,7 @@ class RuntimeCollector:
         targets.sort(key=lambda t: t.get("pid", 0))
         result["targets"] = targets[: self.MAX_TARGET_PROCESSES]
 
-        rc, out = run_cmd("ps -eo pid,ppid,psr,pcpu,pmem,nlwp,comm,args --sort=-pcpu")
+        rc, out = run_cmd("ps -eo pid,ppid,psr,pcpu,pmem,nlwp,comm --sort=-pcpu")
         if rc == 0 and out:
             result["ps_raw"] = out.splitlines()[:200]
         return result
@@ -2125,23 +2231,54 @@ class WeightCollector:
 def collect_all(args) -> dict:
     """执行所有采集器，返回完整的 dump 字典"""
     dump_content = {}
-    warnings = []
+    collection = {}
+    all_secrets = sensitive_values(dict(os.environ))
+    with COMMAND_FAILURE_LOCK:
+        COMMAND_FAILURES.clear()
 
     def _run_collector(collector):
         """运行单个采集器并处理结果"""
+        begin = len(COMMAND_FAILURES)
+        name = collector.collect_type
         try:
             result = collector.collect()
-        except Exception as e:
-            warn("采集 {} 时发生异常: {}", collector.collect_type, e)
-            return
+        except Exception as exc:
+            errors = [str(exc)]
+            result = CollectorResult({}, name, errors)
+        failures = list(COMMAND_FAILURES[begin:])
+        errors = list(result.errors)
 
-        if result.has_errors:
-            for err in result.errors:
-                warn("[{}] {}", result.collect_type, err)
-            if not result.data:
-                return
+        def read_errors(value, path=''):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    child = f'{path}/{key}'
+                    if key in ('error', 'errors') and item:
+                        errors.append(f'{child}: {item}')
+                    elif key == 'collection_status' and item != 'success':
+                        errors.append(f'{path}: {item}')
+                    else:
+                        read_errors(item, child)
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    read_errors(item, f'{path}/{index}')
 
-        dump_content[result.collect_type] = result.data
+        read_errors(result.data)
+        status = 'partial' if errors or failures else 'success'
+        if not result.data and (errors or failures):
+            status = 'failed'
+        collection[name] = {'status': status, 'errors': errors,
+                            'command_failures': failures}
+        if name == 'env':
+            collection[name]['scope'] = 'filtered' if args.filter else 'all'
+            collection[name]['included_keys'] = sorted(result.data)
+            collection[name]['critical_keys_in_scope'] = sorted(EnvCollector.CRITICAL_ENV)
+        if name in ('npu', 'link', 'vnic', 'tls', 'hccl'):
+            collection[name]['device_ids'] = list(getattr(collector, 'device_ids', []))
+        for err in errors:
+            warn('[{}] {}', name, redact_sensitive(err, all_secrets))
+        if status != 'failed':
+            all_secrets.update(sensitive_values(result.data))
+            dump_content[name] = result.data
 
     # --- 始终采集的核心信息 ---
     info("{Color.BOLD}=== 开始采集环境信息 ==={Color.RESET}".format(Color=Color))
@@ -2166,12 +2303,14 @@ def collect_all(args) -> dict:
 
     # --- 预解析 rank table（供 Ping/HCCL/Network 采集器复用） ---
     rank_table = None
+    rank_error = None
     if args.rank_table_path:
         info("解析 rank table: {}", args.rank_table_path)
         try:
             rank_table = parse_rank_table(args.rank_table_path, args.scene or "mindie")
         except Exception as e:
-            warn("rank table 解析失败: {}", e)
+            rank_error = str(e)
+            warn("rank table 解析失败: {}", redact_sensitive(str(e), all_secrets))
 
     info("采集网络细节（网卡/路由/RDMA/端口连通性）...")
     _run_collector(NetworkCollector(rank_table=rank_table))
@@ -2215,7 +2354,29 @@ def collect_all(args) -> dict:
         info("采集 TLS 状态...")
         _run_collector(HCCNCollector("tls", "tls"))
 
-    return dump_content
+    optional = {
+        'mies config': args.mies_config_path,
+        'user config': args.user_config_path,
+        'mindie env': args.mindie_env_path,
+        'model config': args.weight_dir,
+        'weight': args.weight_dir,
+    }
+    for name, requested in optional.items():
+        if name not in collection:
+            collection[name] = {'status': 'skipped', 'reason': '未提供对应采集参数', 'errors': []}
+    for name in ('ping', 'hccl', 'link', 'vnic', 'tls'):
+        if name not in collection:
+            collection[name] = {'status': 'failed' if rank_error else 'skipped',
+                                'reason': 'rank table 解析失败' if rank_error else '未提供 rank table',
+                                'errors': [rank_error] if rank_error else []}
+    dump_content['_meta'] = {
+        'schema_version': '1.1',
+        'collection': collection,
+        'status': 'partial' if any(v['status'] in ('failed', 'partial') for v in collection.values()) else 'success',
+        'redaction': {'enabled': True, 'process_arguments': 'omitted',
+                      'note': '敏感字段、已知密钥副本与常见文本模式已脱敏；任意 raw 文本仍需分享前复核。'},
+    }
+    return redact_sensitive(dump_content, all_secrets)
 
 
 # ============================================================================
@@ -2270,14 +2431,14 @@ def main():
     dump_content = collect_all(args)
 
     # 添加元数据
-    dump_content["_meta"] = {
+    dump_content.setdefault("_meta", {}).update({
         "tool": "msprechecker_dump.py",
         "version": __version__,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         "hostname": platform.node(),
         "python_version": platform.python_version(),
         "collect_duration_seconds": round(time.time() - start_time, 2),
-    }
+    })
 
     # 保存
     output_dir = os.path.dirname(os.path.abspath(args.output_path))

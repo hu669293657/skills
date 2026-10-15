@@ -28,7 +28,8 @@ def get_sheet_data(wb, sheet_name_keyword, strip=True):
     """
     target_ws = None
     for name in wb.sheetnames:
-        if sheet_name_keyword.lower() in name.lower():
+        # Parenthesized metadata is allowed; Statistic must never match Detail.
+        if name.split('(', 1)[0].strip().lower() == sheet_name_keyword.lower():
             target_ws = wb[name]
             break
     if target_ws is None:

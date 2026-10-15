@@ -1,6 +1,10 @@
 # cluster-analysis（昇腾 NPU 训练性能比对分析）
 
-面向昇腾 NPU 训练场景的一站式性能分析技能：自动识别 Prof 采集数据形态（单卡/多卡、db/text 格式、框架），串联专家建议（advisor）、集群分析输出件、23 个进阶 recipe、慢卡比对与泳道算子统计，最终产出一份含左侧导航、可折叠分区、子报告内嵌的完整交互式 HTML 诊断报告。兼容 msprof-analyze 开源项目全部能力——已安装则优先调用原生 CLI，未安装则使用内置 fallback 脚本（能力等价）。
+面向昇腾 NPU 训练与推理场景的性能分析技能：识别 Prof 的单卡/多卡布局、导出配置和实际可用产物，串联 advisor、集群分析、进阶 recipe、双卡比对和泳道统计。原生 CLI 按子命令预检后优先使用；内置 fallback 同时支持 TEXT 导出与 DB-only 数据（TEXT 缺失时经 `scripts/lib/prof_data.py` 适配层读取 `analysis.db` 与主 DB，契约见 `references/db_support.md`），不宣称与原生全部能力等价。
+
+无分步时，TEXT 空 Step 与 DB NULL-step 统一将整个 prof 作为每卡一个汇总 step（`prof`）分析；真实 step 保留原编号。原始文件不改写。规则与来源/边界说明见 `references/whole_prof_step.md`。
+
+本次演进保持原有完整流程、功能和默认输出 `performance_report.html`。新增 P6a 定位器，把通信、计算、Free 的关键瓶颈直接嵌入原报告“结论与建议”章节；其余集群总览、专家建议、进阶分析、双卡比对、泳道统计、子报告和附录保留。新增 `insight_bottlenecks.{json,md,html}` 是配套证据和摘要，不能代替完整报告。使用方式仍是原 `scripts/run_workflow.py`，无需新增必填参数。
 
 ## 应用场景
 
@@ -16,7 +20,7 @@
 ## 解决什么问题
 
 - **不知道从哪分析起**：输入检测（P0）自动识别数据形态并给出建议步骤清单，随后全量执行五大类 23 个 recipe，不遗漏任何维度。
-- **msprof-analyze 未安装/版本不匹配**：内置 fallback 脚本与原生 CLI 能力等价，零环境依赖即可跑通全流程。
+- **msprof-analyze 未安装/版本不匹配**：TEXT 产物或 DB-only 数据（`analysis.db` 有 step/window 摘要）满足前置条件时使用内置 fallback；两者皆缺时尝试从可读事件与有效起止生成整段 step；仍无时间证据时明确失败。xlsx/子报告需要相应 Python 依赖，缺失时记录不可用原因。
 - **多卡数据量庞大、逐卡分析太慢**：按"波次（Wave）"调度并行子 agent，advisor/集群输出件/泳道统计多路并行，泳道分析逐卡拆分，trace_view.json（数百 MB）用流式解析。
 - **分析结论碎片化**：所有中间产物（advisor、recipe CSV、比对 xlsx、泳道 md、vendor 子报告）统一汇总进最终 HTML 报告，信息概览在前、结论建议随后、详情可折叠展开。
 - **对比对象选择困难**：多卡时自动选取**通信占比最大**与**最小**的两张卡做性能比对，直击快慢卡差异。
@@ -162,4 +166,4 @@ flowchart TD
 - `references/msprof_cli.md` — msprof-analyze 原生 CLI 与 fallback 能力对照
 - `references/html_template_spec.md` — 最终 HTML 报告模板规范（可折叠、ECharts 懒初始化等）
 
-约束提示：db 内时间为 μs、text-CSV 为 μs、text-JSON 为 ms，报告统一换算 ms 并标注；泳道分类不含 Plane 泳道；单个 recipe 数据缺失只标注"不支持/数据缺失"，不中断整体流程；advisor 原生 CLI 产出文件仅供留档，归一化 advisor.md/json 始终由 fallback 生成。
+约束提示：单位由字段/schema 决定；step trace 为 μs，新表 ClusterCommunicationTime 和 TEXT communication.json 为 ms。报告先检查 workflow_status.json：退出 0 表示完整完成，2 为部分失败，1 为关键失败；recipe 缺采集能力记 unsupported、执行异常记 failed。缓存校验输入/参数/脚本指纹，旧中间件保存在 _history。cluster_analysis_output 仍生成在实际卡根目录，recipe 会写分析库；需要保留输入目录时在独立副本运行。advisor 的归一化结果由 fallback 生成。

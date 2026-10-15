@@ -13,6 +13,9 @@
 7. **子报告嵌入**：vendor 产出的 `cluster_analysis_report.html`、`compare_analysis_report.html` 复制进 `reports/` 同目录，最终报告中以"子报告"分区 iframe 嵌入 + 新窗口打开链接双通道提供。
 8. 时间单位统一 ms；百分数保留 1 位小数；中文字体栈 `Noto Sans CJK SC, WenQuanYi Micro Hei, Microsoft YaHei`。
 9. 图表用 ECharts（CDN + 内联降级）；单文件自包含（内联 CSS/JS），除 iframe 引用的子报告外不依赖外部文件。
+10. **原结论章节增强**：保留“结论与建议”的导航、锚点和章节顺序，内部增加“瓶颈定位与解决”，先给主导问题，再按通信、计算、Free 各列最多三个关键点。其他章节不以新增定位摘要取代。
+11. 瓶颈表使用中文四列：Insight 定位、主要问题、影响程度、可能原因与处理方向。精确位置保留 ms/us/ns 精度；内部机器字段保持兼容。正文不展示取证路径。
+12. 附加 `insight_bottlenecks.html` 是离线定位摘要，使用内联样式且无 CDN/iframe；默认主交付仍是原完整报告。内容约束见 insight_localization.md。
 
 ## 模板交互规范（所有 HTML 模板统一执行）
 
@@ -42,7 +45,7 @@
 | 导航项 | 分区 | 数据来源 |
 |--------|------|----------|
 | 信息概览 | 模式/卡数/step 数/耗时总览/健康徽章 | P0 + P2 |
-| 结论与建议 | 总体判定 + 优先级建议列表 | P1 advisor.json |
+| 结论与建议 | 总体判定 + 通信、计算、Free 的精确瓶颈；P6a 缺失时使用原汇总结论 | P1 advisor.json + P6a insight_bottlenecks.json |
 | 集群总览（多卡） | Step×Rank 耗时拆解 + **计算/通信/free 三部分 × Step 差异柱状图**（横轴为计算、通信、free 三部分，纵轴为时间；每部分内每个 step 一根柱子，取跨 rank 平均，展现各部分耗时在不同 step 间的差异）+ Step×Step 分组柱状图、通信域、快慢卡 | P2/P3 |
 | 进阶分析 | 五大类 23 recipe | P3 recipes_summary |
 | 性能比对（多卡） | 最大/最小通信占比卡对比要点 | P4 |

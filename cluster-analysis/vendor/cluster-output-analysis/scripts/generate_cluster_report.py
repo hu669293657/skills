@@ -33,7 +33,7 @@ def generate_single_report(data, template_path, output_path):
         html = f.read()
 
     ss = data.get("step_summary", {})
-    steps = sorted(ss.keys(), key=lambda x: int(x) if x.isdigit() else x)
+    steps = sorted(ss.keys(), key=lambda x: (0, int(x)) if x.isdigit() else (1, x))
     rank_summary = data.get("rank_summary", {})
     rank_count = len(rank_summary)
     step_count = len(steps)
@@ -141,12 +141,17 @@ def generate_single_report(data, template_path, output_path):
         op_labels = [op.get("op_name", op.get("hccl_op_name", "?"))[:30] for op in comm_ops[:10]]
         r["{{COMM_HAS_DATA}}"] = "true"
         r["{{COMM_OP_LABELS}}"] = json.dumps(op_labels)
-        # TEXT 模式已经是 ms，DB 模式需要 μs→ms 转换
+        # Units follow the table contract, never the container filename.
+        comm_unit = data.get('units', {}).get('communication_time')
+        if comm_unit is None:
+            comm_unit = 'ms' if data.get('format') in ('text', 'db_new') else 'us'
+        if comm_unit not in ('ms', 'us'):
+            raise ValueError(f'unsupported communication time unit: {comm_unit}')
         def comm_time_val(op, keys):
             for k in keys:
                 v = op.get(k)
                 if v is not None:
-                    return round(float(v) / US_TO_MS, 2) if not is_text_mode else round(float(v), 4)
+                    return round(float(v) / US_TO_MS, 2) if comm_unit == 'us' else round(float(v), 4)
             return 0
         r["{{COMM_OP_ELAPSED}}"] = json.dumps([comm_time_val(op, ["avg_elapsed", "avg_elapsed_time"]) for op in comm_ops[:10]])
         r["{{COMM_OP_TRANSIT}}"] = json.dumps([comm_time_val(op, ["avg_transit", "transit_time"]) for op in comm_ops[:10]])

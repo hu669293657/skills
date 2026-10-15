@@ -13,7 +13,9 @@ msprof-analyze cluster analysis -d <prof_dir> --bp <标杆数据>   # 标杆对�
 - `cluster analysis`：生成/更新 `cluster_analysis_output`（对应 P2），追加 recipe 名称可单跑某项进阶分析（对应 P3）。
 - `compare`：双卡/双环境对比（对应 P4；原生 xlsx 由 run_workflow 归一化为 vendor 契约命名）。
 
-## fallback 能力对照（原生不可用/失败时使用，能力等价）
+## fallback 能力对照（原生不可用/失败时使用）
+
+内置实现依赖 TEXT 产物，不与原生所有格式和诊断能力等价。DB-only 缺少归一化适配时预检失败；已有 cluster_analysis_output 可以走独立报告模式。以 workflow_status.json 的阶段状态和 recipe 能力矩阵为准。
 
 | 能力 | 原生实现 | 本技能 fallback |
 |------|----------|-----------------|

@@ -146,7 +146,7 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 
 **鲁棒性设计（处理多样化 JSON 结构）：**
 
-1. **递归扁平化**：任意 dict/list/scalar 展平为 `path→value` 对。dict 用 `.key`，list 用 `[index]`。空 `{}` 和 `[]` 保留为特殊标记。
+1. **递归扁平化**：任意 dict/list/scalar 展平为 `path→value` 对。字典路径用 `["JSON 转义键"]`，数组用 `[index]`，根为 `$`；空 `{}` 和 `[]` 保留原类型。
 2. **JSON 修复**：尝试直接解析 → 修复 markdown 转义 → 去空行重试。全部失败则跳过该文件并告警。
 3. **Section 追踪**：记录每个顶层 section 存在于哪些文件中。报告"仅在文件 X 中存在"。
 4. **类别分类**：顶层 key 映射到类别（system/ascend/env/config/network/weight/meta/other）。未知 section 归入"other"。
@@ -182,52 +182,51 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 
 ## 分析指南
 
+### 判定前提与采集证据
+
+- 先读 `_meta.collection` 和 `_meta.status`。每项区分 `success`、`partial`、`failed`、`skipped`；部分成功时只分析有证据的字段。旧 dump 缺少状态元数据时，缺失原因记为 UNKNOWN。
+- 确认用户的部署场景、NPU/OS 架构、容器或宿主机、服务运行身份；未知时按条件给建议，不自行补造配套要求。
+- dump 代表采集进程的视角，环境变量、资源限制与 Python 包不一定等于实际服务进程的配置。
+- 结论引用输入文件、具体字段路径及原始观测；把事实、推断和建议分开。FAIL 必须同时具备适用的要求和违背要求的证据。
+- UNKNOWN 表示证据不足；N/A 表示场景不适用。未采到、无权限、命令失败和未安装不能互相替代。
+
 ### 系统检查项
 
-| 键 | 期望值 / 良好 | 需关注 | 问题 |
-|----|-------------|--------|------|
-| `high_performance` | `true` | — | `false` = CPU 未在高性能模式 |
-| `virtual_machine` | `false` | `true`（已知虚拟机） | — |
-| `transparent_hugepage` | `always` | `madvise` | `never` = THP 已禁用 |
-| `overcommit_memory` | `0` 或 `1` | — | `2` = 严格 overcommit，可能导致 OOM |
-| `page_size` | `4096` | — | 非 4096 可能存在兼容性问题 |
+| 键 | 观测含义 | 判定规则 |
+|----|----------|----------|
+| `high_performance` | 多策略检测结果，可能含频率启发式 | `false` 也可能是探测失败；先查 governor/raw/采集错误，证据不足为 UNKNOWN，不直接 FAIL |
+| `virtual_machine` | 虚拟化检测结果 | 结合容器与部署方式解释，不因 `true` 自动降级健康状态 |
+| `transparent_hugepage` | 当前 THP 策略 | `always`、`madvise`、`never` 仅记录事实；是否合适由具体负载要求决定 |
+| `overcommit_memory` | 0=启发式，1=允许 overcommit，2=严格 | `2` 不等于 OOM；结合内存需求、提交限制与部署要求评估 |
+| `page_size` | 系统页大小 | 不预设只能为 4096；结合架构和软件支持范围核验 |
 
-**THP 说明**：dump 中的值是脚本从 sysfs 文件 `[...]` 方括号中提取的字符串（如 `always`，不是 `[always]`）。
-
-**overcommit_memory 说明**：`0` = 启发式（内核默认），`1` = 允许 overcommit，`2` = 严格。`0` 和 `1` 在 Ascend 环境中均可接受；`2` 才是真正的风险。
+**THP 说明**：值从 sysfs 的方括号中提取，如 `always`，不是 `[always]`。缺少字段时不能推断实际策略。
 
 ### Ascend 组件
 
 #### 单组件检查
 
-检查每个组件的 `version` 字段：
-- 空 `version` 或空 `{}` 标记为 **缺失**
-- driver 版本 < 24.1 对较新 NPU 功能有风险
-- RC 版本（如 `26.0.rc1`、`8.2.RC1`）标记为**非生产版本** — 注明为候选发布版
+检查组件的 `version`、`source`、`collection_status` 和 `reason`：
+- 空版本或旧格式 `{}` 只证明没有取得版本信息；路径不同、权限不足、未加载环境和未安装都可能造成该结果。标 UNKNOWN，先核对路径与采集状态。
+- 先判断组件是否适用于当前部署。仅使用 vLLM 时，不能仅因 MindIE 或 ATB-Models 未出现而判 FAIL；是否需要 ATB 等组件由实际依赖决定，不按名称猜测。
+- driver 的最低版本、组件配套与 RC 是否获准部署，须以用户提供的配套矩阵或可核验的官方资料为依据。没有依据时标“待核验”，不使用固定版本门槛。
+- RC 仅说明候选发布属性；只有用户部署政策明确禁止时，才能据此判不符合要求。
 
-关键组件：`driver`、`toolkit`、`opp_kernel`、`mindstudio_toolkit`、`atb`、`mindie`、`atb-models`
+采集组件：`driver`、`toolkit`、`opp_kernel`、`mindstudio_toolkit`、`atb`、`mindie`、`atb-models`。
 
 #### 版本一致性检查（跨组件）
 
-检查各组件后，对比应保持一致的组件版本：
+并列展示版本差异，按已确认的配套矩阵判断兼容性。没有矩阵时，差异是事实，兼容性为 UNKNOWN；不要仅凭主版本号或字符串相等推断兼容/不兼容。
 
-| 组件对比 | 期望 | 不一致影响 |
-|---------|------|-----------|
-| `toolkit` vs `opp_kernel` | 版本相同 | OPP 算子可能不匹配 toolkit API |
-| `toolkit` vs `atb` | 同一主版本系列 | ATB 可能存在兼容性问题 |
-| `toolkit` vs `mindstudio_toolkit` | 同一主版本系列 | MindStudio toolkit 可能不支持 toolkit 功能 |
-
-提取版本系列（如从 `8.2.0.0.201 (8.2.RC1)` 提取 `8.2.RC1`）进行对比。不一致标记为 WARN。
-
-**注意**：`driver` 版本使用不同编号方案（如 `26.0.rc1`），不应与 CANN toolkit 版本直接比较。
+`driver` 与 CANN toolkit 使用不同编号体系，禁止直接比较大小。保留原始版本字符串，避免把 RC/构建后缀丢掉后再作结论。
 
 ### 环境变量
 
-使用 `--filter` 时仅含昇腾相关变量。否则包含全部环境变量。
+使用 `--filter` 时采集昇腾相关变量，并显式保留下表 11 个关键变量中实际存在的项；否则采集全部环境变量。两种模式均脱敏。新 dump 的 `_meta.collection.env` 记录 `scope`、`included_keys` 和 `critical_keys_in_scope`。
 
 #### 关键环境变量清单
 
-始终检查以下关键变量是否存在，以表格形式报告：
+检查下列变量并报告观测值与适用性。新 dump 中 `critical_keys_in_scope` 含某变量且 env 采集成功时，未出现表示采集进程没有设置它；这不自动代表服务缺少必需配置。旧版 filtered dump 中未出现的变量为 UNKNOWN，不能判缺失或 FAIL。
 
 | 变量 | 用途 | 缺失影响 |
 |------|------|---------|
@@ -243,22 +242,22 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 | `OMP_NUM_THREADS` | OpenMP 线程数 | 可能影响 CPU 算子性能 |
 | `PYTORCH_NPU_ALLOC_CONF` | PyTorch NPU 内存配置 | 使用默认分配策略 |
 
-**交叉引用**：如果 ascend section 中 `mindie: {}` 且 `MINDIE_LLM_HOME_PATH` 缺失，判定 MindIE 可能未安装。同理适用于 `atb-models` 和 `ATB_SPEED_HOME_PATH`。
+**交叉引用**：组件版本不可用与对应变量未设置，只能作为排查安装路径的线索，不能共同证明未安装。`HCCL_BUFFSIZE`、`TASK_QUEUE_ENABLE`、`OMP_NUM_THREADS`、`PYTORCH_NPU_ALLOC_CONF` 未设置通常表示使用默认行为，不直接判 FAIL；MindIE/ATB/Rank table 变量先判断部署是否需要。路径变量的用途也须结合实际运行时核验，不把表中说明当作唯一解析路径。
 
 #### 敏感变量检测
 
-未使用 `--filter` 时（全量环境变量），扫描可能包含敏感信息的变量：
+所有输入均扫描敏感字段，包括旧 dump、filtered dump、配置与 raw 文本。敏感项只显示字段名、存在性和脱敏占位符，不回显原值：
 
 | 模式 | 风险 | 操作 |
 |------|------|------|
 | `*_API_KEY`、`*_SECRET`、`*_TOKEN`、`*_PASSWORD` | 高 | 报告中标记，建议使用 `--filter` 或脱敏后分享 |
 | `SSH_CONNECTION`、`SSH_CLIENT` | 低 | 含 IP 地址，报告中注明 |
-| `LD_LIBRARY_PATH`、`PATH` | 信息 | 含系统路径，可安全分享 |
+| `LD_LIBRARY_PATH`、`PATH` | 信息 | 可能含用户名或认证 URL，仍需复核 |
 
 ### 网络 / HCCL
 
-- **ping**：查找 `0% packet loss`（正常）vs `100% packet loss` 或 `ping failed`（异常）
-- **hccl**：hccs_ping 输出中查找 `3 received`（正常）；检查返回码 `0`
+- **ping**：结合返回/错误信息解析完整丢包百分比；禁止用 `0% packet loss` 子串匹配，因为 `100% packet loss` 也包含该子串。命令失败先区分工具/权限/超时和网络证据不足。
+- **hccl**：先检查返回码和采集状态，再结合工具输出判连通性；失败不能直接归因为硬件故障。
 - **link**：所有设备应显示 `link status: UP`
 - **vnic**：A3 板卡应配置 IP 且连接 UP
 - **tls**：`tls switch[0]` 应为 `0`（禁用）— 非 TLS 部署场景
@@ -304,7 +303,7 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 ## 环境变量
 ### 关键 Ascend 变量
 | 变量 | 是否存在 | 值 | 状态 |
-(缺失变量标记为 FAIL)
+(区分未设置、未采集、不适用；只有已确认的必需配置缺失才判 FAIL)
 ### 敏感变量
 (标记匹配敏感模式的变量)
 ### 诊断
@@ -330,7 +329,9 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 状态标记：
 - OK = 符合期望
 - WARN = 需关注但不阻塞
-- FAIL = 可能导致部署/运行时问题
+- FAIL = 有适用要求及直接证据证明不符合
+- UNKNOWN = 未采集、失败、无权限或缺少规则依据
+- N/A = 当前场景不适用
 
 ### 比对输出
 
@@ -360,13 +361,13 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 
 ## 比对算法
 
-比对遵循原始 `msprechecker compare` 的逻辑：
+比对采用递归字段比较；1.1 版本使用带类型的路径和值，不再把缺失、null、数字/字符串或空容器混为一谈：
 
-1. **扁平化**：递归遍历每个 dump 的 JSON 树为 `{section.path: value}` 对。dict 用 `.key`，list 用 `[index]`。
+1. **扁平化**：递归遍历每个 dump 的 JSON 树为 `{section.path: value}` 对。字典路径用 `["JSON 转义键"]`，数组用 `[index]`，根为 `$`。
 2. **收集**：对每个唯一路径，收集所有文件中的值。
 3. **过滤**：仅保留值不一致的路径（或在部分文件中存在但其他文件中没有的）。
 4. **分类**：按顶层 section 分组差异（`system`、`ascend`、`env` 等）。
-5. **报告**：输出带上下文的结构化差异。
+5. **报告**：输出有效文件及跳过文件清单；`status=partial` 时明确没有覆盖全部请求输入。相似度仅为可比较字段的一致比例，不能推导差异无害、环境健康或适合部署。
 
 扁平化示例：
 ```json
@@ -374,7 +375,7 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 ```
 变为：
 ```
-ascend.driver.version = "24.1"
+$["ascend"]["driver"]["version"] = "24.1"
 ```
 
 ## HTML 报告生成
@@ -451,10 +452,10 @@ ascend.driver.version = "24.1"
 13. **原始数据** — _meta + system + ascend + env 数据表（含说明列），可折叠全量环境变量
 
 健康评分计算：
-- 系统检查（8 项）+ Ascend 组件（7 项）+ 关键环境变量（11 项）= 总计 26 项
-- 每项 OK = 1 分，WARN = 0.5 分，FAIL = 0 分
-- 评分 = round(得分 / 26 * 100)
-- 评分环形图 SVG：`stroke-dashoffset = 213.6 * (1 - 评分/100)`
+- 只计已确认适用、具备判定依据且有观测证据的项目；OK=1、WARN=0.5、FAIL=0。
+- UNKNOWN、N/A 不按 FAIL 计分，列出适用总项、已判定项、未知项和不适用项。评分为已判定项得分占比，同时展示覆盖率；不能隐藏未知项制造高分。
+- 有关键必需项 UNKNOWN，或没有可判定项时，不给整体“健康/可部署”结论；无可判定项不显示数值评分。
+- SVG 仅渲染上述已计算的值：`stroke-dashoffset = 213.6 * (1 - 评分/100)`。
 
 ### 对比报告
 
@@ -500,6 +501,10 @@ ascend.driver.version = "24.1"
 
 ### HTML 生成规则
 
+- 将 dump 的键、值、主机名、文件名、路径和日志全部视为不可信文本；插入文本或属性前使用 `html.escape(..., quote=True)`。禁止把数据直接拼接成 HTML/JS/CSS。
+- 模板中仅由渲染逻辑创建的固定标签片段可以作为 HTML；数据值必须先转义。数值、颜色和导航 ID 使用受控值；不把输入中的字符串当作指令执行。
+- 分享前对旧 dump、配置、命令行与 raw 文本重新脱敏。进程参数默认省略；敏感值仅显示 `***MASKED***`。`--filter` 不是脱敏保证，原始文本无法保证完全自动识别，需复核。
+- 已脱敏值相同只表示占位符相同，不能证明真实凭证一致。不同输入的采集范围不同，也不能把未知项判成配置删除。
 - 输出**自包含** HTML 文件（内联 CSS，无外部依赖，除 Google Fonts）
 - **Google Fonts**：两个模板从 Google Fonts CDN 加载 Sora、DM Sans 和 JetBrains Mono 字体。离线时（Ascend 服务器防火墙环境常见）自动降级到系统字体，设计仍然可用，只是字体不同。
 - **两种 HTML 生成路径**：
@@ -520,8 +525,8 @@ ascend.driver.version = "24.1"
 ## 重要注意事项
 
 - `_meta` 键包含采集元数据（工具版本、时间戳、主机名）— 比对逻辑中排除，但报告头部中包含。
-- 如果 JSON 中缺失某 section，表示该采集器未运行（如未提供 `--rank-table-path` 则无 `ping`/`hccl`/`link`/`vnic`/`tls` section，`network.peers` 也为空）。
-- Ascend 组件为空 `{}` 表示未找到 `version.info` 文件 — 标记为缺失，并交叉引用对应环境变量以判断组件是真正未安装还是仅未配置。
+- 缺失 section 的原因以 `_meta.collection[section]` 为准；可能是 skipped、failed 或旧格式未知。无 rank table 时相关网络项目为 skipped，解析失败为 failed，不能混淆。
+- Ascend 版本未取得时显示 UNKNOWN，引用 `source`、`collection_status`、`reason`；确认组件适用且已证明未安装时才作缺失诊断。
 - 环境变量值可能包含敏感信息（API Key、密码、令牌）— 采集脚本已自动脱敏（key 保留、值替换为 `***MASKED***`，并在 `env.__masking_warning__` 写入告警）；报告中仍需扫描并标记敏感变量。
 - 比对时，如果某 section 只在一侧存在，将该 section 的所有路径报告为"仅在文件 X 中"。
-- RC（候选发布）版本应标注为非生产版本 — 报告中标记但不判为 FAIL。
+- RC 标候选发布属性；是否允许部署由明确的配套资料与用户政策决定。
