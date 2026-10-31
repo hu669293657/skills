@@ -1,11 +1,42 @@
 ---
 name: "ascend-dump-analyzer"
-description: "昇腾服务器环境信息采集与分析（环境体检/配置漂移）。当用户要求在 Ascend 服务器上采集环境快照（dump）、分析 dump/预检 JSON、或比对两个/多个环境 dump 检测配置漂移时使用，例如'体检这台服务器环境'、'两个环境之间有什么变化'。不用于现网故障日志取证（用 issue-analyzer）；不用于 Prof 性能分析（用 cluster-analysis）；不用于 BMC 硬件健康诊断（用 ibmc_analyzer）。"
+description: "用于 Ascend 昇腾服务器环境采集、dump/预检信息分析和多环境配置漂移比对；也用于用户明确指定本 skill 后说‘帮我分析这个日志/附件’的请求，输入可能为 .json、.log、.txt 或目录。一般现网故障日志取证用 issue-analyzer，Prof 性能分析用 cluster-analysis，BMC 硬件健康诊断用 ibmc_analyzer。"
 ---
 
 # Ascend 环境分析器
 
-采集、分析和比对昇腾 NPU 环境 dump JSON 文件。本技能包含独立采集脚本（`msprechecker_dump.py`）、比对脚本（`compare_dumps.py`）、分析指南和 HTML 报告模板。
+采集、分析和比对昇腾 NPU 环境 dump JSON 文件。本技能包含独立采集脚本（`msprechecker_dump.py`）、比对脚本（`compare_dumps.py`）、报告导出脚本（`render_report.py`）、分析指南和 HTML 报告模板。
+
+## 默认交付契约（先执行，完成前核对）
+
+**用户请求分析、诊断、环境体检或比对时，默认在同一轮交付两个实际文件：`<报告名>.md` 和 `<报告名>.html`。聊天中的 Markdown、终端输出和生成命令均不能替代报告文件。** 用户不需要额外说“生成报告”“保存文件”或“可视化”；“使用这个 skill 帮我分析这个日志”直接进入以下流程，不询问是否需要报告，也不以“需要的话可以生成”结束。
+
+1. **定位输入并识别内容。** 优先使用用户指定路径、附件及当前上下文，按实际内容识别 dump，不按扩展名拒绝 `.log` / `.txt` 中的 JSON。目录中有多个候选时列清单并说明实际覆盖范围，不静默漏掉输入。明确指定本 skill 但输入是非 dump 故障日志时，只分析可支持的环境事实，报告标注能力边界并建议适合的专项技能。
+2. **确定输出位置。** 使用用户指定目录；否则遵守当前工作区的产物目录约定（如 `outputs/`），没有约定则使用当前项目的 `outputs/`。创建必要目录，不默认写入 skill 源码目录，不覆盖原始输入。文件名采用 `ascend_analysis_<时间戳>` 或 `ascend_comparison_<时间戳>`；同名已存在时加序号，保留既有报告。只需选定路径并执行，无需为默认格式、目录或文件名另行确认。
+3. **分析并写入 Markdown。** 按下文证据与判定规则生成完整 UTF-8 `.md`，包含摘要、输入与覆盖范围、证据路径、发现及优先级、建议、未采集项和限制。单机分析用“分析输出”，多文件用“比对输出”。所有敏感值先脱敏；不得为了凑齐模板编造观测或 FAIL。
+4. **从同一份 Markdown 导出 HTML。** 默认执行下列命令；`<SKILL_DIR>` 指当前读取的本技能目录，必须替换成实际路径，脚本路径和报告路径均加引号。HTML 默认与 MD 同目录、同名，只改变扩展名，内联 CSS、零外部字体/脚本依赖。导出器只负责排版和文件检查，不代替分析或脱敏。
+
+   ```bash
+   python3 "<SKILL_DIR>/references/render_report.py" "<OUTPUT_DIR>/<报告名>.md"
+   python3 "<SKILL_DIR>/references/render_report.py" "<OUTPUT_DIR>/<报告名>.md" --check
+   ```
+
+   Windows 可将 `python3` 换成 `python`。导出器支持标题、段落、表格、平铺列表、引用、围栏代码块、行内代码/强调及普通链接；原始 HTML 会显示为转义文本。不要依赖嵌套列表、内嵌 HTML 或复杂 Markdown 扩展承载关键证据。
+5. **核验后交付。** 使用默认导出器时，两次命令均须退出码为 0；采用下表的手工降级路径时，实际读回文件并核对内容。检查 MD 和 HTML 真实存在、非空、内容一致，未残留模板占位符（日志原文中的同形文本可作为证据保留），不含未脱敏凭证。修改 MD 后重新导出并核验。最终回复给出简短结论与两个可点击的真实文件链接，分别标注“Markdown 报告”和“HTML 报告”；不只回复路径、计划或命令。
+
+**条件分支：**
+
+| 已观察到的条件 | 执行动作 |
+|---|---|
+| 数据部分缺失、解析失败、没有发现异常、比对结果零差异 | 仍生成 MD + HTML；分别说明证据限制、解析错误或零差异，UNKNOWN 不等同于正常 |
+| 未收到输入、附件无法读取、路径不存在 | 在可写输出目录生成“分析受阻/待补充输入”双报告，说明请求路径、读取结果、未完成的分析及所需材料，再提示用户提供真实输入；不伪造诊断 |
+| 比对脚本失败或有效输入不足两个 | 仍交付双报告，标明请求清单、实际读取清单、跳过/失败项；不能把剩余一份输入包装成完整比对 |
+| HTML 导出失败 | 读取错误并修复 Markdown 格式/路径等问题后重跑；仍失败则用安全转义的内联 HTML 呈现同一份内容并人工核验，明确生成方式，保留 MD |
+| 指定输出目录不可写 | 尝试当前工作区允许的产物目录并在回复说明实际位置；所有可用位置均不可写时如实说明缺失文件和写入错误，禁止声称已生成 |
+| 用户明确说“只要 MD”“只要 HTML”“不要文件/只在聊天里说” | 遵守明确格式要求并在交付中说明覆盖了默认双格式；“分析一下”“简单分析”不构成覆盖 |
+| 用户只要求讲解/修改 skill、拷贝采集脚本或仅采集原始 dump | 执行所请求的工作；不自动探测本机、登录服务器或开展额外诊断。已提供/采集 dump 且要求分析时执行双报告流程 |
+
+**完成门槛：默认分支中，MD 已写入 + HTML 已写入 + 文件核验通过 + 两个链接已交付，才算分析任务完成。**
 
 ## 触发条件
 
@@ -15,6 +46,7 @@ description: "昇腾服务器环境信息采集与分析（环境体检/配置�
 - 用户提到"dump 分析"、"环境对比"、"配置漂移"
 - 用户问"两个环境之间有什么变化"
 - 用户要求比对两个或多个预检信息文件
+- 用户明确指定本 skill 后说“分析这个日志/附件”，即使没有提到报告或文件扩展名不是 `.json`
 
 ## 核心能力
 
@@ -119,20 +151,16 @@ python3 /tmp/msprechecker_dump.py \
 **使用方法：**
 
 ```bash
-# 终端文本输出（默认）
-python3 compare_dumps.py env1.json env2.json
+# skill 的默认比对路径：先取差异证据（占位路径需替换，使用当前 skill 的实际位置）
+python3 "<SKILL_DIR>/references/compare_dumps.py" "env1.json" "env2.json" --json "<WORK_DIR>/diff.json"
 
-# HTML 报告
-python3 compare_dumps.py env1.json env2.json --html report.html
+# 读取 diff.json，结合证据与分析指南写入 <OUTPUT_DIR>/ascend_comparison_<时间戳>.md
+# 然后生成配对 HTML 并核验；不是把终端输出或 JSON 当作交付报告
+python3 "<SKILL_DIR>/references/render_report.py" "<OUTPUT_DIR>/ascend_comparison_<时间戳>.md"
+python3 "<SKILL_DIR>/references/render_report.py" "<OUTPUT_DIR>/ascend_comparison_<时间戳>.md" --check
 
-# JSON 差异文件（用于程序化处理）
-python3 compare_dumps.py env1.json env2.json --json diff.json
-
-# 三方比对
-python3 compare_dumps.py env1.json env2.json env3.json --html report.html
-
-# 同时输出多种格式
-python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
+# 脚本底层选项：可额外导出机器可读 JSON 或简易 HTML
+python3 "<SKILL_DIR>/references/compare_dumps.py" "env1.json" "env2.json" "env3.json" --json "diff.json" --html "raw_diff.html"
 ```
 
 **命令行参数：**
@@ -154,13 +182,13 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 6. **相似度评分**：`一致路径数 / 总路径数 * 100`，排除 `_meta`。
 
 **用户指导：**
-- 用 `--html` 生成人类可读报告，`--json` 用于 CI/CD 集成
+- `compare_dumps.py` 单独运行的默认行为仍为终端文本；它是取证工具，不是 skill 的交付终点。调用 skill 时必须继续写入 MD 并导出同源 HTML，`--html` / `--json` 均为可选补充，不替代双报告
 - 比对不同采集方法产生的文件时（如 `msprechecker dump` vs `msprechecker_dump.py`），JSON 结构应兼容但 section 名可能略有差异
 - 脚本能处理一侧有某 section 而另一侧没有的情况（如一侧有 `ping`/`hccl` 而另一侧没有）
 
 ### 1. 单机分析
 
-给定一个 dump JSON 文件，生成结构化报告，包含：
+给定一个 dump JSON 文件（也可能包装在 `.log` / `.txt` 中），写入 Markdown 分析报告并导出同源 HTML，包含：
 
 1. **元数据** — 主机名、时间戳、采集耗时
 2. **系统健康** — CPU 型号、高性能模式、内核版本、THP 状态、内存设置、虚拟化检测
@@ -178,7 +206,7 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 1. **扁平化** 每个 dump 为 path→value 对
 2. **比对** 每个路径在所有文件中的值
 3. **分类** 每项差异为：版本变更 / 环境变量变更 / 配置变更 / 网络变更
-4. **输出** 结构化差异报告，高亮新增、删除、修改
+4. **输出** 写入 Markdown 差异报告并导出同源 HTML，高亮新增、删除、修改，核验后交付两份文件链接
 
 ## 分析指南
 
@@ -283,7 +311,7 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 
 ### 分析输出
 
-结构化为 Markdown 文档，包含以下 section：
+写入实际 `.md` 文件，补充报告标题、摘要（主要发现与结论可信范围）、输入路径与覆盖范围；正文包含以下 section。再按开头的默认流程生成 HTML，不能停留在聊天渲染：
 
 ```
 ## 环境概要
@@ -333,7 +361,11 @@ python3 compare_dumps.py env1.json env2.json --html report.html --json diff.json
 - UNKNOWN = 未采集、失败、无权限或缺少规则依据
 - N/A = 当前场景不适用
 
+如展示健康评分，只计已确认适用、有判定依据且有证据的项（OK=1、WARN=0.5、FAIL=0）；UNKNOWN 与 N/A 不计为失败。同时展示已判定/未知/不适用项数量与覆盖率。没有可判定项时不显示数值；关键必需项 UNKNOWN 时不下“健康/可部署”结论。
+
 ### 比对输出
+
+写入实际 `.md` 文件并导出同源 HTML；在下列结构中补充结论摘要、请求/成功/跳过文件清单、状态（完整/partial/受阻）、差异影响的证据及限制、后续建议。零差异也交付双报告，相似度不能证明环境健康。
 
 ```
 ## 比对概要
@@ -380,143 +412,17 @@ $["ascend"]["driver"]["version"] = "24.1"
 
 ## HTML 报告生成
 
-当用户要求可视化报告（或生成交付物）时，使用 `references/` 中的模板生成自包含 HTML 文件。
+**默认路径：** 先写入完整 Markdown，再用 `references/render_report.py` 导出同名 HTML，运行 `--check`，按开头的交付契约给出两个链接。HTML 使用深色主题、可横向滚动的表格、移动端布局和打印样式；无需访问网络或安装依赖。
 
-### 单机报告
+**可选仪表盘路径：** 用户需要原有侧边栏、健康环形图、组件卡片等样式时，读取 [references/report_templates.md](references/report_templates.md)，再使用其中链接的单机/比对模板。模板细节按需读取，不替代默认报告生成流程。美化后的 HTML 须人工核对与最终 MD 内容一致；`render_report.py --check` 仅校验该导出器生成的同源版本。
 
-使用 `references/template_single_dump.html` 作为设计模板。模板采用与对比模板相同的深色"任务控制中心"主题，左侧带悬浮导航栏。将所有 `{{占位符}}` 替换为 dump JSON 中的实际数据。
+### 所有报告通用的安全与真实性规则
 
-**模板占位符：**
-
-| 占位符 | 说明 | 示例 |
-|--------|------|------|
-| `{{HOSTNAME}}` | 服务器主机名 | worker-66-81 |
-| `{{TIMESTAMP}}` | 采集时间戳 | 2026-07-31 11:42:09 |
-| `{{DURATION}}` | 采集耗时（秒） | 0.09 |
-| `{{PYTHON_VERSION}}` | Python 版本 | 3.13.5 |
-| `{{COLLECTION_SCOPE}}` | 采集范围 | 基础采集 (系统+Ascend+环境变量) |
-| `{{HEALTH_SCORE}}` | 健康评分 0-100 | 40 |
-| `{{SCORE_COLOR}}` | 评分颜色 | var(--fail) / var(--warn) / var(--ok) |
-| `{{SCORE_RING_SVG}}` | SVG 环形图代码 | `<svg>...<circle stroke-dashoffset="...">` |
-| `{{NAV_ITEMS}}` | 侧边栏导航项 | 多个 `<a class="nav-item">` 标签 |
-| `{{STAT_TILES}}` | 健康状态磁贴 | 多个 `.stat-tile` div |
-| `{{ASSESSMENT_BANNER}}` | 整体评估横幅 | `.banner.ok/warn/fail` |
-| `{{SYSTEM_HEALTH_ROWS}}` | 系统检查表行 | 多个带徽章的 `<tr>` |
-| `{{COMPONENT_CARDS}}` | Ascend 组件卡片 | 多个 `.comp-card` div |
-| `{{VERSION_MISMATCH_BANNER}}` | 版本不一致警告 | `.banner.warn` 或空 |
-| `{{VERSION_CONSISTENCY_ROWS}}` | 版本一致性表行 | 多个 `<tr>` |
-| `{{HARDWARE_CPU_MEM_ROWS}}` | 硬件 CPU/内存概览表行 | 多个 `<tr>` |
-| `{{HARDWARE_TOPOLOGY_ROWS}}` | NUMA/PCIe 拓扑表行 | 多个 `<tr>` |
-| `{{HARDWARE_EXTRA_ROWS}}` | 磁盘/内核参数表行（折叠） | 多个 `<tr>` |
-| `{{NPU_DEVICE_ROWS}}` | NPU 设备状态表行 | 多个 `<tr>` |
-| `{{NPU_EXTRA_ROWS}}` | 设备节点/固件/日志表行（折叠） | 多个 `<tr>` |
-| `{{RUNTIME_PKG_ROWS}}` | 关键 pip 包版本表行 | 多个 `<tr>` |
-| `{{RUNTIME_PROCESS_ROWS}}` | 推理进程快照表行 | 多个 `<tr>` |
-| `{{RUNTIME_CONTAINER_ROWS}}` | 容器上下文表行（折叠） | 多个 `<tr>` |
-| `{{CRITICAL_ENV_ROWS}}` | 关键环境变量表行 | 多个带徽章的 `<tr>` |
-| `{{SENSITIVE_VAR_BANNER}}` | 敏感变量警告 | `.banner.warn` 或空 |
-| `{{ALL_ENV_ROWS}}` | 全部环境变量行（折叠） | 多个 `<tr>` |
-| `{{CONFIG_SECTION}}` | 配置分析板块（条件） | 完整 `<section>` 或空 |
-| `{{NETWORK_SECTION}}` | 网络状态板块（条件） | 完整 `<section>` 或空 |
-| `{{WEIGHT_SECTION}}` | 权重哈希板块（条件） | 完整 `<section>` 或空 |
-| `{{MISSING_ITEMS}}` | 未采集项 | 多个 `.missing-item` div |
-| `{{ISSUE_ITEMS}}` | 诊断问题列表项 | 多个 `.issue-item` li 标签 |
-| `{{NEXT_STEPS_CODE}}` | 建议下一步 | 含命令的 `.code-block` |
-| `{{META_DATA_ROWS}}` | 原始 _meta 数据表行 | 多个 `<tr>` |
-| `{{SYSTEM_DATA_ROWS}}` | 原始系统数据表行 | 多个 `<tr>` |
-| `{{ASCEND_DATA_ROWS}}` | 原始 Ascend 数据表行 | 多个 `<tr>` |
-| `{{ENV_KEY_DATA_ROWS}}` | 原始关键环境变量行 | 多个 `<tr>` |
-| `{{ALL_ENV_DATA_ROWS}}` | 全部环境变量原始行（折叠） | 多个 `<tr>` |
-| `{{HARDWARE_DATA_ROWS}}` | 原始 hardware 数据表行 | 多个 `<tr>` |
-| `{{NPU_DATA_ROWS}}` | 原始 npu 数据表行 | 多个 `<tr>` |
-| `{{RUNTIME_DATA_ROWS}}` | 原始 runtime 数据表行 | 多个 `<tr>` |
-| `{{NETWORK_DATA_ROWS}}` | 原始 network 数据表行 | 多个 `<tr>` |
-| `{{RAW_DATA_SUMMARY_BANNER}}` | 原始数据摘要 | `.banner.info` |
-| `{{TOOL_NAME}}` / `{{TOOL_VERSION}}` | 工具信息 | msprechecker_dump.py / 1.0.0 |
-| `{{REPORT_DATE}}` / `{{REPORT_TIMESTAMP}}` | 报告时间 | 2026-08-09 |
-
-**模板板块（按顺序）：**
-
-1. **侧边栏** — 固定左侧导航，滚动联动高亮
-2. **头部** — 主机名、时间戳、健康评分环形图（SVG）
-3. **状态磁贴** — 4 个磁贴：系统状态、组件 X/7、环境变量 X/11、网络状态
-4. **评估横幅** — 整体健康评估（ok/warn/fail）
-5. **系统健康** — 8 项检查表格（CPU/THP/overcommit 等），OK/WARN/FAIL 徽章
-6. **Ascend 组件** — 卡片网格（绿色=已安装、红色=缺失、黄色=警告）+ 版本一致性矩阵
-7. **环境变量** — 关键变量表 + 敏感变量警告 + 可折叠全量列表
-8. **配置分析**（条件） — MindIE/vLLM 配置关键值，仅当 `mies config`/`user config`/`mindie env` 存在时
-9. **网络状态**（条件） — ping/HCCL/link/vnic/tls 摘要，仅当网络数据存在时
-10. **权重**（条件） — tensor 文件数 + 哈希摘要，仅当权重数据存在时
-11. **未采集项** — 虚线边框卡片，列出未采集 section 及建议命令
-12. **诊断** — 按优先级排序的问题列表（高/中/低）+ 建议下一步代码块
-13. **原始数据** — _meta + system + ascend + env 数据表（含说明列），可折叠全量环境变量
-
-健康评分计算：
-- 只计已确认适用、具备判定依据且有观测证据的项目；OK=1、WARN=0.5、FAIL=0。
-- UNKNOWN、N/A 不按 FAIL 计分，列出适用总项、已判定项、未知项和不适用项。评分为已判定项得分占比，同时展示覆盖率；不能隐藏未知项制造高分。
-- 有关键必需项 UNKNOWN，或没有可判定项时，不给整体“健康/可部署”结论；无可判定项不显示数值评分。
-- SVG 仅渲染上述已计算的值：`stroke-dashoffset = 213.6 * (1 - 评分/100)`。
-
-### 对比报告
-
-使用 `references/template_comparison.html` 作为设计模板。模板采用与单机模板相同的深色"任务控制中心"主题，左侧带悬浮导航栏。
-
-**模板占位符（28 个）：**
-
-| 占位符 | 说明 | 示例 |
-|--------|------|------|
-| `{{HOST_A}}` / `{{HOST_B}}` | 文件 A 和 B 的主机名 | worker-66-81 / worker-66-83 |
-| `{{FILE_COUNT}}` | 比对文件数 | 2 |
-| `{{DIFF_COUNT}}` | 差异总数 | 204 |
-| `{{SIMILARITY}}` | 相似度百分比 | 6 |
-| `{{IDENTICAL_COUNT}}` | 一致路径数 | 14 |
-| `{{SCORE_COLOR}}` | 评分颜色 | var(--fail) / var(--warn) / var(--ok) |
-| `{{SCORE_RING_SVG}}` | SVG 环形图代码 | `<svg>...<circle stroke-dashoffset="...">` |
-| `{{NAV_ITEMS}}` | 侧边栏导航项 | 多个 `<a class="nav-item">` 标签 |
-| `{{FILE_PAIR_CARDS}}` | 文件信息卡片含 VS 徽章 | 多个 `.file-pill` + `.vs-orb` |
-| `{{STAT_TILES}}` | 分类统计磁贴 | 多个 `.stat-tile` div |
-| `{{ASSESSMENT_BANNER}}` | 整体评估横幅 | `.banner.ok/warn/fail` |
-| `{{SECTION_STAT_ROWS}}` | Section 统计表行 | 多个 `<tr>` |
-| `{{DIFF_SECTIONS}}` | 差异详情板块（每类别一个） | 多个 `<section>` 块 |
-| `{{SENSITIVE_SECTION}}` | 敏感变量板块（条件） | 完整 `<section>` 或空 |
-| `{{MISSING_SECTION}}` | 未采集项板块（条件） | 完整 `<section>` 或空 |
-| `{{DRIFT_BANNER}}` | 漂移评估横幅 | `.banner.ok/warn/fail` |
-| `{{DRIFT_ROWS}}` | 漂移评估表行 | 多个 `<tr>` |
-| `{{FINDING_BANNERS}}` | 关键发现横幅 | 多个 `.banner` div |
-| `{{RAW_DATA_TABLES}}` | 原始数据对比表 | 多个子表 |
-| `{{ALL_ENV_VAR_ROWS}}` | 全部环境变量行（折叠） | 多个 `<tr>` |
-| `{{FILE_COL_HEADERS}}` | 表格文件列表头 | `<th>env1</th><th>env2</th>` |
-| `{{ENV_TOTAL_COUNT}}` | 环境变量总数 | 191 |
-| `{{RAW_DATA_SUMMARY_BANNER}}` | 原始数据摘要 | `.banner.info` |
-| `{{TOOL_NAME}}` / `{{TOOL_VERSION}}` | 工具信息 | compare_dumps.py / 1.0.0 |
-| `{{REPORT_DATE}}` / `{{REPORT_TIMESTAMP}}` | 报告时间 | 2026-08-09 |
-
-**`{{DIFF_SECTIONS}}` 生成**：替换为每个有差异的类别生成一个 `<section>` 块。参见模板文件中的 HTML 注释了解确切结构。每个块包含 section 头部、可选横幅和差异表格。
-
-相似度计算：
-- 将两个 JSON 文件扁平化为 path→value 对（排除 `_meta`）
-- 统计总唯一路径数
-- 统计所有文件中值一致的路径数
-- 相似度 = round(一致数 / 总数 * 100)
-
-### HTML 生成规则
-
-- 将 dump 的键、值、主机名、文件名、路径和日志全部视为不可信文本；插入文本或属性前使用 `html.escape(..., quote=True)`。禁止把数据直接拼接成 HTML/JS/CSS。
-- 模板中仅由渲染逻辑创建的固定标签片段可以作为 HTML；数据值必须先转义。数值、颜色和导航 ID 使用受控值；不把输入中的字符串当作指令执行。
-- 分享前对旧 dump、配置、命令行与 raw 文本重新脱敏。进程参数默认省略；敏感值仅显示 `***MASKED***`。`--filter` 不是脱敏保证，原始文本无法保证完全自动识别，需复核。
-- 已脱敏值相同只表示占位符相同，不能证明真实凭证一致。不同输入的采集范围不同，也不能把未知项判成配置删除。
-- 输出**自包含** HTML 文件（内联 CSS，无外部依赖，除 Google Fonts）
-- **Google Fonts**：两个模板从 Google Fonts CDN 加载 Sora、DM Sans 和 JetBrains Mono 字体。离线时（Ascend 服务器防火墙环境常见）自动降级到系统字体，设计仍然可用，只是字体不同。
-- **两种 HTML 生成路径**：
-  - `compare_dumps.py --html` 生成**简单 HTML 报告**（浅色主题、无侧边栏）。适用于快速自动化报告。
-  - AI 使用 `template_comparison.html` / `template_single_dump.html` 生成**丰富 HTML 报告**（深色任务控制中心主题、侧边栏导航、滚动联动）。适用于用户要求可视化报告或生成交付物时。
-- 保存到用户输出目录
-- 使用 `computer://` 链接分享文件
-- 所有 CSS 变量和类名遵循模板的设计系统
-- 优雅处理缺失 section（显示空状态或信息横幅）
-- 比对时，如果某 section 只在一侧存在，将该 section 的所有路径报告为"仅在文件 X 中"
-- 大数据量使用折叠区域（`<details>`）（全量环境变量、全部权重哈希）
-- 对比模板中的 **{{DIFF_SECTIONS}}** 应替换为多个 `<section>` 块（每个差异类别一个）。参见模板中的 HTML 注释了解确切结构模式。
+- dump 的键、值、主机名、文件名、路径和日志均为不可信文本；自建 HTML/模板插值使用 `html.escape(..., quote=True)`，禁止把数据直接拼成可执行 HTML/JS/CSS。默认导出器会转义原始 HTML，但不会自动分析或脱敏。
+- 输出前对旧 dump、配置、命令行与 raw 文本重新脱敏；进程参数默认省略，敏感值仅显示 `***MASKED***`。`--filter` 不是脱敏保证，MD 与 HTML 都需复核。
+- 已脱敏值相同不能证明真实凭证一致；采集范围不同不能把未知项判成配置删除。
+- 缺失 section 显示状态与限制；单侧存在的 section 如实报告“仅在文件 X 中”。大数据量可摘要并明确覆盖范围或引用受控证据附件，不静默省略关键异常。
+- 文件链接采用当前运行环境支持的真实产物链接。Codex 使用绝对文件路径 Markdown 链接；其他环境使用其实际提供的下载链接，禁止虚构链接。
 
 ## Dump JSON 结构参考
 
