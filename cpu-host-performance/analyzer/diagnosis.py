@@ -340,12 +340,29 @@ def diagnose(m):
                 ["结合 numactl -H 与 numastat 快照确认内存分布 (本报告仅有拓扑与迁移旁证)",
                  "对关键线程做节点内绑定 (numactl --cpunodebind/--membind), 执行前保存现状",
                  "此结论为风险提示, 不应直接认定跨 NUMA 为根因"])
+    # ============ NPU / 宿主机 PID / NUMA 配置证据 ============
+    npu_risks = [r for r in m.get('npu_affinity', {}).get('rows', [])
+                 if r['state'] in ('UNCONFINED', 'REMOTE_ALLOWED', 'REMOTE_OBSERVED')]
+    if npu_risks:
+        window = 'ftrace %.3f~%.3fs；配置/PSR 为采集结束快照' % (m.get('t_start', 0), m.get('t_end', 0))
+        add('NUMA_RISK', 'WARNING', 'MEDIUM', 'NPU 任务 CPU 亲和性存在风险（待性能验证）',
+            [{'metric': 'NPU/PID 与 CPU 亲和性',
+              'value': '；'.join('NPU%d/PID%d: allowed=%s, observed=%s, local=%s' %
+                               (r['npu'], r['pid'], r['allowed'], r['observed'], r['affinity']) for r in npu_risks),
+              'threshold': '全量线程 allowed CPU 收敛到 NPU 亲和 CPU；观测核应位于亲和范围',
+              'source': 'hostbound/npu_smi_topology.txt + npu_smi_info.txt + pid_*_thread_affinity.txt/threads.txt + ftrace',
+              'time_window': window}],
+            '配置可能引入跨节点运行或共享 CPU 争用；未关联 Device 空泡/性能差异，不能确认 HostBound 根因',
+            '已识别 NPU 对应进程的调度许可范围未收敛，或观测到非亲和 CPU；内存页位置仍待核验',
+            ['按第二部分的 NPU/PID 对照核验，第三部分给出宿主机预检、逐 TID 备份、互斥分区、taskset 命令及回滚',
+             '同负载复采验证吞吐与延迟；taskset 不迁移内存页，不越过有效 cpuset'])
+
     # ============ 7. CPU_IDLE_EXCESSIVE / HOST_NOT_BOTTLENECK ============
     if avg_util is not None and avg_util <= (100 - T["idle_high"]) / 100 * 100:
         pass  # 条件等价改写, 见下方清晰分支
     if avg_util is not None and (100 - avg_util) >= T["idle_high"]:
         imbalance = any(f["type"] in ("CPU_IMBALANCE", "IRQ_HOTSPOT", "SOFTIRQ_HOTSPOT") for f in findings)
-        if not imbalance:
+        if not imbalance and not npu_risks:
             add("HOST_NOT_BOTTLENECK", "OK", "HIGH", "Host CPU 负载健康，不是当前瓶颈",
                 [{"metric": "全机平均 CPU 利用率", "value": "%.1f%%" % avg_util, "threshold": "空闲≥%.0f%%" % T["idle_high"]},
                  {"metric": "最高核利用率", "value": "%.1f%%" % (max_cpu or 0), "threshold": "-"}],
@@ -353,7 +370,7 @@ def diagnose(m):
                 "计算负载低于算力供给",
                 ["从 NPU 利用率、数据管道 (dataloader)、算子耗时等方向继续排查",
                  "如需深入可用本 Skill 附带的 Prof/集群分析工具链"])
-        else:
+        elif imbalance:
             add("CPU_IDLE_EXCESSIVE", "WARNING", "MEDIUM", "多数核心空闲但存在热点核",
                 [{"metric": "全机平均利用率", "value": "%.1f%%" % avg_util, "threshold": "-"},
                  {"metric": "热点核", "value": "见上方不均衡/中断结论", "threshold": "-"}],

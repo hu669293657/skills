@@ -7,6 +7,7 @@ import io
 import re
 from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
 from .diagnosis import THRESHOLDS
+from .npu_report import affinity_html, binding_html
 
 
 def _cs_limit(n_cpus):
@@ -20,7 +21,7 @@ _CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--txt);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",
 "Noto Sans CJK SC",sans-serif;font-size:14px;line-height:1.7;padding:0 0 60px}
-.wrap{max-width:900px;margin:0 auto;padding:0 20px}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
 header{background:linear-gradient(135deg,#10161f,#141d2a);border-bottom:1px solid var(--border);
 padding:26px 0 18px;margin-bottom:22px}
 h1{font-size:22px;font-weight:600;letter-spacing:.5px}
@@ -58,6 +59,28 @@ border-radius:8px;padding:14px 18px;margin:12px 0}
 .warn-box{background:#2a2110;border:1px solid #6b5410;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13px}
 ol.pri{margin:8px 0 0 22px}ol.pri li{margin:5px 0}
 .footer{color:var(--muted);font-size:12px;margin-top:40px;text-align:center}
+.numa-group{margin:16px 0;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+.numa-title{font-size:16px;font-weight:650;margin-bottom:12px;color:#e6edf3}
+.numa-title span{font-size:12px;font-weight:400;color:var(--muted);margin-left:10px}
+.npu-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.npu-card{min-width:0;border:1px solid var(--border);border-top:3px solid var(--orange);border-radius:9px;background:var(--bg);padding:14px}
+.npu-card.good{border-top-color:var(--green)}.npu-card.danger{border-top-color:var(--red)}
+.npu-heading{display:flex;gap:8px;justify-content:space-between;align-items:start;flex-wrap:wrap}
+.aff-state{font-size:11px;padding:2px 7px;border-radius:12px;background:#342a15;color:#efc36a}
+.good .aff-state{background:#143224;color:#6dd69a}.danger .aff-state{background:#3a2025;color:#f39a9a}
+.npu-process{margin:12px 0;font-size:14px}.npu-process strong{margin-left:8px;color:#e6edf3}
+.npu-process small{display:block;color:var(--muted);font-size:11px;margin-top:3px}
+.npu-process-entry{margin-top:10px}.npu-process-entry+.npu-process-entry{border-top:1px solid var(--border);padding-top:12px}
+.numa-verdict{font-size:12px;color:#f39a9a;margin:8px 0}.numa-verdict.local-numa{color:#6dd69a}
+.numa-verdict.unknown-numa{color:#efc36a}
+.aff-line{display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;font-size:12px;margin:6px 0}
+.aff-line span{color:var(--muted)}code{font-family:Consolas,monospace;overflow-wrap:anywhere}
+.aff-target{margin-top:12px;border-top:1px solid var(--border);padding-top:10px;display:flex;gap:14px;align-items:center}
+.aff-target span{font-size:12px;color:var(--muted)}.aff-target code{font-size:17px;color:#8cc5ff;font-weight:600}
+pre{white-space:pre;overflow:auto;background:#090e15;border:1px solid var(--border);border-radius:8px;padding:16px;font-size:12px;line-height:1.6;margin:10px 0}
+.code-panel{position:relative;padding-top:30px}.copy-code{position:absolute;right:0;top:0;background:#1c3252;border:1px solid #315379;border-radius:6px;color:#a9d1ff;padding:4px 10px;cursor:pointer}
+.code-panel pre{max-height:440px}
+@media(max-width:700px){.npu-grid{grid-template-columns:1fr}.wrap{padding:0 12px}}
 @media print{body{background:#fff;color:#111}.card,.kpi,.finding,.chart,.status-hero{border-color:#ccc}}
 /* ---- 左侧固定导航目录 ---- */
 :root{--tocpad:216px}
@@ -92,6 +115,13 @@ function upd(){
 window.addEventListener('scroll',upd,{passive:true});
 window.addEventListener('resize',upd);upd();
 })();
+function copyBinding(button){
+var text=button.parentNode.querySelector('code').textContent;
+function done(){button.textContent='已复制';setTimeout(function(){button.textContent='复制完整方案'},1800)}
+function fallback(){var a=document.createElement('textarea');a.value=text;document.body.appendChild(a);a.select();
+try{if(document.execCommand('copy'))done();else button.textContent='请手动选择代码复制'}finally{a.remove()}}
+if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(done,fallback);else fallback();
+}
 </script>
 """
 
@@ -162,16 +192,14 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<p><span class='lbl'>置信度：</span><span class='evt'>%s</span> ｜ <span class='lbl'>类别：</span>"
           "<span class='evt'>%s</span></p>" % (esc(p["confidence"]), esc(p["type"])))
         A("<p><span class='lbl'>影响：</span>%s</p>" % esc(p["impact"]))
-        A("<p class='lbl' style='margin-top:10px'>解决方案（按优先级）：</p><ol class='pri'>")
-        for r in p["recommendation"][:5]:
-            A("<li>%s</li>" % esc(r))
-        A("</ol></div>")
+        A("<p class='note'>完整优化方案与可复制命令见第三部分。</p></div>")
     else:
         A("<div class='card'><p>未发现明显的 CPU Host 侧问题。若业务性能仍异常，建议从 NPU/IO/框架侧继续排查。</p></div>")
     if m.get("warnings"):
         A("<div class='warn-box'>⚠ <b>数据告警</b>：%s</div>" % esc("；".join(m["warnings"])))
     # ---------- 2. 证据总表 ----------
-    A("<h2>2. 问题证据总表</h2>")
+    A("<h2>2. 问题证据总表与根因判断</h2>")
+    A("<h3>2.1 关键指标证据</h3>")
     A("<table><tr><th>指标</th><th class='num'>当前值</th><th>基线/阈值</th><th>状态</th></tr>")
     if st.get("avg_util") is not None:
         A(_row("CPU 平均利用率", "%.1f%%" % st["avg_util"], "&lt;70% 健康",
@@ -193,16 +221,44 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
            "关注" if max([pc.get("irq_ratio", 0) for pc in m["per_cpu"].values()] or [0]) >= 15 else "正常", False))
     A(_row("软中断总占比", "%.2f%%" % soft.get("total_ratio", 0), "单核≥20% 关注热点",
            "关注" if max([pc.get("softirq_ratio", 0) for pc in m["per_cpu"].values()] or [0]) >= 20 else "正常", False))
-    A("</table><p class='note'>指标含义见第 14 节「指标与事件说明」。</p>")
-    # ---------- 3. 问题详情 ----------
-    A("<h2>3. 问题详情</h2>")
+    A("</table><p class='note'>指标含义见第 13 节「指标与事件说明」。</p>")
+    # ---------- 2.2 根因 ----------
+    A("<h3>2.2 根因判断与证据链</h3>")
+    if p:
+        A("<div class='card'><p><span class='lbl'>现象</span> → %s</p>" % esc(p["title"]))
+        A("<p><span class='lbl'>证据</span> → %s</p>" % esc(
+            "；".join("%s=%s（阈值 %s）" % (e["metric"], e["value"], e["threshold"]) for e in p["evidence"])))
+        A("<p><span class='lbl'>推断</span> → %s</p>" % esc(p["possible_root_cause"]))
+        A("<p><span class='lbl'>候选判断</span> → <span class='evt'>%s</span>（%s）</p></div>" % (
+            esc(p["type"]), esc(p.get("explanation", ""))))
+    else:
+        A("<p>未发现需要根因判断的问题。</p>")
+    A(affinity_html(m.get("npu_affinity", {})))
+    # ---------- 3. 建议 ----------
+    A("<h2>3. 优化建议</h2>")
+    pri = {"CRITICAL": "P0（立即处理）", "WARNING": "P1（尽快处理）", "INFO": "P2（择机处理）", "OK": "—"}
+    A(binding_html(m.get("npu_affinity", {})))
+    shown = False
+    for f in diag["findings"]:
+        if f["severity"] in ("INFO", "OK"):
+            continue
+        shown = True
+        A("<div class='finding' style='border-left-color:%s'>" % sev_color.get(f["severity"], "#6b7280"))
+        A("<h3>%s — %s</h3><ol class='pri'>" % (pri[f["severity"]], esc(f["title"])))
+        for r in f["recommendation"]:
+            A("<li>%s</li>" % esc(r))
+        A("</ol></div>")
+    if not shown:
+        A("<p>当前无需紧急优化动作；保持对 NPU 侧性能的持续观察即可。</p>")
+    # ---------- 4. 问题详情 ----------
+    A("<h2>4. 问题详情</h2>")
     if diag["findings"]:
         for f in diag["findings"]:
             A(_finding_html(f, esc, sev_color, sev_cn))
     else:
         A("<p>未发现问题。</p>")
-    # ---------- 4. 总体状态 ----------
-    A("<h2>4. CPU 总体状态</h2>")
+    # ---------- 5. 总体状态 ----------
+    A("<h2>5. CPU 总体状态</h2>")
     ps = m.get("proc_stat") or {}
     if ps:
         A("<div class='card'><p>/proc/stat 快照（开机以来累计）：user %.1f%%、system %.1f%%、iowait %.1f%%、"
@@ -212,8 +268,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<p class='note'>注意：trace 只能区分 busy/idle；user/system/iowait 为开机累计值，仅供参考。</p></div>")
     else:
         A("<p>无 /proc/stat 快照，总体占用以 trace 计算为准。</p>")
-    # ---------- 5. Core Balance ----------
-    A("<h2>5. CPU Core Balance（各核心负载）</h2>")
+    # ---------- 6. Core Balance ----------
+    A("<h2>6. CPU Core Balance（各核心负载）</h2>")
     A("<div class='chart'>")
     if m["per_cpu"]:
         _known = [(c, pc) for c, pc in sorted(m["per_cpu"].items(), key=lambda kv: int(str(kv[0])) if str(kv[0]).isdigit() else 0)
@@ -246,8 +302,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
             esc(hot[0]), hot[1]["util"], esc(cold[0]), cold[1]["util"],
             "<b style='color:#d98f00'>存在明显不均衡，详见问题详情。</b>"
             if hot[1]["util"] - cold[1]["util"] >= 40 else "负载分布尚可。"))
-    # ---------- 6. Scheduler ----------
-    A("<h2>6. Scheduler 调度分析</h2>")
+    # ---------- 7. Scheduler ----------
+    A("<h2>7. Scheduler 调度分析</h2>")
     A("<div class='card'>")
     A("<p>上下文切换总计 <b>%s</b> 次（%.0f 次/秒）%s</p>" % (
         format(sch.get("cs_total", 0), ","), sch.get("cs_rate", 0) or 0,
@@ -271,9 +327,9 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
             A("<tr><td>%s</td><td class='num'>%.2f</td><td class='num'>%.3f</td><td class='num'>%d</td></tr>"
               % (esc(_pid_disp(comm, pid)), mx * 1000, avg * 1000, n))
         A("</table>")
-    # ---------- 7. IRQ / SoftIRQ ----------
-    A("<h2>7. IRQ / SoftIRQ 分析</h2>")
-    A("<h3>7.1 硬中断</h3>")
+    # ---------- 8. IRQ / SoftIRQ ----------
+    A("<h2>8. IRQ / SoftIRQ 分析</h2>")
+    A("<h3>8.1 硬中断</h3>")
     A("<p>硬中断总 CPU 占比 <b>%.2f%%</b>（%s 次）。</p>" % (irq.get("total_ratio", 0), format(irq.get("total_count", 0), ",")))
     if irq.get("top_names"):
         A("<table><tr><th>中断源</th><th class='num'>次数</th><th class='num'>累计耗时 ms</th><th>说明</th></tr>")
@@ -281,7 +337,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
             A("<tr><td class='evt'>%s</td><td class='num'>%s</td><td class='num'>%.1f</td><td>%s</td></tr>"
               % (esc(n), format(cnt, ","), t * 1000, esc(_explain_irq_name(n))))
         A("</table>")
-    A("<h3>7.2 软中断</h3>")
+    A("<h3>8.2 软中断</h3>")
     A("<p>软中断总 CPU 占比 <b>%.2f%%</b>（%s 次）。</p>" % (soft.get("total_ratio", 0), format(soft.get("total_count", 0), ",")))
     if soft.get("top_actions"):
         A("<table><tr><th>软中断类型</th><th class='num'>次数</th><th class='num'>累计耗时 ms</th><th>说明</th></tr>")
@@ -290,9 +346,9 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
               % (esc(n), format(cnt, ","), t * 1000,
                  esc(EVENT_EXPLANATIONS.get(n, "未收录软中断类型，参考内核文档。"))))
         A("</table>")
-    A("<p class='note'>各核中断分布见第 5 节表格与上方图表。</p>")
-    # ---------- 8. Freq / Idle ----------
-    A("<h2>8. CPU Frequency / Idle 分析</h2>")
+    A("<p class='note'>各核中断分布见第 6 节表格与上方图表。</p>")
+    # ---------- 9. Freq / Idle ----------
+    A("<h2>9. CPU Frequency / Idle 分析</h2>")
     freq = m.get("freq", {})
     if freq.get("available"):
         rows = sorted(freq["per_cpu"].items())
@@ -319,8 +375,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
                 "多数核心大量空闲，负载分布问题见问题详情。" if (sum(avgs.values()) / len(avgs)) >= 70 else ""))
     else:
         A("<p>trace 中无 cpu_idle 事件，空闲比基于 swapper 任务近似。</p>")
-    # ---------- 9. Task ----------
-    A("<h2>9. Task / Thread 分析</h2>")
+    # ---------- 10. Task ----------
+    A("<h2>10. Task / Thread 分析</h2>")
     tk = m.get("tasks", {})
     if tk.get("top_runtime"):
         A("<table><tr><th>Top 运行时间任务</th><th class='num'>累计运行 ms</th><th>说明</th></tr>")
@@ -345,48 +401,21 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         for pid, comm, n in tk["top_migration"]:
             A("<tr><td>%s</td><td class='num'>%d</td></tr>" % (esc(_pid_disp(comm, pid)), n))
         A("</table>")
-    # ---------- 10. Affinity / NUMA ----------
-    A("<h2>10. Affinity / NUMA 分析</h2>")
+    # ---------- 11. Affinity / NUMA ----------
+    A("<h2>11. Affinity / NUMA 分析</h2>")
     numa_txt = (m.get("snapshot", {}) or {}).get("numa.txt", "")
     if numa_txt and "node" in numa_txt:
         nn = numa_txt.count("== /sys/devices/system/node/node") if "== " in numa_txt else None
         A("<p>快照包含 NUMA 拓扑信息（%s 个节点可见）。</p>" % (nn if nn else "多"))
     if tk.get("top_runtime"):
-        A("<p>Top 任务运行分布与各核利用率见第 5 节；任务集中在少数核时可结合绑核配置判断。</p>")
-    A("<p class='note'><b>证据说明</b>：当前 trace 未包含跨 NUMA 访问的直接证据，NUMA 结论置信度为低"
-      "（Evidence insufficient），如需精确判断请补充 <span class='evt'>numactl -H</span> 与 "
-      "<span class='evt'>numastat</span> 快照。</p>")
-    # ---------- 11. 时间窗口 ----------
-    A("<h2>11. 时间窗口分析</h2>")
+        A("<p>Top 任务运行分布与各核利用率见第 6 节；任务集中在少数核时可结合绑核配置判断。</p>")
+    A("<p>CPU 亲和性、NPU/PID 对应及线程运行核见第二部分；互斥 CPU 分区和宿主机命令见第三部分。</p>")
+    A("<p class='note'>内存页 NUMA 分布与跨节点内存访问仍须 numastat -p PID、/proc/PID/numa_maps 或性能数据验证；taskset 本身不迁移内存页。</p>")
+    # ---------- 12. 时间窗口 ----------
+    A("<h2>12. 时间窗口分析</h2>")
     A(_time_window_html(m, esc))
-    # ---------- 12. 根因 ----------
-    A("<h2>12. 根因判断</h2>")
-    if p:
-        A("<div class='card'><p><span class='lbl'>现象</span> → %s</p>" % esc(p["title"]))
-        A("<p><span class='lbl'>证据</span> → %s</p>" % esc(
-            "；".join("%s=%s（阈值 %s）" % (e["metric"], e["value"], e["threshold"]) for e in p["evidence"])))
-        A("<p><span class='lbl'>推断</span> → %s</p>" % esc(p["possible_root_cause"]))
-        A("<p><span class='lbl'>根因</span> → <span class='evt'>%s</span>（%s）</p></div>" % (
-            esc(p["type"]), esc(p.get("explanation", ""))))
-    else:
-        A("<p>未发现需要根因判断的问题。</p>")
-    # ---------- 13. 建议 ----------
-    A("<h2>13. 优化建议</h2>")
-    pri = {"CRITICAL": "P0（立即处理）", "WARNING": "P1（尽快处理）", "INFO": "P2（择机处理）", "OK": "—"}
-    shown = False
-    for f in diag["findings"]:
-        if f["severity"] in ("INFO", "OK"):
-            continue
-        shown = True
-        A("<div class='finding' style='border-left-color:%s'>" % sev_color.get(f["severity"], "#6b7280"))
-        A("<h3>%s — %s</h3><ol class='pri'>" % (pri[f["severity"]], esc(f["title"])))
-        for r in f["recommendation"]:
-            A("<li>%s</li>" % esc(r))
-        A("</ol></div>")
-    if not shown:
-        A("<p>当前无需紧急优化动作；保持对 NPU 侧性能的持续观察即可。</p>")
-    # ---------- 14. 数据说明与指标解释 ----------
-    A("<h2>14. 数据说明与指标解释</h2>")
+    # ---------- 13. 数据说明与指标解释 ----------
+    A("<h2>13. 数据说明与指标解释</h2>")
     A("<h3>数据概况</h3><div class='card'>")
     A("<p>trace 时间范围：%.3f ~ %.3f（相对秒），时长 %.1f 秒</p>" % (m.get("t_start", 0), m.get("t_end", 0), st["duration"]))
     A("<p>CPU 数量（参与统计）：%d；报告核数（nproc）：%s</p>" % (st["n_cpus"], esc(m.get("n_cpus_report") or "-")))
@@ -470,17 +499,15 @@ def _finding_html(f, esc, sev_color, sev_cn):
                      esc(f["title"]), color, esc(sev_cn.get(f["severity"], f["severity"])), esc(f["confidence"])))
     parts.append("<div class='tagline'>类别：<span class='evt'>%s</span> — %s</div>" % (
         esc(f["type"]), esc(f.get("explanation", ""))))
-    parts.append("<p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th></tr>")
+    parts.append("<p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th><th>来源 / 时间窗</th></tr>")
     for e in f["evidence"]:
-        parts.append("<tr><td class='evt'>%s</td><td><b>%s</b></td><td>%s</td></tr>" % (
-            esc(e["metric"]), esc(e["value"]), esc(e["threshold"])))
+        parts.append("<tr><td class='evt'>%s</td><td><b>%s</b></td><td>%s</td><td>%s<br>%s</td></tr>" % (
+            esc(e["metric"]), esc(e["value"]), esc(e["threshold"]),
+            esc(e.get('source', 'ftrace / 对应系统快照')), esc(e.get('time_window', '本次采集窗口；累计快照除外'))))
     parts.append("</table>")
     parts.append("<p><span class='lbl'>影响：</span>%s</p>" % esc(f["impact"]))
     parts.append("<p><span class='lbl'>可能根因：</span>%s</p>" % esc(f["possible_root_cause"]))
-    parts.append("<p class='lbl'>建议措施：</p><ol class='pri'>")
-    for r in f["recommendation"]:
-        parts.append("<li>%s</li>" % esc(r))
-    parts.append("</ol></div>")
+    parts.append("<p class='note'>对应优化动作见第三部分。</p></div>")
     return "".join(parts)
 
 def _time_window_html(m, esc):

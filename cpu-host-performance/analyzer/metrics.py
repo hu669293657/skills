@@ -126,6 +126,7 @@ WAKE_MAX_AGE_S = 30.0   # 唤醒等待老化阈值 (秒): 超时未运行的唤�
 
 def compute_metrics(td):
     """输入 parser.TraceData -> Metrics dict (全中文注释字段)"""
+    from .npu_affinity import analyze_npu_affinity
     events = sorted(td.events, key=lambda e: (e.ts if e.ts is not None else 0))
     m = {
         "available": set(), "warnings": list(td.warnings),
@@ -141,6 +142,7 @@ def compute_metrics(td):
     if not events:
         m["events_ok"] = False
         m["warnings"].append("无任何可分析事件")
+        m["npu_affinity"] = analyze_npu_affinity(m)
         return m
 
     m["t_start"] = events[0].ts
@@ -444,6 +446,9 @@ def compute_metrics(td):
     # ---------- tasks ----------
     def _top(d, k=8):
         return sorted(((p, c, v) for (p, c), v in d.items()), key=lambda x: -x[2])[:k]
+    all_observed = defaultdict(set)
+    for (pid, _comm), values in task_cpus.items():
+        all_observed[pid].update(values)
     m["tasks"] = {
         "top_runtime": sorted(((p, c, v) for (p, c), v in task_runtime.items()),
                               key=lambda x: -x[2])[:8],
@@ -457,6 +462,7 @@ def compute_metrics(td):
                              for (p, c), cp in task_cpus.items()
                              if task_runtime.get((p, c), 0.0) > 0),
                             key=lambda x: -x[3])[:8],
+        "observed_cpus_by_tid": {pid: sorted(values) for pid, values in all_observed.items()},
     }
     # ---------- 时间序列 (120 桶) ----------
     n_bucket = 120
@@ -552,6 +558,7 @@ def compute_metrics(td):
         m["warnings"].append("采集期间 ring buffer 溢出 %d 条事件，trace 可能不完整，结论置信度请酌情下调" % over)
     # 元数据补充
     m["governor"] = _parse_governor(td.snapshot.get("cpufreq.txt", ""))
+    m["npu_affinity"] = analyze_npu_affinity(m)
     return m
 
 def _to_int(v):

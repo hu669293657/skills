@@ -7,7 +7,7 @@
 - **多格式健壮解析**：tar.gz / zip / 目录 / 裸 ftrace 文本 / trace-cmd report 文本 / Chrome Tracing / Perfetto JSON，自动探测无需人工转换
 - **指标全覆盖**：CPU 利用率与均衡、调度延迟（avg/p50/p95/p99/max）、硬中断、软中断（含 NET_RX 等 vec 归类）、CPU 频率与 Idle/C-state、任务运行时长、迁移/抢占、wakeup 频率
 - **组合式诊断**：拒绝"单指标定罪"，10 类具体诊断 + 证据不足兜底，每条结论带置信度（HIGH/MEDIUM/LOW）
-- **全中文报告**：每个指标附"它是什么"的中文释义；报告 14 节固定结构，先结论后证据再建议
+- **全中文报告**：每个指标附"它是什么"的中文释义；报告 13 节固定结构，第二节合并证据与根因，第三节给优化建议
 - **零依赖离线可用**：Python 3.7+ 仅标准库；HTML 报告为单文件 inline SVG，无 CDN/外部 JS
 - **采集脚本独立**：单文件 bash 脚本，仅依赖 bash + ftrace + 核心 utils，不联网、不装包、结束自动恢复 tracing 配置
 
@@ -47,35 +47,36 @@ python3 analyzer/analyze_cpu_trace.py <输入路径> -o <输出目录>
 ## 采集脚本使用（发给客户）
 
 ```bash
-sudo bash cpu_trace_collect.sh --duration 30          # 默认 30s 全量模式
-sudo bash cpu_trace_collect.sh --duration 10 -m       # 精简模式，仅 sched_switch
-sudo bash cpu_trace_collect.sh -t 60 -c 0-47          # 指定时长与 CPU 列表
+sudo bash scripts/cpu_trace_collect.sh --duration 30 --hostbound  # 宿主机运行，自动发现全部占卡 PID
+sudo bash scripts/cpu_trace_collect.sh --duration 10 -m       # 精简模式，仅 sched_switch
+sudo bash scripts/cpu_trace_collect.sh -t 60 -c 0-47          # 指定时长与 CPU 列表
 ```
 
 产物 `cpu_trace_YYYYMMDD_HHMMSS.tar.gz` 直接回传即可。脚本不修改业务进程，采集结束自动恢复 tracing 原配置（onoff/tracing_on/当前_tracer）。
 
 导出提速：脚本并行读取各 CPU 独立缓冲区（`per_cpu/cpu*/trace`）后拼接为 trace.txt，多核机器上比读取全局 trace 明显更快（核心越多提速越接近线性）；分析器加载后会按时间戳全局稳定排序，分析结果与传统 `cat trace` 方式完全一致。
 
-## 报告结构（14 节固定）
+## 报告结构（13 节固定）
 
-1. Executive Summary（结论摘要：Host 状态、核心问题、影响、方案）
-2. 问题证据总表
-3. 问题详情（每问题：现象 → 证据 → 阈值与解释 → 根因假设 → 建议）
-4. CPU 总体状态
-5. CPU Core Balance（各核心负载）
-6. Scheduler 调度分析
-7. IRQ / SoftIRQ 分析
-8. CPU Frequency / Idle 分析
-9. Task / Thread 分析
-10. Affinity / NUMA 分析
-11. 时间窗口分析
-12. 根因判断
-13. 优化建议（按优先级，含具体命令）
-14. 数据说明与指标解释（数据概况、分析限制、指标/事件中文释义）
+1. Executive Summary（结论摘要：Host 状态、核心问题、影响）
+2. 问题证据总表与根因判断（指标、证据链、按 NUMA 分组的 NPU/PID/线程亲和性卡片）
+3. 优化建议（可复制的宿主机绑核方案，含预检、逐 TID 备份、核验和回滚）
+4. 问题详情
+5. CPU 总体状态
+6. CPU Core Balance（各核心负载）
+7. Scheduler 调度分析
+8. IRQ / SoftIRQ 分析
+9. CPU Frequency / Idle 分析
+10. Task / Thread 分析
+11. Affinity / NUMA 分析
+12. 时间窗口分析
+13. 数据说明与指标解释
+
+NPU 主进程按显存占用最高推定，同时保留所有占卡宿主机 PID。报告区分当前 allowed CPU、ftrace 观测核与 PSR 最近运行核；两卡共享亲和区间时分为互不重叠的两份，保留 SMT 同胞，遵守在线 CPU 与有效 cpuset。详细判据与案例见 `references/npu_numa_binding.md`。
 
 骨架模板见 `templates/report_template.md`（供数据缺失时人工撰写或结构定制）；真实样例见 `examples/sample_report.md` 与 `examples/sample_report.html`。
 
-HTML 报告左侧带有固定导航栏（宽屏可见）：列出全部 14 节，点击平滑跳转，滚动时自动高亮当前章节；窄屏（≤1024px）与打印时自动隐藏，不影响排版与导出。
+HTML 报告左侧带有固定导航栏（宽屏可见）：列出全部 13 节，点击平滑跳转，滚动时自动高亮当前章节；窄屏（≤1024px）与打印时自动隐藏，不影响排版与导出。
 
 ## 诊断类型清单
 

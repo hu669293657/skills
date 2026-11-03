@@ -7,6 +7,7 @@ import io
 from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, IRQ_NAME_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
 from .diagnosis import THRESHOLDS
 from .report_html import render_html, _cs_limit
+from .npu_report import affinity_md, binding_md
 
 SEV_COLOR = {"CRITICAL": "#d64545", "WARNING": "#d98f00", "INFO": "#6b7280", "OK": "#2e9e5b"}
 SEV_CN = {"CRITICAL": "严重", "WARNING": "警告", "INFO": "提示", "OK": "健康"}
@@ -104,11 +105,12 @@ def _md_finding(f, idx):
              "", "- **类别**：`%s` — %s" % (f["type"], f.get("explanation", "")),
              "- **证据**："]
     for e in f["evidence"]:
-        lines.append("  - %s = **%s**（判定阈值：%s）" % (e["metric"], e["value"], e["threshold"]))
+        lines.append("  - %s = **%s**（判定阈值：%s；来源：%s；时间窗：%s）" % (
+            e["metric"], e["value"], e["threshold"], e.get('source', 'ftrace / 对应系统快照'),
+            e.get('time_window', '本次采集窗口；累计快照除外')))
     lines += ["- **影响**：%s" % f["impact"],
               "- **可能根因**：%s" % f["possible_root_cause"],
-              "- **建议措施**："]
-    lines += ["  %d. %s" % (i + 1, r) for i, r in enumerate(f["recommendation"])]
+              "- **优化动作**：见第三部分。"]
     return "\n".join(lines)
 
 def _md_metric_row(name, value, threshold, status):
@@ -137,17 +139,16 @@ def render_md(m, diag):
         A("")
         A(p["impact"])
         A("")
-        A("### 解决方案（按优先级）")
-        A("")
-        for i, r in enumerate(p["recommendation"][:5], 1):
-            A("%d. %s" % (i, r))
+        A("完整优化方案与可复制命令见第三部分。")
     else:
         A("未发现明显的 CPU Host 侧问题。若业务性能仍异常，建议从 NPU/IO/框架侧继续排查。")
     if m.get("warnings"):
         A("")
         A("**数据告警**：" + "；".join(m["warnings"]))
     A("")
-    A("## 2. 问题证据总表")
+    A("## 2. 问题证据总表与根因判断")
+    A("")
+    A("### 2.1 关键指标证据")
     A("")
     A("| 指标 | 当前值 | 基线/阈值 | 状态 |")
     A("|------|-------:|-----------|------|")
@@ -178,9 +179,40 @@ def render_md(m, diag):
     if sch.get("lat_p99") is None:
         A(_md_metric_row("调度延迟 P99", "无法计算", "-", "数据缺失"))
     A("")
-    A("> 指标含义见第 14 节「指标与事件说明」。")
+    A("> 指标含义见第 13 节「指标与事件说明」。")
     A("")
-    A("## 3. 问题详情")
+    A("### 2.2 根因判断与证据链")
+    A("")
+    if p:
+        A("**现象** → %s" % p["title"])
+        A("")
+        A("**证据** → " + "；".join("%s=%s（阈值 %s）" % (e["metric"], e["value"], e["threshold"]) for e in p["evidence"]))
+        A("")
+        A("**推断** → %s" % p["possible_root_cause"])
+        A("")
+        A("**候选判断** → `%s`（%s）" % (p["type"], p.get("explanation", "")))
+    else:
+        A("未发现需要根因判断的问题。")
+    A("")
+    A(affinity_md(m.get("npu_affinity", {})))
+    A("")
+    A("## 3. 优化建议")
+    A("")
+    A(binding_md(m.get("npu_affinity", {})))
+    A("")
+    pri = {"CRITICAL": "P0（立即处理）", "WARNING": "P1（尽快处理）", "INFO": "P2（择机处理）", "OK": "—"}
+    for f in diag["findings"]:
+        if f["severity"] in ("INFO", "OK"):
+            continue
+        A("**%s — %s**" % (pri[f["severity"]], f["title"]))
+        A("")
+        for i, r in enumerate(f["recommendation"], 1):
+            A("%d. %s" % (i, r))
+        A("")
+    if not [f for f in diag["findings"] if f["severity"] in ("CRITICAL", "WARNING")]:
+        A("当前无需紧急优化动作；保持对 NPU 侧性能的持续观察即可。")
+        A("")
+    A("## 4. 问题详情")
     A("")
     if diag["findings"]:
         for i, f in enumerate(diag["findings"], 1):
@@ -189,7 +221,7 @@ def render_md(m, diag):
     else:
         A("未发现问题。")
         A("")
-    A("## 4. CPU 总体状态")
+    A("## 5. CPU 总体状态")
     A("")
     ps = m.get("proc_stat") or {}
     if ps:
@@ -201,7 +233,7 @@ def render_md(m, diag):
     else:
         A("无 /proc/stat 快照，总体占用以 trace 计算为准。")
     A("")
-    A("## 5. CPU Core Balance（各核心负载）")
+    A("## 6. CPU Core Balance（各核心负载）")
     A("")
     A("| 核心 | 利用率 | 空闲比 | 上下文切换/s | 硬中断占比 | 软中断占比 |")
     A("|-----|-------:|-------:|------------:|----------:|----------:|")
@@ -225,7 +257,7 @@ def render_md(m, diag):
           % (hot[0], hot[1]["util"], cold[0], cold[1]["util"],
              "**存在明显不均衡，详见问题详情。**" if hot[1]["util"] - cold[1]["util"] >= 40 else "负载分布尚可。"))
     A("")
-    A("## 6. Scheduler 调度分析")
+    A("## 7. Scheduler 调度分析")
     A("")
     A("- 上下文切换总计 **%s** 次（%.0f 次/秒）%s" % (
         format(sch.get("cs_total", 0), ","), sch.get("cs_rate", 0) or 0,
@@ -247,9 +279,9 @@ def render_md(m, diag):
         for pid, comm, mx, avg, n in sch["top_lat_tasks"]:
             A("| %s | %.2f | %.3f | %d |" % (_pid_disp(comm, pid), mx * 1000, avg * 1000, n))
     A("")
-    A("## 7. IRQ / SoftIRQ 分析")
+    A("## 8. IRQ / SoftIRQ 分析")
     A("")
-    A("### 7.1 硬中断")
+    A("### 8.1 硬中断")
     A("")
     A("硬中断总 CPU 占比 **%.2f%%**（%s 次）。" % (irq.get("total_ratio", 0), format(irq.get("total_count", 0), ",")))
     top_irq = irq.get("top_names") or []
@@ -260,7 +292,7 @@ def render_md(m, diag):
         for n, cnt, t in top_irq:
             A("| %s | %s | %.1f | %s |" % (n, format(cnt, ","), t * 1000, _explain_irq_name(n)))
     A("")
-    A("### 7.2 软中断")
+    A("### 8.2 软中断")
     A("")
     A("软中断总 CPU 占比 **%.2f%%**（%s 次）。" % (soft.get("total_ratio", 0), format(soft.get("total_count", 0), ",")))
     top_soft = soft.get("top_actions") or []
@@ -272,9 +304,9 @@ def render_md(m, diag):
             A("| %s | %s | %.1f | %s |" % (n, format(cnt, ","), t * 1000,
                                            EVENT_EXPLANATIONS.get(n, "未收录软中断类型，参考内核文档。")))
     A("")
-    A("各核中断分布见第 5 节表格与 HTML 图表。")
+    A("各核中断分布见第 6 节表格与 HTML 图表。")
     A("")
-    A("## 8. CPU Frequency / Idle 分析")
+    A("## 9. CPU Frequency / Idle 分析")
     A("")
     freq = m.get("freq", {})
     if freq.get("available"):
@@ -304,7 +336,7 @@ def render_md(m, diag):
     else:
         A("trace 中无 cpu_idle 事件，空闲比基于 swapper 任务近似。")
     A("")
-    A("## 9. Task / Thread 分析")
+    A("## 10. Task / Thread 分析")
     A("")
     tk = m.get("tasks", {})
     def _tbl(rows, head, fmt_fn):
@@ -340,7 +372,7 @@ def render_md(m, diag):
         for pid, comm, n in tk["top_migration"]:
             A("| %s | %d |" % (_pid_disp(comm, pid), n))
         A("")
-    A("## 10. Affinity / NUMA 分析")
+    A("## 11. Affinity / NUMA 分析")
     A("")
     numa_txt = (m.get("snapshot", {}) or {}).get("numa.txt", "")
     if numa_txt and "node" in numa_txt:
@@ -348,42 +380,15 @@ def render_md(m, diag):
         A("快照包含 NUMA 拓扑信息（%s 个节点可见）。" % (nnodes if nnodes else "多"))
         A("")
     if tk.get("top_runtime"):
-        A("Top 任务运行分布与各核利用率见第 5 节；任务集中在少数核时可结合绑核配置判断。")
-    A("**证据说明**：当前 trace 未包含跨 NUMA 访问的直接证据，NUMA 结论置信度为低（Evidence insufficient），"
-      "如需精确判断请补充 `numactl -H` 与 `numastat` 快照。")
+        A("Top 任务运行分布与各核利用率见第 6 节；任务集中在少数核时可结合绑核配置判断。")
+    A("CPU 亲和性、NPU/PID 对应及线程运行核见第二部分；互斥 CPU 分区和宿主机命令见第三部分。")
+    A("内存页 NUMA 分布与跨节点内存访问须 `numastat -p PID`、`/proc/PID/numa_maps` 或性能数据验证；taskset 本身不迁移内存页。")
     A("")
-    A("## 11. 时间窗口分析")
+    A("## 12. 时间窗口分析")
     A("")
     A(_time_window_md(m))
     A("")
-    A("## 12. 根因判断")
-    A("")
-    if p:
-        A("**现象** → %s" % p["title"])
-        A("")
-        A("**证据** → " + "；".join("%s=%s（阈值 %s）" % (e["metric"], e["value"], e["threshold"]) for e in p["evidence"]))
-        A("")
-        A("**推断** → %s" % p["possible_root_cause"])
-        A("")
-        A("**根因** → `%s`（%s）" % (p["type"], p.get("explanation", "")))
-    else:
-        A("未发现需要根因判断的问题。")
-    A("")
-    A("## 13. 优化建议")
-    A("")
-    pri = {"CRITICAL": "P0（立即处理）", "WARNING": "P1（尽快处理）", "INFO": "P2（择机处理）", "OK": "—"}
-    for f in diag["findings"]:
-        if f["severity"] in ("INFO", "OK"):
-            continue
-        A("**%s — %s**" % (pri[f["severity"]], f["title"]))
-        A("")
-        for i, r in enumerate(f["recommendation"], 1):
-            A("%d. %s" % (i, r))
-        A("")
-    if not [f for f in diag["findings"] if f["severity"] in ("CRITICAL", "WARNING")]:
-        A("当前无需紧急优化动作；保持对 NPU 侧性能的持续观察即可。")
-        A("")
-    A("## 14. 数据说明与指标解释")
+    A("## 13. 数据说明与指标解释")
     A("")
     A("### 数据概况")
     A("")

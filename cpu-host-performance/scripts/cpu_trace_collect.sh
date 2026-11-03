@@ -3,7 +3,7 @@
 # CPU Host 性能采集脚本 (cpu_trace_collect.sh) — 统一采集入口
 # - 仅依赖 bash + ftrace(tracefs/debugfs) + /proc + /sys，无第三方软件
 # - 采集前后保存/恢复 tracing 原配置，不破坏客户现场
-# - 支持: --duration / --output / --buffer-size / --cpu-list / --minimal / --pid
+# - 支持: --duration / --output / --buffer-size / --cpu-list / --minimal / --pid / --hostbound
 # - --pid <PID[,PID...]>: 追加 HostBound 只读快照 (NUMA/NPU 拓扑、IRQ、目标进程
 #   及线程 affinity 等), 写入采集包 hostbound/ 目录; 不改变 ftrace 事件与恢复行为
 # - 全程进度展示: 阶段导航 + 动态进度条 (百分比/已用时/预计剩余/速率/事件数),
@@ -113,7 +113,7 @@ trace_stats(){   # 汇总各 CPU buffer 统计, 输出: "已驻留事件 丢弃�
 print_banner(){
   local mode="全量"; [[ $MINIMAL -eq 1 ]] && mode="精简"
   local cpus="全部 ($(nproc 2>/dev/null || echo '?') 核)"; [[ -n "$CPU_LIST" ]] && cpus="$CPU_LIST"
-  local hb="无"; [[ -n "$PID_LIST" ]] && hb="$PID_LIST"
+  local hb="无"; (( HOSTBOUND )) && hb="自动发现全部 NPU PID + $PID_LIST"
   local evs; evs=$(echo $ENABLED_EVENTS | wc -w); evs=${evs//[!0-9]/}
   echo -e "$C_C"
   echo  "┌──────────────────────────────────────────────────────────────"
@@ -128,13 +128,14 @@ usage() {
 cat <<EOF
 CPU Host 性能采集工具 (统一入口: 全量 ftrace + 可选 HostBound 快照)
 用法: sudo bash $0 [选项]
-  -t, --duration <秒>     采集时长, 默认 30
+  -t, --duration <秒>     采集时长, 默认 3
   -o, --output <目录>     输出目录, 默认当前目录
   -b, --buffer-size <KB>  单核 buffer 大小, 默认 140800
   -c, --cpu-list <列表>   CPU 列表, 如 1,2,3 或 0-47 (默认全量)
   -m, --minimal           精简模式: 仅采集 sched_switch, 体积减小 90%+
   -p, --pid <PID[,PID]>   追加 HostBound 只读快照: NUMA/NPU 拓扑、IRQ、目标进程与
                           线程 affinity 等, 写入 hostbound/ 目录 (不改 ftrace 采集)
+      --hostbound        自动发现全部 NPU 占卡宿主机 PID 并采集亲和性快照
   -h, --help              显示帮助
 示例:
   sudo bash $0 --duration 30
@@ -142,11 +143,12 @@ CPU Host 性能采集工具 (统一入口: 全量 ftrace + 可选 HostBound 快�
   sudo bash $0 -t 60 -c 0-47 -b 281600
   sudo bash $0 --duration 30 --pid 12345
   sudo bash $0 --duration 30 --pid 12345,6789
+  sudo bash $0 --duration 30 --hostbound
 EOF
 }
 
 # ---------- 参数解析 ----------
-DURATION=30; OUTDIR="."; BUFFER_SIZE=140800; CPU_LIST=""; MINIMAL=0; PID_LIST=""
+DURATION=3; OUTDIR="."; BUFFER_SIZE=140800; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--duration)    DURATION="$2"; shift 2;;
@@ -154,7 +156,8 @@ while [[ $# -gt 0 ]]; do
     -b|--buffer-size) BUFFER_SIZE="$2"; shift 2;;
     -c|--cpu-list)    CPU_LIST="$2"; shift 2;;
     -m|--minimal)     MINIMAL=1; shift;;
-    -p|--pid)         PID_LIST="$2"; shift 2;;
+    -p|--pid)         PID_LIST="$2"; HOSTBOUND=1; shift 2;;
+    --hostbound)      HOSTBOUND=1; shift;;
     -h|--help)        usage; exit 0;;
     *) err "未知参数: $1"; usage; exit 1;;
   esac
@@ -168,7 +171,7 @@ done
 if [[ "$EUID" -ne 0 ]]; then
   err "请使用 root 权限运行: sudo bash $0"; exit 1; fi
 # 阶段总数: 快照/采集/导出/打包 (+ 可选 HostBound 快照)
-PHASE_TOTAL=4; [[ -n "$PID_LIST" ]] && PHASE_TOTAL=5
+PHASE_TOTAL=4; (( HOSTBOUND )) && PHASE_TOTAL=5
 
 # ---------- 定位 tracefs ----------
 TRACE_DIR=""
@@ -369,7 +372,7 @@ cat "$TRACE_DIR"/per_cpu/cpu*/stats/overrun 2>/dev/null | paste -sd+ | bc > "$SN
 
 cleanup
 
-# ---------- HostBound 只读快照 (仅 --pid 时执行) ----------
+# ---------- HostBound 只读快照 (--pid 或 --hostbound 时执行；在宿主机运行) ----------
 # 写入 $SNAP/hostbound/, 随采集包一并打包; 文件名布局与分析器约定一致。
 snapshot_hostbound() {
   local HB="$SNAP/hostbound"
@@ -379,6 +382,23 @@ snapshot_hostbound() {
   _hbcap lscpu
   _hbcap numactl -H
   _hbcap taskset -pc 1
+  LC_ALL=C lscpu -p=CPU,CORE,SOCKET,NODE,ONLINE > "$HB/lscpu_parse.txt" 2>&1 || true
+  cat /sys/devices/system/cpu/online > "$HB/cpu_online.txt" 2>/dev/null || true
+  local context="unknown" detected="unknown"
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    detected=$(systemd-detect-virt --container 2>/dev/null)
+    [[ "$detected" == "none" ]] && context="host"
+    [[ -n "$detected" && "$detected" != "none" ]] && context="container"
+  fi
+  [[ -e /.dockerenv || -e /run/.containerenv ]] && context="container"
+  { printf 'execution_context=%s\n' "$context"
+    printf 'boot_id=%s\n' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+    printf 'container_detector=%s\n' "$detected"
+    printf 'collector_pid=%s\n' "$$"
+    printf 'pid_namespace=%s\n' "$(readlink /proc/self/ns/pid 2>/dev/null)"
+    printf 'collected_at=%s\n' "$(date -u +%FT%TZ)"
+  } > "$HB/host_context.txt"
+  [[ "$context" == "host" ]] || warn "宿主机上下文未确认 ($context)，报告将限制生成可执行绑核命令"
   cp /proc/interrupts "$HB/interrupts_at_end.txt" 2>/dev/null || true
   cp /proc/softirqs    "$HB/softirqs_at_end.txt" 2>/dev/null || true
   { cat /proc/cmdline; echo; } > "$HB/kernel_cmdline.txt" 2>/dev/null || true
@@ -387,10 +407,32 @@ snapshot_hostbound() {
     npu-smi info -m      > "$HB/npu_smi_map.txt" 2>&1 || true
     npu-smi info -t topo > "$HB/npu_smi_topology.txt" 2>&1 || true
   fi
-  local p tid
-  for p in ${PID_LIST//,/ }; do
+  # 数值列严格匹配进程表，避免将 NPU 温度/功耗/状态行误识别成 PID。
+  local discovered
+  discovered=$(awk -F'|' '{a=$1; b=$2; c=$3; d=$4; if ($1 ~ /^[[:space:]]*$/) {a=$2;b=$3;c=$4;d=$5} if (a ~ /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]*$/ && b ~ /^[[:space:]]*[0-9]+[[:space:]]*$/ && d ~ /^[[:space:]]*[0-9]+[[:space:]]*$/) {gsub(/[[:space:]]/,"",b); print b}}' "$HB/npu_smi_info.txt" 2>/dev/null)
+  local p tid cg f stat_text
+  for p in $(printf '%s\n' ${PID_LIST//,/ } $discovered | sort -nu); do
+    [[ "$p" =~ ^[1-9][0-9]*$ ]] || continue
     [[ -d "/proc/$p" ]] || { warn "进程不存在, 跳过其快照: $p"; continue; }
     cp "/proc/$p/status" "$HB/pid_${p}_status.txt" 2>/dev/null || true
+    tr '\0' ' ' < "/proc/$p/cmdline" > "$HB/pid_${p}_cmdline.txt" 2>/dev/null || true
+    cp "/proc/$p/cgroup" "$HB/pid_${p}_cgroup.txt" 2>/dev/null || true
+    stat_text=$(cat "/proc/$p/stat" 2>/dev/null); stat_text=${stat_text##*) }
+    { set -- $stat_text; printf '%s\n' "${20}"; } > "$HB/pid_${p}_starttime.txt"
+    cg=$(awk -F: '$1==0 {print $3}' "/proc/$p/cgroup" 2>/dev/null)
+    : > "$HB/pid_${p}_cpuset_effective.txt"
+    if [[ -n "$cg" && -r "/sys/fs/cgroup${cg}/cpuset.cpus.effective" ]]; then
+      cat "/sys/fs/cgroup${cg}/cpuset.cpus.effective" > "$HB/pid_${p}_cpuset_effective.txt"
+    else
+      cg=$(awk -F: '$2 ~ /(^|,)cpuset(,|$)/ {print $3}' "/proc/$p/cgroup" 2>/dev/null)
+      for f in "/sys/fs/cgroup/cpuset${cg}/cpuset.effective_cpus" "/sys/fs/cgroup/cpuset${cg}/cpuset.cpus"; do
+        [[ -n "$cg" ]] || break
+        if [[ -r "$f" ]]; then
+          local value; value=$(cat "$f")
+          if [[ -n "$value" ]]; then printf '%s\n' "$value" > "$HB/pid_${p}_cpuset_effective.txt"; break; fi
+        fi
+      done
+    fi
     taskset -pc "$p" > "$HB/pid_${p}_affinity.txt" 2>&1 || true
     ps -T -p "$p" -o pid,tid,psr,pcpu,stat,comm > "$HB/pid_${p}_threads.txt" 2>&1 || true
     while read -r tid; do taskset -pc "$tid"; done < <(ls "/proc/$p/task") \
@@ -398,11 +440,11 @@ snapshot_hostbound() {
   done
   # 清单: 记录本次未运行的外部工具, 避免把缺失数据误当作正常
   cat > "$HB/collection_manifest.json" <<EOF
-{"collector":"cpu_trace_collect.sh","mode":"unified","duration_sec":$DURATION,"pid":"${PID_LIST}","minimal":$MINIMAL,"ftrace":"cpu_trace_collect.sh","external_tools":{"gil_tracer":"not_run","function_monitor":"not_run","msprof":"not_run","host_analyzer":"not_run"}}
+{"collector":"cpu_trace_collect.sh","mode":"unified","duration_sec":$DURATION,"pid":"${PID_LIST}","auto_npu_pids":true,"execution_context":"$context","minimal":$MINIMAL,"ftrace":"cpu_trace_collect.sh","external_tools":{"gil_tracer":"not_run","function_monitor":"not_run","msprof":"not_run","host_analyzer":"not_run"}}
 EOF
 }
-if [[ -n "$PID_LIST" ]]; then
-  phase_begin "HostBound 只读快照 (PID: $PID_LIST)"
+if (( HOSTBOUND )); then
+  phase_begin "HostBound 只读快照 (全部 NPU PID + $PID_LIST)"
   snapshot_hostbound
   phase_end "HostBound 快照已写入 hostbound/ 目录"
 fi

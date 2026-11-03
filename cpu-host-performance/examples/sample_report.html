@@ -1,12 +1,12 @@
 <!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>CPU Host 性能分析报告</title><style>
+<title>HostBound 性能诊断报告</title><style>
 :root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2129;--border:#2d3742;--txt:#c9d1d9;
 --muted:#8b949e;--blue:#4a9eff;--red:#d64545;--orange:#d98f00;--green:#2e9e5b;--gray:#6b7280}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--txt);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",
 "Noto Sans CJK SC",sans-serif;font-size:14px;line-height:1.7;padding:0 0 60px}
-.wrap{max-width:900px;margin:0 auto;padding:0 20px}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
 header{background:linear-gradient(135deg,#10161f,#141d2a);border-bottom:1px solid var(--border);
 padding:26px 0 18px;margin-bottom:22px}
 h1{font-size:22px;font-weight:600;letter-spacing:.5px}
@@ -44,6 +44,28 @@ border-radius:8px;padding:14px 18px;margin:12px 0}
 .warn-box{background:#2a2110;border:1px solid #6b5410;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13px}
 ol.pri{margin:8px 0 0 22px}ol.pri li{margin:5px 0}
 .footer{color:var(--muted);font-size:12px;margin-top:40px;text-align:center}
+.numa-group{margin:16px 0;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+.numa-title{font-size:16px;font-weight:650;margin-bottom:12px;color:#e6edf3}
+.numa-title span{font-size:12px;font-weight:400;color:var(--muted);margin-left:10px}
+.npu-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.npu-card{min-width:0;border:1px solid var(--border);border-top:3px solid var(--orange);border-radius:9px;background:var(--bg);padding:14px}
+.npu-card.good{border-top-color:var(--green)}.npu-card.danger{border-top-color:var(--red)}
+.npu-heading{display:flex;gap:8px;justify-content:space-between;align-items:start;flex-wrap:wrap}
+.aff-state{font-size:11px;padding:2px 7px;border-radius:12px;background:#342a15;color:#efc36a}
+.good .aff-state{background:#143224;color:#6dd69a}.danger .aff-state{background:#3a2025;color:#f39a9a}
+.npu-process{margin:12px 0;font-size:14px}.npu-process strong{margin-left:8px;color:#e6edf3}
+.npu-process small{display:block;color:var(--muted);font-size:11px;margin-top:3px}
+.npu-process-entry{margin-top:10px}.npu-process-entry+.npu-process-entry{border-top:1px solid var(--border);padding-top:12px}
+.numa-verdict{font-size:12px;color:#f39a9a;margin:8px 0}.numa-verdict.local-numa{color:#6dd69a}
+.numa-verdict.unknown-numa{color:#efc36a}
+.aff-line{display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;font-size:12px;margin:6px 0}
+.aff-line span{color:var(--muted)}code{font-family:Consolas,monospace;overflow-wrap:anywhere}
+.aff-target{margin-top:12px;border-top:1px solid var(--border);padding-top:10px;display:flex;gap:14px;align-items:center}
+.aff-target span{font-size:12px;color:var(--muted)}.aff-target code{font-size:17px;color:#8cc5ff;font-weight:600}
+pre{white-space:pre;overflow:auto;background:#090e15;border:1px solid var(--border);border-radius:8px;padding:16px;font-size:12px;line-height:1.6;margin:10px 0}
+.code-panel{position:relative;padding-top:30px}.copy-code{position:absolute;right:0;top:0;background:#1c3252;border:1px solid #315379;border-radius:6px;color:#a9d1ff;padding:4px 10px;cursor:pointer}
+.code-panel pre{max-height:440px}
+@media(max-width:700px){.npu-grid{grid-template-columns:1fr}.wrap{padding:0 12px}}
 @media print{body{background:#fff;color:#111}.card,.kpi,.finding,.chart,.status-hero{border-color:#ccc}}
 /* ---- 左侧固定导航目录 ---- */
 :root{--tocpad:216px}
@@ -63,178 +85,277 @@ nav#toc .toc-foot{color:#4a5568;font-size:10.5px;padding:12px 8px 0;margin-top:1
 border-top:1px solid var(--border)}
 @media (max-width:1024px){body{padding-left:0}header{margin-left:0;padding-left:0}nav#toc{display:none}}
 @media print{body{padding-left:0}header{margin-left:0;padding-left:0}nav#toc{display:none}}
-</style></head><body><nav id='toc'><div class='toc-title'>报告目录</div><a href='#sec-1' data-sec='sec-1'>1. Executive Summary（结论摘要）</a><a href='#sec-2' data-sec='sec-2'>2. 问题证据总表</a><a href='#sec-3' data-sec='sec-3'>3. 问题详情</a><a href='#sec-4' data-sec='sec-4'>4. CPU 总体状态</a><a href='#sec-5' data-sec='sec-5'>5. CPU Core Balance（各核心负载）</a><a href='#sec-6' data-sec='sec-6'>6. Scheduler 调度分析</a><a href='#sec-7' data-sec='sec-7'>7. IRQ / SoftIRQ 分析</a><a href='#sec-8' data-sec='sec-8'>8. CPU Frequency / Idle 分析</a><a href='#sec-9' data-sec='sec-9'>9. Task / Thread 分析</a><a href='#sec-10' data-sec='sec-10'>10. Affinity / NUMA 分析</a><a href='#sec-11' data-sec='sec-11'>11. 时间窗口分析</a><a href='#sec-12' data-sec='sec-12'>12. 根因判断</a><a href='#sec-13' data-sec='sec-13'>13. 优化建议</a><a href='#sec-14' data-sec='sec-14'>14. 数据说明与指标解释</a><div class='toc-foot'>cpu_host_performance</div></nav>
-<header><div class='wrap'><h1>CPU Host 性能分析报告</h1>
-<div class='meta'>数据格式：ftrace 文本 (目录内) ｜ 采集时长：10.0 秒 ｜ 核心数：8 ｜ 分析时间：2026-09-09 12:36:08</div></div></header>
+</style></head><body><nav id='toc'><div class='toc-title'>报告目录</div><a href='#sec-1' data-sec='sec-1'>1. Executive Summary（结论摘要）</a><a href='#sec-2' data-sec='sec-2'>2. 问题证据总表与根因判断</a><a href='#sec-3' data-sec='sec-3'>3. 优化建议</a><a href='#sec-4' data-sec='sec-4'>4. 问题详情</a><a href='#sec-5' data-sec='sec-5'>5. CPU 总体状态</a><a href='#sec-6' data-sec='sec-6'>6. CPU Core Balance（各核心负载）</a><a href='#sec-7' data-sec='sec-7'>7. Scheduler 调度分析</a><a href='#sec-8' data-sec='sec-8'>8. IRQ / SoftIRQ 分析</a><a href='#sec-9' data-sec='sec-9'>9. CPU Frequency / Idle 分析</a><a href='#sec-10' data-sec='sec-10'>10. Task / Thread 分析</a><a href='#sec-11' data-sec='sec-11'>11. Affinity / NUMA 分析</a><a href='#sec-12' data-sec='sec-12'>12. 时间窗口分析</a><a href='#sec-13' data-sec='sec-13'>13. 数据说明与指标解释</a><div class='toc-foot'>cpu-host-performance</div></nav>
+<header><div class='wrap'><div class='warn-box'><b>演示报告：仅 NPU/PID/topo 来自所给案例；NUMA、线程许可范围、PSR、trace 与身份字段为模拟数据，不代表客户当前状态，示例命令不可直接用于客户现场。</b></div><h1>HostBound 性能诊断报告</h1>
+<div class='meta'>数据格式：ftrace 文本 (目录内) ｜ 采集时长：1.0 秒 ｜ 核心数：1 ｜ 分析时间：2026-11-02 17:34:44</div></div></header>
 <div class='wrap'>
 <h2 id='sec-1'>1. Executive Summary（结论摘要）</h2>
 <div class='status-hero'><div class='lbl'>Host 健康状态</div>
 <div class='big' style='color:#d64545'>CRITICAL（严重异常）</div></div>
 <div class='kpis'>
-<div class='kpi'><div class='v' style='color:#c9d1d9'>34.8%</div><div class='n'>CPU 平均利用率</div></div>
-<div class='kpi'><div class='v' style='color:#d64545'>95.0%</div><div class='n'>单核最高利用率</div></div>
-<div class='kpi'><div class='v' style='color:#c9d1d9'>210/s</div><div class='n'>上下文切换率</div></div>
-<div class='kpi'><div class='v' style='color:#d64545'>99.20 ms</div><div class='n'>调度延迟 P99</div></div>
-<div class='kpi'><div class='v' style='color:#c9d1d9'>12.51%</div><div class='n'>硬中断总占比</div></div>
-<div class='kpi'><div class='v' style='color:#d64545'>57.63%</div><div class='n'>软中断总占比</div></div>
+<div class='kpi'><div class='v' style='color:#d64545'>100.0%</div><div class='n'>CPU 平均利用率</div></div>
+<div class='kpi'><div class='v' style='color:#d64545'>100.0%</div><div class='n'>单核最高利用率</div></div>
+<div class='kpi'><div class='v' style='color:#c9d1d9'>3/s</div><div class='n'>上下文切换率</div></div>
+<div class='kpi'><div class='v' style='color:#c9d1d9'>0.00%</div><div class='n'>硬中断总占比</div></div>
+<div class='kpi'><div class='v' style='color:#c9d1d9'>0.00%</div><div class='n'>软中断总占比</div></div>
 </div>
 <div class='card' style='border-left:4px solid #d64545'>
-<h3>核心问题：软中断集中于 CPU 2</h3>
-<p><span class='lbl'>置信度：</span><span class='evt'>HIGH</span> ｜ <span class='lbl'>类别：</span><span class='evt'>SOFTIRQ_HOTSPOT</span></p>
-<p><span class='lbl'>影响：</span>软中断处理挤占计算线程运行时间，调度延迟上升，训练/推理吞吐下降</p>
-<p class='lbl' style='margin-top:10px'>解决方案（按优先级）：</p><ol class='pri'>
-<li>检查 /proc/softirqs 与 /proc/interrupts 中网络中断分布</li>
-<li>开启/调大网卡多队列 (RSS) 并用 ethtool -X 均衡队列</li>
-<li>用 irqbalance 或 smp_affinity 将 NET_RX 分散到多核</li>
-<li>评估业务通信量是否异常 (如 all-reduce 风暴)</li>
-</ol></div>
-<h2 id='sec-2'>2. 问题证据总表</h2>
+<h3>核心问题：CPU 整体饱和</h3>
+<p><span class='lbl'>置信度：</span><span class='evt'>HIGH</span> ｜ <span class='lbl'>类别：</span><span class='evt'>CPU_SATURATION</span></p>
+<p><span class='lbl'>影响：</span>Host 算力不足，任务排队等待，可能拖慢 NPU 供数</p>
+<p class='note'>完整优化方案与可复制命令见第三部分。</p></div>
+<h2 id='sec-2'>2. 问题证据总表与根因判断</h2>
+<h3>2.1 关键指标证据</h3>
 <table><tr><th>指标</th><th class='num'>当前值</th><th>基线/阈值</th><th>状态</th></tr>
-<tr><td>CPU 平均利用率</td><td class='num'>34.8%</td><td>&lt;70% 健康</td><td style='color:#2e9e5b;font-weight:600'>正常</td></tr>
-<tr><td>单核最高利用率</td><td class='num'>95.0%</td><td>&lt;90% 健康</td><td style='color:#d98f00;font-weight:600'>饱和</td></tr>
-<tr><td>上下文切换率</td><td class='num'>210 次/秒</td><td>单核&gt;2000/s 偏高</td><td style='color:#2e9e5b;font-weight:600'>正常</td></tr>
-<tr><td>调度延迟 P99</td><td class='num'>99.20 ms</td><td>≥5ms 警告 / ≥20ms 严重</td><td style='color:#d98f00;font-weight:600'>异常</td></tr>
-<tr><td>硬中断总占比</td><td class='num'>12.51%</td><td>单核≥15% 关注热点</td><td style='color:#2e9e5b;font-weight:600'>正常</td></tr>
-<tr><td>软中断总占比</td><td class='num'>57.63%</td><td>单核≥20% 关注热点</td><td style='color:#2e9e5b;font-weight:600'>关注</td></tr>
-</table><p class='note'>指标含义见第 14 节「指标与事件说明」。</p>
-<h2 id='sec-3'>3. 问题详情</h2>
-<div class='finding' style='border-left-color:#d64545'><h3>软中断集中于 CPU 2 <span class='badge' style='background:#d64545'>严重</span> <span class='evt'>置信度 HIGH</span></h3><div class='tagline'>类别：<span class='evt'>SOFTIRQ_HOTSPOT</span> — 软中断热点：软中断（如 NET_RX 网络收包）集中消耗个别核心 CPU</div><p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th></tr><tr><td class='evt'>CPU 2 软中断 CPU 占比</td><td><b>56.4%</b></td><td>≥20% 且≥中位数 2.0 倍</td></tr><tr><td class='evt'>Top 软中断类型</td><td><b>NET_RX(5640ms), RCU(80ms), TIMER(40ms)</b></td><td>-</td></tr></table><p><span class='lbl'>影响：</span>软中断处理挤占计算线程运行时间，调度延迟上升，训练/推理吞吐下降</p><p><span class='lbl'>可能根因：</span>该核集中处理了软中断，且以网络收包 (NET_RX) 为主：网卡队列中断亲和性固定于单核，通信/收包量大时极易打满</p><p class='lbl'>建议措施：</p><ol class='pri'><li>检查 /proc/softirqs 与 /proc/interrupts 中网络中断分布</li><li>开启/调大网卡多队列 (RSS) 并用 ethtool -X 均衡队列</li><li>用 irqbalance 或 smp_affinity 将 NET_RX 分散到多核</li><li>评估业务通信量是否异常 (如 all-reduce 风暴)</li></ol></div>
-<div class='finding' style='border-left-color:#d64545'><h3>调度延迟严重 <span class='badge' style='background:#d64545'>严重</span> <span class='evt'>置信度 HIGH</span></h3><div class='tagline'>类别：<span class='evt'>SCHEDULER_LATENCY</span> — 调度延迟过大：任务被唤醒后长时间得不到 CPU</div><p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th></tr><tr><td class='evt'>调度延迟 P99</td><td><b>99.20 ms</b></td><td>≥5ms 警告 / ≥20ms 严重</td></tr><tr><td class='evt'>调度延迟平均值</td><td><b>21.641 ms</b></td><td>-</td></tr><tr><td class='evt'>受影响最大的任务</td><td><b>python_main (最大 99.2ms); worker_0 (最大 44.0ms); worker_net (最大 25.4ms)</b></td><td>-</td></tr></table><p><span class='lbl'>影响：</span>关键线程被唤醒后需等待较久才能运行，通信/数据准备节奏被打断，NPU 等待 Host</p><p><span class='lbl'>可能根因：</span>CPU 竞争 (饱和/中断/优先级) 导致 runnable 排队</p><p class='lbl'>建议措施：</p><ol class='pri'><li>结合 CPU 利用率与中断热点结论处理根源负载</li><li>提高关键线程优先级 (nice/chrt) 或绑核隔离 (isolcpus/cpuset)</li><li>减少 Host 线程数，避免过度并发</li></ol></div>
-<div class='finding' style='border-left-color:#d98f00'><h3>CPU 负载严重不均衡 <span class='badge' style='background:#d98f00'>警告</span> <span class='evt'>置信度 HIGH</span></h3><div class='tagline'>类别：<span class='evt'>CPU_IMBALANCE</span> — CPU 负载不均衡：少数核心打满而大量核心空闲，常见于绑核不当或中断亲和性集中</div><p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th></tr><tr><td class='evt'>最高核利用率 (CPU 2)</td><td><b>95.0%</b></td><td>≥90%</td></tr><tr><td class='evt'>核心利用率中位数</td><td><b>5.0%</b></td><td>差值≥40% 判定不均衡</td></tr><tr><td class='evt'>空闲核数量 (利用率≤30%)</td><td><b>5 个</b></td><td>-</td></tr></table><p><span class='lbl'>影响：</span>部分核心打满成为瓶颈，同时大量算力闲置，吞吐受限</p><p><span class='lbl'>可能根因：</span>软中断集中在该核 (疑为 IRQ affinity 将网卡中断固定到单核)</p><p class='lbl'>建议措施：</p><ol class='pri'><li>检查 IRQ affinity: cat /proc/interrupts，将高频中断分散 (echo 掩码 &gt; /proc/irq/N/smp_affinity)</li><li>检查业务线程绑核配置 (taskset/numactl)，把任务分散到空闲核</li><li>开启 RPS/XPS 或 RSS 多队列分散网络软中断</li></ol></div>
-<div class='finding' style='border-left-color:#d98f00'><h3>任务迁移频繁 <span class='badge' style='background:#d98f00'>警告</span> <span class='evt'>置信度 MEDIUM</span></h3><div class='tagline'>类别：<span class='evt'>TASK_MIGRATION_HIGH</span> — 任务迁移频繁：任务在核间频繁搬移，破坏缓存局部性</div><p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th></tr><tr><td class='evt'>迁移速率</td><td><b>129.8 次/秒</b></td><td>≥50 次/秒 视为频繁 (近似统计)</td></tr><tr><td class='evt'>迁移最多的任务</td><td><b>pid:1003 (600 次); pid:1002 (399 次); pid:1005 (199 次)</b></td><td>-</td></tr></table><p><span class='lbl'>影响：</span>跨核迁移导致 L1/L2 缓存与 TLB 失效，可能跨 NUMA 访存，性能抖动</p><p><span class='lbl'>可能根因：</span>负载均衡器频繁搬移任务或任务未绑核</p><p class='lbl'>建议措施：</p><ol class='pri'><li>将关键线程固定核心 (taskset -c / numactl --physcpubind)</li><li>调小内核调度域负载均衡激进度 (如 sched_migration_cost_ns 调大)</li></ol></div>
-<h2 id='sec-4'>4. CPU 总体状态</h2>
-<div class='card'><p>/proc/stat 快照（开机以来累计）：user 48.0%、system 11.4%、iowait 0.6%、irq 1.1%、softirq 1.7%、idle 37.2%、steal 0.1%。</p>
-<p class='note'>注意：trace 只能区分 busy/idle；user/system/iowait 为开机累计值，仅供参考。</p></div>
-<h2 id='sec-5'>5. CPU Core Balance（各核心负载）</h2>
+<tr><td>CPU 平均利用率</td><td class='num'>100.0%</td><td>&lt;70% 健康</td><td style='color:#d98f00;font-weight:600'>偏高</td></tr>
+<tr><td>单核最高利用率</td><td class='num'>100.0%</td><td>&lt;90% 健康</td><td style='color:#d98f00;font-weight:600'>饱和</td></tr>
+<tr><td>上下文切换率</td><td class='num'>3 次/秒</td><td>全机 &gt; 2000×核数/s 偏高</td><td style='color:#2e9e5b;font-weight:600'>正常</td></tr>
+<tr><td>调度延迟 P99</td><td class='num'>无法计算</td><td>-</td><td style='color:#2e9e5b;font-weight:600'>数据缺失</td></tr>
+<tr><td>硬中断总占比</td><td class='num'>0.00%</td><td>单核≥15% 关注热点</td><td style='color:#2e9e5b;font-weight:600'>正常</td></tr>
+<tr><td>软中断总占比</td><td class='num'>0.00%</td><td>单核≥20% 关注热点</td><td style='color:#2e9e5b;font-weight:600'>正常</td></tr>
+</table><p class='note'>指标含义见第 13 节「指标与事件说明」。</p>
+<h3>2.2 根因判断与证据链</h3>
+<div class='card'><p><span class='lbl'>现象</span> → CPU 整体饱和</p>
+<p><span class='lbl'>证据</span> → 全机平均 CPU 利用率=100.0%（阈值 ≥90% 判定饱和）</p>
+<p><span class='lbl'>推断</span> → 整机 CPU 计算需求超过供给</p>
+<p><span class='lbl'>候选判断</span> → <span class='evt'>CPU_SATURATION</span>（CPU 饱和：整体 CPU 已接近打满，算力不足）</p></div>
+<h3>2.3 NPU 任务与 NUMA 亲和性</h3><p class="note">allowed CPU 是调度许可范围；PSR 是采样时最近运行核，ftrace 是窗口内观测核。绿色表示全量现有线程的许可范围落在 NPU 亲和 CPU 内；橙色表示可跨节点或证据不足；红色表示观测到非亲和 CPU/绑定范围偏离。CPU 绑定与内存页 NUMA 分布分别核验，亲和性风险不等于已确认的 HostBound 根因。主进程按占卡显存最高推定，所有占卡 PID 均保留。</p><section class="numa-group"><div class="numa-title">NUMA 0 <span>2 张 NPU</span></div><div class="npu-grid"><article class="npu-card good"><b>NPU 1</b><div class="npu-process-entry good"><div class="npu-heading"><span>Chip 0</span><span class="aff-state">已绑定亲和 CPU</span></div><div class="npu-process">python3 <strong>PID 4116</strong><small>主进程（显存占用最高） · 2 个线程 · 26415 MB</small></div><p class="numa-verdict local-numa">运行观测位于亲和 NUMA</p><div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>0 → 0</code></div><div class="aff-line"><span>NPU 亲和 CPU</span><code>0-23</code></div><div class="aff-line"><span>当前 allowed CPU（线程并集）</span><code>0-11</code></div><div class="aff-line"><span>ftrace 观测 CPU</span><code>未提供</code></div><div class="aff-line"><span>PSR 最近运行 CPU</span><code>2</code></div><div class="aff-target"><span>建议分区 →</span><code>0-11</code></div></div></article><article class="npu-card danger"><b>NPU 3</b><div class="npu-process-entry danger"><div class="npu-heading"><span>Chip 0</span><span class="aff-state">观测到非亲和 CPU</span></div><div class="npu-process">python3 <strong>PID 4118</strong><small>主进程（显存占用最高） · 2 个线程 · 26415 MB</small></div><p class="numa-verdict local-numa">运行观测位于亲和 NUMA</p><div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>0 → 0</code></div><div class="aff-line"><span>NPU 亲和 CPU</span><code>0-23</code></div><div class="aff-line"><span>当前 allowed CPU（线程并集）</span><code>0-191</code></div><div class="aff-line"><span>ftrace 观测 CPU</span><code>未提供</code></div><div class="aff-line"><span>PSR 最近运行 CPU</span><code>30</code></div><div class="aff-target"><span>建议分区 →</span><code>12-23</code></div></div></article></div></section><section class="numa-group"><div class="numa-title">NUMA 1 <span>2 张 NPU</span></div><div class="npu-grid"><article class="npu-card danger"><b>NPU 5</b><div class="npu-process-entry danger"><div class="npu-heading"><span>Chip 0</span><span class="aff-state">观测到非亲和 CPU</span></div><div class="npu-process">python3 <strong>PID 4120</strong><small>主进程（显存占用最高） · 2 个线程 · 26415 MB</small></div><p class="numa-verdict remote-numa">观测到非亲和 NUMA 运行</p><div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>0 → 1</code></div><div class="aff-line"><span>NPU 亲和 CPU</span><code>48-71</code></div><div class="aff-line"><span>当前 allowed CPU（线程并集）</span><code>0-191</code></div><div class="aff-line"><span>ftrace 观测 CPU</span><code>未提供</code></div><div class="aff-line"><span>PSR 最近运行 CPU</span><code>30</code></div><div class="aff-target"><span>建议分区 →</span><code>48-59</code></div></div></article><article class="npu-card danger"><b>NPU 7</b><div class="npu-process-entry danger"><div class="npu-heading"><span>Chip 0</span><span class="aff-state">观测到非亲和 CPU</span></div><div class="npu-process">python3 <strong>PID 4122</strong><small>主进程（显存占用最高） · 2 个线程 · 26415 MB</small></div><p class="numa-verdict remote-numa">观测到非亲和 NUMA 运行</p><div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>0 → 1</code></div><div class="aff-line"><span>NPU 亲和 CPU</span><code>48-71</code></div><div class="aff-line"><span>当前 allowed CPU（线程并集）</span><code>0-191</code></div><div class="aff-line"><span>ftrace 观测 CPU</span><code>未提供</code></div><div class="aff-line"><span>PSR 最近运行 CPU</span><code>30</code></div><div class="aff-target"><span>建议分区 →</span><code>60-71</code></div></div></article></div></section><section class="numa-group"><div class="numa-title">NUMA 2 <span>2 张 NPU</span></div><div class="npu-grid"><article class="npu-card caution"><b>NPU 4</b><div class="npu-process-entry caution"><div class="npu-heading"><span>Chip 0</span><span class="aff-state">允许跨 NUMA / 未收敛</span></div><div class="npu-process">python3 <strong>PID 4119</strong><small>主进程（显存占用最高） · 2 个线程 · 26415 MB</small></div><p class="numa-verdict local-numa">运行观测位于亲和 NUMA</p><div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>2 → 2</code></div><div class="aff-line"><span>NPU 亲和 CPU</span><code>96-119</code></div><div class="aff-line"><span>当前 allowed CPU（线程并集）</span><code>0-191</code></div><div class="aff-line"><span>ftrace 观测 CPU</span><code>未提供</code></div><div class="aff-line"><span>PSR 最近运行 CPU</span><code>100</code></div><div class="aff-target"><span>建议分区 →</span><code>96-107</code></div></div></article><article class="npu-card danger"><b>NPU 6</b><div class="npu-process-entry danger"><div class="npu-heading"><span>Chip 0</span><span class="aff-state">观测到非亲和 CPU</span></div><div class="npu-process">python3 <strong>PID 4121</strong><small>主进程（显存占用最高） · 2 个线程 · 26415 MB</small></div><p class="numa-verdict remote-numa">观测到非亲和 NUMA 运行</p><div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>0 → 2</code></div><div class="aff-line"><span>NPU 亲和 CPU</span><code>96-119</code></div><div class="aff-line"><span>当前 allowed CPU（线程并集）</span><code>0-191</code></div><div class="aff-line"><span>ftrace 观测 CPU</span><code>未提供</code></div><div class="aff-line"><span>PSR 最近运行 CPU</span><code>30</code></div><div class="aff-target"><span>建议分区 →</span><code>108-119</code></div></div></article></div></section><section class="numa-group"><div class="numa-title">NUMA 3 <span>2 张 NPU</span></div><div class="npu-grid"><article class="npu-card danger"><b>NPU 0</b><div class="npu-process-entry danger"><div class="npu-heading"><span>Chip 0</span><span class="aff-state">观测到非亲和 CPU</span></div><div class="npu-process">python3 <strong>PID 4115</strong><small>主进程（显存占用最高） · 2 个线程 · 26415 MB</small></div><p class="numa-verdict remote-numa">观测到非亲和 NUMA 运行</p><div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>0 → 3</code></div><div class="aff-line"><span>NPU 亲和 CPU</span><code>144-167</code></div><div class="aff-line"><span>当前 allowed CPU（线程并集）</span><code>0-191</code></div><div class="aff-line"><span>ftrace 观测 CPU</span><code>30</code></div><div class="aff-line"><span>PSR 最近运行 CPU</span><code>30</code></div><div class="aff-target"><span>建议分区 →</span><code>144-155</code></div></div></article><article class="npu-card danger"><b>NPU 2</b><div class="npu-process-entry danger"><div class="npu-heading"><span>Chip 0</span><span class="aff-state">观测到非亲和 CPU</span></div><div class="npu-process">python3 <strong>PID 4117</strong><small>主进程（显存占用最高） · 2 个线程 · 26415 MB</small></div><p class="numa-verdict remote-numa">观测到非亲和 NUMA 运行</p><div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>0 → 3</code></div><div class="aff-line"><span>NPU 亲和 CPU</span><code>144-167</code></div><div class="aff-line"><span>当前 allowed CPU（线程并集）</span><code>0-191</code></div><div class="aff-line"><span>ftrace 观测 CPU</span><code>未提供</code></div><div class="aff-line"><span>PSR 最近运行 CPU</span><code>30</code></div><div class="aff-target"><span>建议分区 →</span><code>156-167</code></div></div></article></div></section><p class="note">NPU 1,3 共享 0-23，按 2 份分区；每份 CPU 互不重叠。</p><p class="note">NPU 5,7 共享 48-71，按 2 份分区；每份 CPU 互不重叠。</p><p class="note">NPU 4,6 共享 96-119，按 2 份分区；每份 CPU 互不重叠。</p><p class="note">NPU 0,2 共享 144-167，按 2 份分区；每份 CPU 互不重叠。</p><p class="note">证据：hostbound/npu_smi_info.txt、npu_smi_topology.txt、numactl.txt/lscpu_parse.txt、pid_*_{status,threads,thread_affinity,cpuset_effective}.txt；运行观测与配置快照可能位于不同采样时点。</p>
+<h2 id='sec-3'>3. 优化建议</h2>
+<h3>NPU / NUMA 绑核方案（宿主机执行）</h3><p>以下方案仅在原物理机/宿主机执行，使用宿主机 PID；需要 sudo、taskset 和 python3。taskset -acp 覆盖指定 PID 的现有线程，已有子进程应逐 PID 处理；新线程通常继承创建线程的 affinity，业务可重新设置，执行后需复查。taskset 不迁移既有内存页，不提供跨重启持久化，也不独占 CPU；同机其他业务/IRQ 的 CPU 争用仍须结合负载核验。有效 cpuset 不允许的区间需先在宿主机调整资源配置，再重新采集。</p><p>先核验、逐 TID 备份，再绑定与验证；脚本输出备份目录及可运行的回滚命令。</p><div class="code-panel"><button type="button" class="copy-code" onclick="copyBinding(this)">复制完整方案</button><pre><code># 仅在原物理机/宿主机执行；不要进入容器。先阅读报告，再运行。
+sudo bash &lt;&lt;&#x27;HOST_CPU_BIND&#x27;
+set -euo pipefail
+[ ! -e /.dockerenv ] &amp;&amp; [ ! -e /run/.containerenv ] || { echo &quot;请回到宿主机&quot;; exit 1; }
+if command -v systemd-detect-virt &gt;/dev/null &amp;&amp; systemd-detect-virt --container --quiet; then echo &quot;请回到宿主机&quot;; exit 1; fi
+[ &quot;$(cat /proc/sys/kernel/random/boot_id)&quot; = &#x27;test-boot&#x27; ] || { echo &#x27;主机/启动周期已变化，请重新采集&#x27;; exit 1; }
+backup=$(mktemp -d /var/tmp/npu-affinity.XXXXXX)
+echo &quot;备份和回滚脚本：$backup&quot;
+cat &gt; &quot;$backup/rollback.sh&quot; &lt;&lt;&#x27;ROLLBACK_HEADER&#x27;
+#!/usr/bin/env bash
+set -euo pipefail
+[ ! -e /.dockerenv ] &amp;&amp; [ ! -e /run/.containerenv ] || exit 1
+if command -v systemd-detect-virt &gt;/dev/null &amp;&amp; systemd-detect-virt --container --quiet; then exit 1; fi
+[ &quot;$(cat /proc/sys/kernel/random/boot_id)&quot; = &#x27;test-boot&#x27; ] || { echo &#x27;回滚主机/启动周期不一致&#x27;; exit 1; }
+failed=0
+restore_tid() {
+  local tid=$1 expected=$2 previous=$3 s
+  if [ ! -r &quot;/proc/$tid/stat&quot; ]; then echo &quot;跳过已退出 TID $tid&quot;; return; fi
+  s=$(cat &quot;/proc/$tid/stat&quot;) || { echo &quot;跳过已退出 TID $tid&quot;; return; }
+  s=${s##*) }; set -- $s
+  if [ &quot;${20}&quot; != &quot;$expected&quot; ]; then echo &quot;跳过已复用 TID $tid&quot;; return; fi
+  if ! taskset -pc &quot;$previous&quot; &quot;$tid&quot;; then failed=1; fi
+}
+ROLLBACK_HEADER
+starttime() { local s; s=$(cat &quot;/proc/$1/stat&quot;); s=${s##*) }; set -- $s; printf &#x27;%s&#x27; &quot;${20}&quot;; }
+check_cpu_list() { local want=$1 have=$2; python3 - &quot;$want&quot; &quot;$have&quot; &lt;&lt;&#x27;CPU_CHECK&#x27;
+import sys
+def cpus(s):
+    out=set()
+    for part in s.strip().split(&#x27;,&#x27;):
+        a,_,b=part.partition(&#x27;-&#x27;)
+        if a: out.update(range(int(a),int(b or a)+1))
+    return out
+raise SystemExit(0 if cpus(sys.argv[1]) and cpus(sys.argv[1]) &lt;= cpus(sys.argv[2]) else 1)
+CPU_CHECK
+}
+effective_cpuset() { local p=$1 cg value; cg=$(awk -F: &#x27;$1==0 {print $3}&#x27; /proc/&quot;$p&quot;/cgroup);
+if [ -n &quot;$cg&quot; ] &amp;&amp; [ -r &quot;/sys/fs/cgroup${cg}/cpuset.cpus.effective&quot; ]; then cat &quot;/sys/fs/cgroup${cg}/cpuset.cpus.effective&quot;; return; fi
+cg=$(awk -F: &#x27;$2 ~ /(^|,)cpuset(,|$)/ {print $3}&#x27; /proc/&quot;$p&quot;/cgroup)
+[ -n &quot;$cg&quot; ] || return 1
+for f in &quot;/sys/fs/cgroup/cpuset${cg}/cpuset.effective_cpus&quot; &quot;/sys/fs/cgroup/cpuset${cg}/cpuset.cpus&quot;; do if [ -r &quot;$f&quot; ]; then value=$(cat &quot;$f&quot;); if [ -n &quot;$value&quot; ]; then printf &quot;%s\n&quot; &quot;$value&quot;; return; fi; fi; done
+return 1; }
+# 全部预检、逐 TID 保存成功之后才执行绑核。
+[ &quot;$(starttime 4115)&quot; = &#x27;411500&#x27; ] || { echo &#x27;PID 4115 已变化，请重新采集&#x27;; exit 1; }
+check_cpu_list &#x27;144-155&#x27; &quot;$(cat /sys/devices/system/cpu/online)&quot;
+check_cpu_list &#x27;144-155&#x27; &quot;$(effective_cpuset 4115)&quot; || { echo &#x27;PID 4115 的 cpuset 不允许目标 CPU&#x27;; exit 1; }
+for task in /proc/4115/task/*; do
+  tid=${task##*/}
+  check_cpu_list &#x27;144-155&#x27; &quot;$(effective_cpuset &quot;$tid&quot;)&quot; || { echo &quot;TID $tid 的 cpuset 不允许目标 CPU&quot;; exit 1; }
+  taskset -pc &quot;$tid&quot; &gt;&gt; &quot;$backup/before.txt&quot;
+  old=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  stamp=$(starttime &quot;$tid&quot;)
+  printf &#x27;restore_tid %s %s %s\n&#x27; &quot;$tid&quot; &quot;$stamp&quot; &quot;$old&quot; &gt;&gt; &quot;$backup/rollback.sh&quot;
+done
+[ &quot;$(starttime 4117)&quot; = &#x27;411700&#x27; ] || { echo &#x27;PID 4117 已变化，请重新采集&#x27;; exit 1; }
+check_cpu_list &#x27;156-167&#x27; &quot;$(cat /sys/devices/system/cpu/online)&quot;
+check_cpu_list &#x27;156-167&#x27; &quot;$(effective_cpuset 4117)&quot; || { echo &#x27;PID 4117 的 cpuset 不允许目标 CPU&#x27;; exit 1; }
+for task in /proc/4117/task/*; do
+  tid=${task##*/}
+  check_cpu_list &#x27;156-167&#x27; &quot;$(effective_cpuset &quot;$tid&quot;)&quot; || { echo &quot;TID $tid 的 cpuset 不允许目标 CPU&quot;; exit 1; }
+  taskset -pc &quot;$tid&quot; &gt;&gt; &quot;$backup/before.txt&quot;
+  old=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  stamp=$(starttime &quot;$tid&quot;)
+  printf &#x27;restore_tid %s %s %s\n&#x27; &quot;$tid&quot; &quot;$stamp&quot; &quot;$old&quot; &gt;&gt; &quot;$backup/rollback.sh&quot;
+done
+[ &quot;$(starttime 4118)&quot; = &#x27;411800&#x27; ] || { echo &#x27;PID 4118 已变化，请重新采集&#x27;; exit 1; }
+check_cpu_list &#x27;12-23&#x27; &quot;$(cat /sys/devices/system/cpu/online)&quot;
+check_cpu_list &#x27;12-23&#x27; &quot;$(effective_cpuset 4118)&quot; || { echo &#x27;PID 4118 的 cpuset 不允许目标 CPU&#x27;; exit 1; }
+for task in /proc/4118/task/*; do
+  tid=${task##*/}
+  check_cpu_list &#x27;12-23&#x27; &quot;$(effective_cpuset &quot;$tid&quot;)&quot; || { echo &quot;TID $tid 的 cpuset 不允许目标 CPU&quot;; exit 1; }
+  taskset -pc &quot;$tid&quot; &gt;&gt; &quot;$backup/before.txt&quot;
+  old=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  stamp=$(starttime &quot;$tid&quot;)
+  printf &#x27;restore_tid %s %s %s\n&#x27; &quot;$tid&quot; &quot;$stamp&quot; &quot;$old&quot; &gt;&gt; &quot;$backup/rollback.sh&quot;
+done
+[ &quot;$(starttime 4119)&quot; = &#x27;411900&#x27; ] || { echo &#x27;PID 4119 已变化，请重新采集&#x27;; exit 1; }
+check_cpu_list &#x27;96-107&#x27; &quot;$(cat /sys/devices/system/cpu/online)&quot;
+check_cpu_list &#x27;96-107&#x27; &quot;$(effective_cpuset 4119)&quot; || { echo &#x27;PID 4119 的 cpuset 不允许目标 CPU&#x27;; exit 1; }
+for task in /proc/4119/task/*; do
+  tid=${task##*/}
+  check_cpu_list &#x27;96-107&#x27; &quot;$(effective_cpuset &quot;$tid&quot;)&quot; || { echo &quot;TID $tid 的 cpuset 不允许目标 CPU&quot;; exit 1; }
+  taskset -pc &quot;$tid&quot; &gt;&gt; &quot;$backup/before.txt&quot;
+  old=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  stamp=$(starttime &quot;$tid&quot;)
+  printf &#x27;restore_tid %s %s %s\n&#x27; &quot;$tid&quot; &quot;$stamp&quot; &quot;$old&quot; &gt;&gt; &quot;$backup/rollback.sh&quot;
+done
+[ &quot;$(starttime 4120)&quot; = &#x27;412000&#x27; ] || { echo &#x27;PID 4120 已变化，请重新采集&#x27;; exit 1; }
+check_cpu_list &#x27;48-59&#x27; &quot;$(cat /sys/devices/system/cpu/online)&quot;
+check_cpu_list &#x27;48-59&#x27; &quot;$(effective_cpuset 4120)&quot; || { echo &#x27;PID 4120 的 cpuset 不允许目标 CPU&#x27;; exit 1; }
+for task in /proc/4120/task/*; do
+  tid=${task##*/}
+  check_cpu_list &#x27;48-59&#x27; &quot;$(effective_cpuset &quot;$tid&quot;)&quot; || { echo &quot;TID $tid 的 cpuset 不允许目标 CPU&quot;; exit 1; }
+  taskset -pc &quot;$tid&quot; &gt;&gt; &quot;$backup/before.txt&quot;
+  old=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  stamp=$(starttime &quot;$tid&quot;)
+  printf &#x27;restore_tid %s %s %s\n&#x27; &quot;$tid&quot; &quot;$stamp&quot; &quot;$old&quot; &gt;&gt; &quot;$backup/rollback.sh&quot;
+done
+[ &quot;$(starttime 4121)&quot; = &#x27;412100&#x27; ] || { echo &#x27;PID 4121 已变化，请重新采集&#x27;; exit 1; }
+check_cpu_list &#x27;108-119&#x27; &quot;$(cat /sys/devices/system/cpu/online)&quot;
+check_cpu_list &#x27;108-119&#x27; &quot;$(effective_cpuset 4121)&quot; || { echo &#x27;PID 4121 的 cpuset 不允许目标 CPU&#x27;; exit 1; }
+for task in /proc/4121/task/*; do
+  tid=${task##*/}
+  check_cpu_list &#x27;108-119&#x27; &quot;$(effective_cpuset &quot;$tid&quot;)&quot; || { echo &quot;TID $tid 的 cpuset 不允许目标 CPU&quot;; exit 1; }
+  taskset -pc &quot;$tid&quot; &gt;&gt; &quot;$backup/before.txt&quot;
+  old=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  stamp=$(starttime &quot;$tid&quot;)
+  printf &#x27;restore_tid %s %s %s\n&#x27; &quot;$tid&quot; &quot;$stamp&quot; &quot;$old&quot; &gt;&gt; &quot;$backup/rollback.sh&quot;
+done
+[ &quot;$(starttime 4122)&quot; = &#x27;412200&#x27; ] || { echo &#x27;PID 4122 已变化，请重新采集&#x27;; exit 1; }
+check_cpu_list &#x27;60-71&#x27; &quot;$(cat /sys/devices/system/cpu/online)&quot;
+check_cpu_list &#x27;60-71&#x27; &quot;$(effective_cpuset 4122)&quot; || { echo &#x27;PID 4122 的 cpuset 不允许目标 CPU&#x27;; exit 1; }
+for task in /proc/4122/task/*; do
+  tid=${task##*/}
+  check_cpu_list &#x27;60-71&#x27; &quot;$(effective_cpuset &quot;$tid&quot;)&quot; || { echo &quot;TID $tid 的 cpuset 不允许目标 CPU&quot;; exit 1; }
+  taskset -pc &quot;$tid&quot; &gt;&gt; &quot;$backup/before.txt&quot;
+  old=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  stamp=$(starttime &quot;$tid&quot;)
+  printf &#x27;restore_tid %s %s %s\n&#x27; &quot;$tid&quot; &quot;$stamp&quot; &quot;$old&quot; &gt;&gt; &quot;$backup/rollback.sh&quot;
+done
+printf &#x27;%s\n&#x27; &#x27;exit &quot;$failed&quot;&#x27; &gt;&gt; &quot;$backup/rollback.sh&quot;
+# -a 覆盖该 PID 的现有线程；已有子进程需要各自的宿主机 PID。
+[ &quot;$(starttime 4115)&quot; = &#x27;411500&#x27; ] || { echo &#x27;PID 已变化，请检查并按需回滚&#x27;; exit 1; }
+taskset -acp 144-155 4115
+[ &quot;$(starttime 4117)&quot; = &#x27;411700&#x27; ] || { echo &#x27;PID 已变化，请检查并按需回滚&#x27;; exit 1; }
+taskset -acp 156-167 4117
+[ &quot;$(starttime 4118)&quot; = &#x27;411800&#x27; ] || { echo &#x27;PID 已变化，请检查并按需回滚&#x27;; exit 1; }
+taskset -acp 12-23 4118
+[ &quot;$(starttime 4119)&quot; = &#x27;411900&#x27; ] || { echo &#x27;PID 已变化，请检查并按需回滚&#x27;; exit 1; }
+taskset -acp 96-107 4119
+[ &quot;$(starttime 4120)&quot; = &#x27;412000&#x27; ] || { echo &#x27;PID 已变化，请检查并按需回滚&#x27;; exit 1; }
+taskset -acp 48-59 4120
+[ &quot;$(starttime 4121)&quot; = &#x27;412100&#x27; ] || { echo &#x27;PID 已变化，请检查并按需回滚&#x27;; exit 1; }
+taskset -acp 108-119 4121
+[ &quot;$(starttime 4122)&quot; = &#x27;412200&#x27; ] || { echo &#x27;PID 已变化，请检查并按需回滚&#x27;; exit 1; }
+taskset -acp 60-71 4122
+# 验证所有线程的 allowed CPU，保存执行后快照。
+taskset -apc 4115 | tee -a &quot;$backup/after.txt&quot;
+for task in /proc/4115/task/*; do
+  actual=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  [ &quot;$actual&quot; = &#x27;144-155&#x27; ] || { echo &#x27;线程 affinity 与目标不一致，请检查或回滚&#x27;; exit 1; }
+done
+taskset -apc 4117 | tee -a &quot;$backup/after.txt&quot;
+for task in /proc/4117/task/*; do
+  actual=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  [ &quot;$actual&quot; = &#x27;156-167&#x27; ] || { echo &#x27;线程 affinity 与目标不一致，请检查或回滚&#x27;; exit 1; }
+done
+taskset -apc 4118 | tee -a &quot;$backup/after.txt&quot;
+for task in /proc/4118/task/*; do
+  actual=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  [ &quot;$actual&quot; = &#x27;12-23&#x27; ] || { echo &#x27;线程 affinity 与目标不一致，请检查或回滚&#x27;; exit 1; }
+done
+taskset -apc 4119 | tee -a &quot;$backup/after.txt&quot;
+for task in /proc/4119/task/*; do
+  actual=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  [ &quot;$actual&quot; = &#x27;96-107&#x27; ] || { echo &#x27;线程 affinity 与目标不一致，请检查或回滚&#x27;; exit 1; }
+done
+taskset -apc 4120 | tee -a &quot;$backup/after.txt&quot;
+for task in /proc/4120/task/*; do
+  actual=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  [ &quot;$actual&quot; = &#x27;48-59&#x27; ] || { echo &#x27;线程 affinity 与目标不一致，请检查或回滚&#x27;; exit 1; }
+done
+taskset -apc 4121 | tee -a &quot;$backup/after.txt&quot;
+for task in /proc/4121/task/*; do
+  actual=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  [ &quot;$actual&quot; = &#x27;108-119&#x27; ] || { echo &#x27;线程 affinity 与目标不一致，请检查或回滚&#x27;; exit 1; }
+done
+taskset -apc 4122 | tee -a &quot;$backup/after.txt&quot;
+for task in /proc/4122/task/*; do
+  actual=$(awk &#x27;/^Cpus_allowed_list:/ {print $2}&#x27; &quot;$task/status&quot;)
+  [ &quot;$actual&quot; = &#x27;60-71&#x27; ] || { echo &#x27;线程 affinity 与目标不一致，请检查或回滚&#x27;; exit 1; }
+done
+echo &quot;如需回滚，在本宿主机运行：sudo bash $backup/rollback.sh&quot;
+HOST_CPU_BIND</code></pre></div><p class="note">执行后同负载复采，对比吞吐、Device 空泡、调度延迟与跨节点运行；无收益或出现副作用时回滚。</p>
+<div class='finding' style='border-left-color:#d64545'>
+<h3>P0（立即处理） — CPU 整体饱和</h3><ol class='pri'>
+<li>识别并优化 Top CPU 任务 (见 Task 分析)</li>
+<li>提高 Host 并行度配置或升级 CPU</li>
+<li>排查业务是否存在无意义忙等/自旋</li>
+</ol></div>
+<div class='finding' style='border-left-color:#d98f00'>
+<h3>P1（尽快处理） — NPU 任务 CPU 亲和性存在风险（待性能验证）</h3><ol class='pri'>
+<li>按第二部分的 NPU/PID 对照核验，第三部分给出宿主机预检、逐 TID 备份、互斥分区、taskset 命令及回滚</li>
+<li>同负载复采验证吞吐与延迟；taskset 不迁移内存页，不越过有效 cpuset</li>
+</ol></div>
+<h2 id='sec-4'>4. 问题详情</h2>
+<div class='finding' style='border-left-color:#d64545'><h3>CPU 整体饱和 <span class='badge' style='background:#d64545'>严重</span> <span class='evt'>置信度 HIGH</span></h3><div class='tagline'>类别：<span class='evt'>CPU_SATURATION</span> — CPU 饱和：整体 CPU 已接近打满，算力不足</div><p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th><th>来源 / 时间窗</th></tr><tr><td class='evt'>全机平均 CPU 利用率</td><td><b>100.0%</b></td><td>≥90% 判定饱和</td><td>ftrace / 对应系统快照<br>本次采集窗口；累计快照除外</td></tr></table><p><span class='lbl'>影响：</span>Host 算力不足，任务排队等待，可能拖慢 NPU 供数</p><p><span class='lbl'>可能根因：</span>整机 CPU 计算需求超过供给</p><p class='note'>对应优化动作见第三部分。</p></div>
+<div class='finding' style='border-left-color:#d98f00'><h3>NPU 任务 CPU 亲和性存在风险（待性能验证） <span class='badge' style='background:#d98f00'>警告</span> <span class='evt'>置信度 MEDIUM</span></h3><div class='tagline'>类别：<span class='evt'>NUMA_RISK</span> — NUMA 风险：存在跨 NUMA 节点访问的可能性</div><p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th><th>来源 / 时间窗</th></tr><tr><td class='evt'>NPU/PID 与 CPU 亲和性</td><td><b>NPU0/PID4115: allowed=0-191, observed=30, local=144-167；NPU2/PID4117: allowed=0-191, observed=30, local=144-167；NPU3/PID4118: allowed=0-191, observed=30, local=0-23；NPU4/PID4119: allowed=0-191, observed=100, local=96-119；NPU5/PID4120: allowed=0-191, observed=30, local=48-71；NPU6/PID4121: allowed=0-191, observed=30, local=96-119；NPU7/PID4122: allowed=0-191, observed=30, local=48-71</b></td><td>全量线程 allowed CPU 收敛到 NPU 亲和 CPU；观测核应位于亲和范围</td><td>hostbound/npu_smi_topology.txt + npu_smi_info.txt + pid_*_thread_affinity.txt/threads.txt + ftrace<br>ftrace 100.000~101.000s；配置/PSR 为采集结束快照</td></tr></table><p><span class='lbl'>影响：</span>配置可能引入跨节点运行或共享 CPU 争用；未关联 Device 空泡/性能差异，不能确认 HostBound 根因</p><p><span class='lbl'>可能根因：</span>已识别 NPU 对应进程的调度许可范围未收敛，或观测到非亲和 CPU；内存页位置仍待核验</p><p class='note'>对应优化动作见第三部分。</p></div>
+<div class='finding' style='border-left-color:#6b7280'><h3>本次采集数据维度有限 <span class='badge' style='background:#6b7280'>提示</span> <span class='evt'>置信度 HIGH</span></h3><div class='tagline'>类别：<span class='evt'>INSUFFICIENT_EVIDENCE</span> — 证据不足：当前数据无法支持可靠结论</div><p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th><th>来源 / 时间窗</th></tr><tr><td class='evt'>缺失维度</td><td><b>缺少 cpu_idle 事件，利用率基于 swapper 切换近似估算；缺少 wakeup 事件，无法计算调度延迟；缺少 IRQ 事件，无法分析硬中断；缺少 SoftIRQ 事件，无法分析软中断；缺少 cpu_frequency 事件，无法分析频率</b></td><td>-</td><td>ftrace / 对应系统快照<br>本次采集窗口；累计快照除外</td></tr><tr><td class='evt'>采集模式</td><td><b>精简模式(仅 sched_switch)</b></td><td>-</td><td>ftrace / 对应系统快照<br>本次采集窗口；累计快照除外</td></tr></table><p><span class='lbl'>影响：</span>相关维度结论缺失，无法覆盖该类问题</p><p><span class='lbl'>可能根因：</span>采集脚本精简模式或内核不支持部分事件</p><p class='note'>对应优化动作见第三部分。</p></div>
+<h2 id='sec-5'>5. CPU 总体状态</h2>
+<p>无 /proc/stat 快照，总体占用以 trace 计算为准。</p>
+<h2 id='sec-6'>6. CPU Core Balance（各核心负载）</h2>
 <div class='chart'>
-<svg xmlns='http://www.w3.org/2000/svg' width='760' height='186' font-family='sans-serif'><text x='0' y='18' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 0</text><rect x='110' y='5' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='5' width='463.2' height='16' rx='3' fill='#d98f00'/><text x='758' y='18' font-size='11' fill='#c9d1d9'>80.0%</text><text x='0' y='40' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 1</text><rect x='110' y='27' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='27' width='451.6' height='16' rx='3' fill='#d98f00'/><text x='758' y='40' font-size='11' fill='#c9d1d9'>78.0%</text><text x='0' y='62' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 2</text><rect x='110' y='49' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='49' width='550.0' height='16' rx='3' fill='#d64545'/><text x='758' y='62' font-size='11' fill='#c9d1d9'>95.0%</text><text x='0' y='84' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 3</text><rect x='110' y='71' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='71' width='28.9' height='16' rx='3' fill='#4a9eff'/><text x='758' y='84' font-size='11' fill='#c9d1d9'>5.0%</text><text x='0' y='106' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 4</text><rect x='110' y='93' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='93' width='28.9' height='16' rx='3' fill='#4a9eff'/><text x='758' y='106' font-size='11' fill='#c9d1d9'>5.0%</text><text x='0' y='128' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 5</text><rect x='110' y='115' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='115' width='28.9' height='16' rx='3' fill='#4a9eff'/><text x='758' y='128' font-size='11' fill='#c9d1d9'>5.0%</text><text x='0' y='150' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 6</text><rect x='110' y='137' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='137' width='28.9' height='16' rx='3' fill='#4a9eff'/><text x='758' y='150' font-size='11' fill='#c9d1d9'>5.0%</text><text x='0' y='172' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 7</text><rect x='110' y='159' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='159' width='28.9' height='16' rx='3' fill='#4a9eff'/><text x='758' y='172' font-size='11' fill='#c9d1d9'>5.0%</text></svg>
+<svg xmlns='http://www.w3.org/2000/svg' width='760' height='32' font-family='sans-serif'><text x='0' y='18' font-size='11' fill='#c9d1d9' text-anchor='start'>CPU 30</text><rect x='110' y='5' width='550' height='16' rx='3' fill='#22303c'/><rect x='110' y='5' width='550.0' height='16' rx='3' fill='#d64545'/><text x='758' y='18' font-size='11' fill='#c9d1d9'>100.0%</text></svg>
 </div>
 <table><tr><th>核心</th><th class='num'>利用率</th><th class='num'>空闲比</th><th class='num'>上下文切换/s</th><th class='num'>硬中断占比</th><th class='num'>软中断占比</th></tr>
-<tr><td class='evt'>CPU 0</td><td class='num'>80.0%</td><td class='num'>20.0%</td><td class='num'>40</td><td class='num'>0.0%</td><td class='num'>0.0%</td></tr>
-<tr><td class='evt'>CPU 1</td><td class='num'>78.0%</td><td class='num'>22.0%</td><td class='num'>90</td><td class='num'>0.0%</td><td class='num'>0.0%</td></tr>
-<tr><td class='evt'>CPU 2</td><td class='num'>95.0%</td><td class='num'>5.0%</td><td class='num'>60</td><td class='num'>12.5%</td><td class='num'>56.4%</td></tr>
-<tr><td class='evt'>CPU 3</td><td class='num'>5.0%</td><td class='num'>95.0%</td><td class='num'>4</td><td class='num'>0.0%</td><td class='num'>0.2%</td></tr>
-<tr><td class='evt'>CPU 4</td><td class='num'>5.0%</td><td class='num'>95.0%</td><td class='num'>4</td><td class='num'>0.0%</td><td class='num'>0.2%</td></tr>
-<tr><td class='evt'>CPU 5</td><td class='num'>5.0%</td><td class='num'>95.0%</td><td class='num'>4</td><td class='num'>0.0%</td><td class='num'>0.2%</td></tr>
-<tr><td class='evt'>CPU 6</td><td class='num'>5.0%</td><td class='num'>95.0%</td><td class='num'>4</td><td class='num'>0.0%</td><td class='num'>0.2%</td></tr>
-<tr><td class='evt'>CPU 7</td><td class='num'>5.0%</td><td class='num'>95.0%</td><td class='num'>4</td><td class='num'>0.0%</td><td class='num'>0.2%</td></tr>
+<tr><td class='evt'>CPU 30</td><td class='num'>100.0%</td><td class='num'>0.0%</td><td class='num'>3</td><td class='num'>0.0%</td><td class='num'>0.0%</td></tr>
 </table>
-<p>最高负载：2（95.0%），最低：3（5.0%）。<b style='color:#d98f00'>存在明显不均衡，详见问题详情。</b></p>
-<h2 id='sec-6'>6. Scheduler 调度分析</h2>
+<p>最高负载：30（100.0%），最低：30（100.0%）。负载分布尚可。</p>
+<h2 id='sec-7'>7. Scheduler 调度分析</h2>
 <div class='card'>
-<p>上下文切换总计 <b>2,095</b> 次（210 次/秒）</p>
-<p>唤醒总计 <b>895</b> 次（90 次/秒）— 唤醒率反映任务碎片化程度。</p>
-<p>调度延迟：平均 21.641 ms，P50 2.697 ms，P95 99.20 ms，P99 99.20 ms，最大 99.20 ms（共 791 次可配对样本）。</p>
-<p class='note'>调度延迟含义：调度延迟 (scheduling latency)：任务从被唤醒 (sched_wakeup) 到真正获得 CPU (sched_switch) 的等待时间，直接体现 runnable 队列拥堵程度。</p>
-<p>平均可运行任务数 1.7 — 平均可运行任务数 (runnable)：任意时刻处于等待 CPU 状态的平均任务数，&gt;核心数说明调度拥挤。</p>
+<p>上下文切换总计 <b>3</b> 次（3 次/秒）</p>
+<p>唤醒总计 <b>0</b> 次（0 次/秒）— 唤醒率反映任务碎片化程度。</p>
+<p>调度延迟：trace 中缺少 wakeup 与 switch 可配对事件，无法计算调度延迟</p>
+<p>平均可运行任务数 0.0 — 平均可运行任务数 (runnable)：任意时刻处于等待 CPU 状态的平均任务数，&gt;核心数说明调度拥挤。</p>
 </div>
-<table><tr><th>任务</th><th class='num'>最大延迟 ms</th><th class='num'>平均 ms</th><th class='num'>次数</th></tr>
-<tr><td>python_main (pid 1005)</td><td class='num'>99.20</td><td class='num'>49.753</td><td class='num'>199</td></tr>
-<tr><td>worker_0 (pid 1001)</td><td class='num'>44.00</td><td class='num'>44.000</td><td class='num'>99</td></tr>
-<tr><td>worker_net (pid 1002)</td><td class='num'>25.40</td><td class='num'>18.153</td><td class='num'>17</td></tr>
-<tr><td>worker_2 (pid 1002)</td><td class='num'>22.92</td><td class='num'>5.287</td><td class='num'>458</td></tr>
-<tr><td>worker_1 (pid 1002)</td><td class='num'>10.00</td><td class='num'>7.300</td><td class='num'>18</td></tr>
-</table>
-<h2 id='sec-7'>7. IRQ / SoftIRQ 分析</h2>
-<h3>7.1 硬中断</h3>
-<p>硬中断总 CPU 占比 <b>12.51%</b>（3,400 次）。</p>
-<table><tr><th>中断源</th><th class='num'>次数</th><th class='num'>累计耗时 ms</th><th>说明</th></tr>
-<tr><td class='evt'>eth0</td><td class='num'>2,300</td><td class='num'>920.0</td><td>网卡中断（eth*/enp*/ens*），网络通信的核心中断来源。</td></tr>
-<tr><td class='evt'>nvme0q2</td><td class='num'>1,100</td><td class='num'>330.0</td><td>NVMe 存储队列中断（nvme0q*），数据加载/日志写入时产生。</td></tr>
-</table>
-<h3>7.2 软中断</h3>
-<p>软中断总 CPU 占比 <b>57.63%</b>（5,000 次）。</p>
-<table><tr><th>软中断类型</th><th class='num'>次数</th><th class='num'>累计耗时 ms</th><th>说明</th></tr>
-<tr><td class='evt'>NET_RX</td><td class='num'>4,700</td><td class='num'>5640.0</td><td>网络接收软中断：网卡收到数据包后，协议栈处理（IP/TCP 解析、socket 分发）在软中断中延迟执行。NET_RX 软中断打满单核是分布式训练/推理通信中最常见的 IRQ 热点根因。</td></tr>
-<tr><td class='evt'>RCU</td><td class='num'>200</td><td class='num'>80.0</td><td>RCU 软中断：Read-Copy-Update 宽限期回收，核心数多或 RCU pressure 大时会明显。</td></tr>
-<tr><td class='evt'>TIMER</td><td class='num'>100</td><td class='num'>40.0</td><td>定时器软中断：内核定时器 (tick/timer_list) 的到期处理，过高说明大量定时器密集到期。</td></tr>
-</table>
-<p class='note'>各核中断分布见第 5 节表格与上方图表。</p>
-<h2 id='sec-8'>8. CPU Frequency / Idle 分析</h2>
-<table><tr><th>核心</th><th class='num'>最低 MHz</th><th class='num'>平均 MHz</th><th class='num'>最高 MHz</th><th class='num'>低频样本占比</th></tr>
-<tr><td class='evt'>CPU 0</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>0%</td></tr>
-<tr><td class='evt'>CPU 1</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>0%</td></tr>
-<tr><td class='evt'>CPU 2</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>0%</td></tr>
-<tr><td class='evt'>CPU 3</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>0%</td></tr>
-<tr><td class='evt'>CPU 4</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>0%</td></tr>
-<tr><td class='evt'>CPU 5</td><td class='num'>1200</td><td class='num'>1320</td><td class='num'>2400</td><td class='num'>90%</td></tr>
-<tr><td class='evt'>CPU 6</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>0%</td></tr>
-<tr><td class='evt'>CPU 7</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>2400</td><td class='num'>0%</td></tr>
-</table>
-<p>governor：schedutil。</p>
-<p class='note'>频率单位由 trace 原始值换算（常见 kHz/Hz，已自动识别）；仅凭 trace 不判定硬件故障。</p>
-<p>各核空闲占比：平均 65.2%，最高 95.0%（3），最低 5.0%（2）。</p>
-<h2 id='sec-9'>9. Task / Thread 分析</h2>
+<h2 id='sec-8'>8. IRQ / SoftIRQ 分析</h2>
+<h3>8.1 硬中断</h3>
+<p>硬中断总 CPU 占比 <b>0.00%</b>（0 次）。</p>
+<h3>8.2 软中断</h3>
+<p>软中断总 CPU 占比 <b>0.00%</b>（0 次）。</p>
+<p class='note'>各核中断分布见第 6 节表格与上方图表。</p>
+<h2 id='sec-9'>9. CPU Frequency / Idle 分析</h2>
+<p>trace 中无 cpu_frequency 事件，频率分析不可用（Available: Unavailable）。</p>
+<p>trace 中无 cpu_idle 事件，空闲比基于 swapper 任务近似。</p>
+<h2 id='sec-10'>10. Task / Thread 分析</h2>
 <table><tr><th>Top 运行时间任务</th><th class='num'>累计运行 ms</th><th>说明</th></tr>
-<tr><td>ksoftirqd/2 (pid 26)</td><td class='num'>6000</td><td>普通任务</td></tr>
-<tr><td>worker_0 (pid 1001)</td><td class='num'>5600</td><td>普通任务</td></tr>
-<tr><td>python_main (pid 1005)</td><td class='num'>2889</td><td>Python 训练/推理主进程或 dataloader</td></tr>
-<tr><td>rcu_preempt (pid 11)</td><td class='num'>2500</td><td>普通任务</td></tr>
-<tr><td>worker_1 (pid 1002)</td><td class='num'>2482</td><td>普通任务</td></tr>
-<tr><td>worker_net (pid 1002)</td><td class='num'>15</td><td>普通任务</td></tr>
+<tr><td>python3 (pid 4115)</td><td class='num'>100</td><td>Python 训练/推理主进程或 dataloader</td></tr>
 </table>
 <table><tr><th>Top 切出次数任务</th><th class='num'>次数</th></tr>
-<tr><td>python_main (pid 1005)</td><td class='num'>695</td></tr>
-<tr><td>ksoftirqd/2 (pid 26)</td><td class='num'>500</td></tr>
-<tr><td>worker_1 (pid 1002)</td><td class='num'>200</td></tr>
-<tr><td>worker_0 (pid 1001)</td><td class='num'>200</td></tr>
-<tr><td>rcu_preempt (pid 11)</td><td class='num'>100</td></tr>
+<tr><td>python3 (pid 4115)</td><td class='num'>1</td></tr>
 </table>
-<table><tr><th>Top 被唤醒任务</th><th class='num'>次数</th></tr>
-<tr><td>worker_2</td><td class='num'>495</td></tr>
-<tr><td>python_main</td><td class='num'>200</td></tr>
-<tr><td>worker_1</td><td class='num'>100</td></tr>
-<tr><td>worker_0</td><td class='num'>100</td></tr>
-</table>
-<table><tr><th>Top 迁移任务</th><th class='num'>次数</th></tr>
-<tr><td>pid:1003</td><td class='num'>600</td></tr>
-<tr><td>pid:1002</td><td class='num'>399</td></tr>
-<tr><td>pid:1005</td><td class='num'>199</td></tr>
-<tr><td>pid:11</td><td class='num'>99</td></tr>
-</table>
-<h2 id='sec-10'>10. Affinity / NUMA 分析</h2>
-<p>快照包含 NUMA 拓扑信息（1 个节点可见）。</p>
-<p>Top 任务运行分布与各核利用率见第 5 节；任务集中在少数核时可结合绑核配置判断。</p>
-<p class='note'><b>证据说明</b>：当前 trace 未包含跨 NUMA 访问的直接证据，NUMA 结论置信度为低（Evidence insufficient），如需精确判断请补充 <span class='evt'>numactl -H</span> 与 <span class='evt'>numastat</span> 快照。</p>
-<h2 id='sec-11'>11. 时间窗口分析</h2>
-<p>以下为利用率最高的时间窗口（桶 = 0.08 秒）：</p><ul style='margin-left:22px'><li>窗口 0.7~0.8 秒：利用率峰值 <b>90.1%</b>，同期 上下文切换 216 次/秒、软中断占比 6.9%、调度延迟 P99 95.34 ms</li><li>窗口 1.2~1.3 秒：利用率峰值 <b>90.1%</b>，同期 上下文切换 204 次/秒、软中断占比 6.9%、调度延迟 P99 95.89 ms</li><li>窗口 3.3~3.4 秒：利用率峰值 <b>90.1%</b>，同期 上下文切换 192 次/秒、软中断占比 6.9%、调度延迟 P99 42.64 ms</li></ul><p class='note'>若峰值窗口内同步出现中断/调度延迟上升，可建立「负载升高 → 中断增加 → 调度延迟上升 → worker 运行时间下降 → NPU 等待 Host」的关联链；仅当上述同期证据存在时成立。</p>
-<h2 id='sec-12'>12. 根因判断</h2>
-<div class='card'><p><span class='lbl'>现象</span> → 软中断集中于 CPU 2</p>
-<p><span class='lbl'>证据</span> → CPU 2 软中断 CPU 占比=56.4%（阈值 ≥20% 且≥中位数 2.0 倍）；Top 软中断类型=NET_RX(5640ms), RCU(80ms), TIMER(40ms)（阈值 -）</p>
-<p><span class='lbl'>推断</span> → 该核集中处理了软中断，且以网络收包 (NET_RX) 为主：网卡队列中断亲和性固定于单核，通信/收包量大时极易打满</p>
-<p><span class='lbl'>根因</span> → <span class='evt'>SOFTIRQ_HOTSPOT</span>（软中断热点：软中断（如 NET_RX 网络收包）集中消耗个别核心 CPU）</p></div>
-<h2 id='sec-13'>13. 优化建议</h2>
-<div class='finding' style='border-left-color:#d64545'>
-<h3>P0（立即处理） — 软中断集中于 CPU 2</h3><ol class='pri'>
-<li>检查 /proc/softirqs 与 /proc/interrupts 中网络中断分布</li>
-<li>开启/调大网卡多队列 (RSS) 并用 ethtool -X 均衡队列</li>
-<li>用 irqbalance 或 smp_affinity 将 NET_RX 分散到多核</li>
-<li>评估业务通信量是否异常 (如 all-reduce 风暴)</li>
-</ol></div>
-<div class='finding' style='border-left-color:#d64545'>
-<h3>P0（立即处理） — 调度延迟严重</h3><ol class='pri'>
-<li>结合 CPU 利用率与中断热点结论处理根源负载</li>
-<li>提高关键线程优先级 (nice/chrt) 或绑核隔离 (isolcpus/cpuset)</li>
-<li>减少 Host 线程数，避免过度并发</li>
-</ol></div>
-<div class='finding' style='border-left-color:#d98f00'>
-<h3>P1（尽快处理） — CPU 负载严重不均衡</h3><ol class='pri'>
-<li>检查 IRQ affinity: cat /proc/interrupts，将高频中断分散 (echo 掩码 &gt; /proc/irq/N/smp_affinity)</li>
-<li>检查业务线程绑核配置 (taskset/numactl)，把任务分散到空闲核</li>
-<li>开启 RPS/XPS 或 RSS 多队列分散网络软中断</li>
-</ol></div>
-<div class='finding' style='border-left-color:#d98f00'>
-<h3>P1（尽快处理） — 任务迁移频繁</h3><ol class='pri'>
-<li>将关键线程固定核心 (taskset -c / numactl --physcpubind)</li>
-<li>调小内核调度域负载均衡激进度 (如 sched_migration_cost_ns 调大)</li>
-</ol></div>
-<h2 id='sec-14'>14. 数据说明与指标解释</h2>
+<h2 id='sec-11'>11. Affinity / NUMA 分析</h2>
+<p>Top 任务运行分布与各核利用率见第 6 节；任务集中在少数核时可结合绑核配置判断。</p>
+<p>CPU 亲和性、NPU/PID 对应及线程运行核见第二部分；互斥 CPU 分区和宿主机命令见第三部分。</p>
+<p class='note'>内存页 NUMA 分布与跨节点内存访问仍须 numastat -p PID、/proc/PID/numa_maps 或性能数据验证；taskset 本身不迁移内存页。</p>
+<h2 id='sec-12'>12. 时间窗口分析</h2>
+<p>时间序列数据不足，无法进行时间窗口分析。</p>
+<h2 id='sec-13'>13. 数据说明与指标解释</h2>
 <h3>数据概况</h3><div class='card'>
-<p>trace 时间范围：1000.000 ~ 1009.995（相对秒），时长 10.0 秒</p>
-<p>CPU 数量（参与统计）：8；报告核数（nproc）：8</p>
-<p>内核版本：5.10.0-136.12.0.oe2203sp1.aarch64 ｜ 主机名：atlas-800-9000</p>
-<p>可用事件：cpu_frequency, cpu_idle, irq_handler_entry, irq_handler_exit, sched_migrate_task, sched_switch, sched_wakeup, softirq_entry, softirq_exit</p>
-<p>解析统计：总行 21,270，成功 21,270，失败 0（失败行已自动跳过）</p>
+<p>trace 时间范围：100.000 ~ 101.000（相对秒），时长 1.0 秒</p>
+<p>CPU 数量（参与统计）：1；报告核数（nproc）：-</p>
+<p>内核版本：synthetic ｜ 主机名：DEMO-ONLY-NOT-CUSTOMER</p>
+<p>可用事件：sched_switch</p>
+<p>解析统计：总行 3，成功 3，失败 0（失败行已自动跳过）</p>
 <p>buffer 溢出：0（未检测到溢出）</p></div>
 <h3>分析限制</h3><div class='card'><ul style='margin-left:20px'><li>trace 仅覆盖采集窗口，不代表长期行为。</li><li>利用率基于 idle 事件/swapper 近似；user/system 区分依赖 /proc/stat（开机累计）。</li><li>调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。</li><li>频率单位自动换算可能存在平台差异，仅作相对比较。</li></ul></div>
 <h3>指标解释（每个指标是什么）</h3>
@@ -282,13 +403,9 @@ border-top:1px solid var(--border)}
 </table>
 <h2>附录图 1：利用率 / 中断占比时间序列</h2><div class='chart'>
 <div class='legend'><span style='color:#4a9eff'>■</span> CPU 利用率　<span style='color:#d98f00'>■</span> 硬中断占比　<span style='color:#2e9e5b'>■</span> 软中断占比</div>
-<svg xmlns='http://www.w3.org/2000/svg' width='760' height='200' font-family='sans-serif'><line x1='46' y1='10.0' x2='750' y2='10.0' stroke='#22303c' stroke-width='1'/><text x='42' y='13.0' font-size='10' fill='#8b949e' text-anchor='end'>100.0</text><line x1='46' y1='52.0' x2='750' y2='52.0' stroke='#22303c' stroke-width='1'/><text x='42' y='55.0' font-size='10' fill='#8b949e' text-anchor='end'>75.0</text><line x1='46' y1='94.0' x2='750' y2='94.0' stroke='#22303c' stroke-width='1'/><text x='42' y='97.0' font-size='10' fill='#8b949e' text-anchor='end'>50.0</text><line x1='46' y1='136.0' x2='750' y2='136.0' stroke='#22303c' stroke-width='1'/><text x='42' y='139.0' font-size='10' fill='#8b949e' text-anchor='end'>25.0</text><line x1='46' y1='178.0' x2='750' y2='178.0' stroke='#22303c' stroke-width='1'/><text x='42' y='181.0' font-size='10' fill='#8b949e' text-anchor='end'>0.0</text><polyline points='46.0,38.4 51.9,26.9 57.8,26.8 63.7,26.7 69.7,26.7 75.6,26.9 81.5,38.3 87.4,27.0 93.3,26.8 99.2,26.7 105.2,26.7 111.1,26.9 117.0,38.2 122.9,27.0 128.8,26.7 134.7,26.7 140.7,26.8 146.6,26.9 152.5,38.1 158.4,27.1 164.3,26.7 170.2,26.7 176.2,26.9 182.1,27.0 188.0,38.0 193.9,27.0 199.8,26.7 205.7,26.7 211.6,26.8 217.6,27.1 223.5,38.0 229.4,26.9 235.3,26.7 241.2,26.8 247.1,26.7 253.1,27.2 259.0,38.0 264.9,26.9 270.8,26.7 276.7,26.9 282.6,26.7 288.6,27.3 294.5,37.9 300.4,26.8 306.3,26.8 312.2,26.8 318.1,26.7 324.1,27.4 330.0,37.8 335.9,26.8 341.8,26.8 347.7,26.7 353.6,26.7 359.5,27.4 365.5,37.6 371.4,26.8 377.3,26.8 383.2,26.7 389.1,26.7 395.0,27.5 401.0,37.5 406.9,26.9 412.8,26.8 418.7,26.7 424.6,26.7 430.5,27.6 436.5,37.4 442.4,26.9 448.3,26.7 454.2,26.7 460.1,26.7 466.0,27.6 471.9,37.4 477.9,26.9 483.8,26.7 489.7,26.7 495.6,26.7 501.5,27.7 507.4,37.4 513.4,26.8 519.3,26.7 525.2,26.7 531.1,26.7 537.0,27.8 542.9,37.3 548.9,26.7 554.8,26.7 560.7,26.7 566.6,26.7 572.5,27.9 578.4,37.2 584.4,26.7 590.3,26.7 596.2,26.7 602.1,26.7 608.0,28.0 613.9,37.1 619.8,26.7 625.8,26.7 631.7,26.7 637.6,26.7 643.5,28.1 649.4,37.0 655.3,26.7 661.3,26.7 667.2,26.7 673.1,26.7 679.0,28.2 684.9,36.8 690.8,26.8 696.8,26.7 702.7,26.7 708.6,26.8 714.5,28.2 720.4,110.8 726.3,98.2 732.3,97.5 738.2,97.5 744.1,98.0 750.0,178.0' fill='none' stroke='#4a9eff' stroke-width='1.6'/><polyline points='46.0,176.7 51.9,176.8 57.8,176.8 63.7,176.8 69.7,176.8 75.6,176.8 81.5,176.7 87.4,176.8 93.3,176.8 99.2,176.8 105.2,176.8 111.1,176.8 117.0,176.7 122.9,176.8 128.8,176.8 134.7,176.8 140.7,176.8 146.6,176.8 152.5,176.7 158.4,176.8 164.3,176.8 170.2,176.8 176.2,176.8 182.1,176.8 188.0,176.7 193.9,176.8 199.8,176.8 205.7,176.8 211.6,176.8 217.6,176.8 223.5,176.7 229.4,176.8 235.3,176.8 241.2,176.8 247.1,176.8 253.1,176.8 259.0,176.7 264.9,176.8 270.8,176.8 276.7,176.8 282.6,176.8 288.6,176.8 294.5,176.7 300.4,176.8 306.3,176.8 312.2,176.8 318.1,176.8 324.1,176.8 330.0,176.7 335.9,176.8 341.8,176.8 347.7,176.8 353.6,176.8 359.5,176.8 365.5,176.7 371.4,176.8 377.3,176.8 383.2,176.8 389.1,176.8 395.0,176.8 401.0,176.7 406.9,176.8 412.8,176.8 418.7,176.8 424.6,176.8 430.5,176.7 436.5,176.7 442.4,176.8 448.3,176.8 454.2,176.8 460.1,176.9 466.0,176.7 471.9,176.7 477.9,176.8 483.8,176.8 489.7,176.8 495.6,176.9 501.5,176.7 507.4,176.7 513.4,176.8 519.3,176.8 525.2,176.8 531.1,176.8 537.0,176.7 542.9,176.7 548.9,176.8 554.8,176.8 560.7,176.9 566.6,176.8 572.5,176.7 578.4,176.7 584.4,176.8 590.3,176.8 596.2,176.8 602.1,176.8 608.0,176.7 613.9,176.7 619.8,176.8 625.8,176.8 631.7,176.8 637.6,176.8 643.5,176.7 649.4,176.7 655.3,176.8 661.3,176.9 667.2,176.8 673.1,176.8 679.0,176.7 684.9,176.7 690.8,176.8 696.8,176.8 702.7,176.8 708.6,176.8 714.5,176.7 720.4,176.7 726.3,176.9 732.3,176.8 738.2,176.8 744.1,176.8 750.0,176.7' fill='none' stroke='#d98f00' stroke-width='1.6'/><polyline points='46.0,163.9 51.9,166.4 57.8,166.2 63.7,166.3 69.7,166.4 75.6,166.2 81.5,163.9 87.4,166.3 93.3,166.2 99.2,166.4 105.2,166.3 111.1,166.2 117.0,164.0 122.9,166.3 128.8,166.3 134.7,166.4 140.7,166.2 146.6,166.2 152.5,164.1 158.4,166.2 164.3,166.3 170.2,166.4 176.2,166.2 182.1,166.2 188.0,164.1 193.9,166.2 199.8,166.4 205.7,166.3 211.6,166.3 217.6,166.1 223.5,164.1 229.4,166.3 235.3,166.4 241.2,166.2 247.1,166.3 253.1,166.1 259.0,164.1 264.9,166.4 270.8,166.3 276.7,166.2 282.6,166.4 288.6,166.0 294.5,164.1 300.4,166.4 306.3,166.3 312.2,166.3 318.1,166.4 324.1,166.0 330.0,164.2 335.9,166.4 341.8,166.2 347.7,166.3 353.6,166.4 359.5,165.9 365.5,164.2 371.4,166.3 377.3,166.2 383.2,166.4 389.1,166.3 395.0,165.9 401.0,164.3 406.9,166.3 412.8,166.3 418.7,166.4 424.6,166.2 430.5,165.9 436.5,164.4 442.4,166.2 448.3,166.3 454.2,166.4 460.1,166.2 466.0,165.9 471.9,164.4 477.9,166.2 483.8,166.4 489.7,166.3 495.6,166.3 501.5,165.8 507.4,164.4 513.4,166.3 519.3,166.4 525.2,166.2 531.1,166.3 537.0,165.8 542.9,164.4 548.9,166.4 554.8,166.3 560.7,166.2 566.6,166.4 572.5,165.7 578.4,164.4 584.4,166.4 590.3,166.3 596.2,166.3 602.1,166.4 608.0,165.6 613.9,164.5 619.8,166.4 625.8,166.2 631.7,166.3 637.6,166.4 643.5,165.6 649.4,164.6 655.3,166.3 661.3,166.2 667.2,166.4 673.1,166.3 679.0,165.6 684.9,164.6 690.8,166.3 696.8,166.3 702.7,166.4 708.6,166.2 714.5,165.6 720.4,164.7 726.3,166.2 732.3,166.3 738.2,166.4 744.1,166.2 750.0,165.6' fill='none' stroke='#2e9e5b' stroke-width='1.6'/><text x='46.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>0</text><text x='401.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>50%</text><text x='750.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>100%</text><text x='42' y='8.0' font-size='10' fill='#8b949e' text-anchor='end'>%</text></svg>
+<svg xmlns='http://www.w3.org/2000/svg' width='760' height='200' font-family='sans-serif'><line x1='46' y1='10.0' x2='750' y2='10.0' stroke='#22303c' stroke-width='1'/><text x='42' y='13.0' font-size='10' fill='#8b949e' text-anchor='end'>100.0</text><line x1='46' y1='52.0' x2='750' y2='52.0' stroke='#22303c' stroke-width='1'/><text x='42' y='55.0' font-size='10' fill='#8b949e' text-anchor='end'>75.0</text><line x1='46' y1='94.0' x2='750' y2='94.0' stroke='#22303c' stroke-width='1'/><text x='42' y='97.0' font-size='10' fill='#8b949e' text-anchor='end'>50.0</text><line x1='46' y1='136.0' x2='750' y2='136.0' stroke='#22303c' stroke-width='1'/><text x='42' y='139.0' font-size='10' fill='#8b949e' text-anchor='end'>25.0</text><line x1='46' y1='178.0' x2='750' y2='178.0' stroke='#22303c' stroke-width='1'/><text x='42' y='181.0' font-size='10' fill='#8b949e' text-anchor='end'>0.0</text><polyline points='46.0,178.0 51.9,178.0 57.8,178.0 63.7,178.0 69.7,178.0 75.6,178.0 81.5,178.0 87.4,178.0 93.3,178.0 99.2,178.0 105.2,178.0 111.1,178.0 117.0,178.0 122.9,178.0 128.8,178.0 134.7,178.0 140.7,178.0 146.6,178.0 152.5,178.0 158.4,178.0 164.3,178.0 170.2,178.0 176.2,178.0 182.1,178.0 188.0,178.0 193.9,178.0 199.8,178.0 205.7,178.0 211.6,178.0 217.6,178.0 223.5,178.0 229.4,178.0 235.3,178.0 241.2,178.0 247.1,178.0 253.1,178.0 259.0,178.0 264.9,178.0 270.8,178.0 276.7,178.0 282.6,178.0 288.6,178.0 294.5,178.0 300.4,178.0 306.3,178.0 312.2,178.0 318.1,178.0 324.1,178.0 330.0,178.0 335.9,178.0 341.8,178.0 347.7,178.0 353.6,178.0 359.5,178.0 365.5,178.0 371.4,178.0 377.3,178.0 383.2,178.0 389.1,178.0 395.0,178.0 401.0,178.0 406.9,178.0 412.8,178.0 418.7,178.0 424.6,178.0 430.5,178.0 436.5,178.0 442.4,178.0 448.3,178.0 454.2,178.0 460.1,178.0 466.0,178.0 471.9,178.0 477.9,178.0 483.8,178.0 489.7,178.0 495.6,178.0 501.5,178.0 507.4,178.0 513.4,178.0 519.3,178.0 525.2,178.0 531.1,178.0 537.0,178.0 542.9,178.0 548.9,178.0 554.8,178.0 560.7,178.0 566.6,178.0 572.5,178.0 578.4,178.0 584.4,178.0 590.3,178.0 596.2,178.0 602.1,178.0 608.0,178.0 613.9,178.0 619.8,178.0 625.8,178.0 631.7,178.0 637.6,178.0 643.5,178.0 649.4,178.0 655.3,178.0 661.3,178.0 667.2,178.0 673.1,178.0 679.0,178.0 684.9,178.0 690.8,178.0 696.8,178.0 702.7,178.0 708.6,178.0 714.5,178.0 720.4,178.0 726.3,178.0 732.3,178.0 738.2,178.0 744.1,178.0 750.0,178.0' fill='none' stroke='#d98f00' stroke-width='1.6'/><polyline points='46.0,178.0 51.9,178.0 57.8,178.0 63.7,178.0 69.7,178.0 75.6,178.0 81.5,178.0 87.4,178.0 93.3,178.0 99.2,178.0 105.2,178.0 111.1,178.0 117.0,178.0 122.9,178.0 128.8,178.0 134.7,178.0 140.7,178.0 146.6,178.0 152.5,178.0 158.4,178.0 164.3,178.0 170.2,178.0 176.2,178.0 182.1,178.0 188.0,178.0 193.9,178.0 199.8,178.0 205.7,178.0 211.6,178.0 217.6,178.0 223.5,178.0 229.4,178.0 235.3,178.0 241.2,178.0 247.1,178.0 253.1,178.0 259.0,178.0 264.9,178.0 270.8,178.0 276.7,178.0 282.6,178.0 288.6,178.0 294.5,178.0 300.4,178.0 306.3,178.0 312.2,178.0 318.1,178.0 324.1,178.0 330.0,178.0 335.9,178.0 341.8,178.0 347.7,178.0 353.6,178.0 359.5,178.0 365.5,178.0 371.4,178.0 377.3,178.0 383.2,178.0 389.1,178.0 395.0,178.0 401.0,178.0 406.9,178.0 412.8,178.0 418.7,178.0 424.6,178.0 430.5,178.0 436.5,178.0 442.4,178.0 448.3,178.0 454.2,178.0 460.1,178.0 466.0,178.0 471.9,178.0 477.9,178.0 483.8,178.0 489.7,178.0 495.6,178.0 501.5,178.0 507.4,178.0 513.4,178.0 519.3,178.0 525.2,178.0 531.1,178.0 537.0,178.0 542.9,178.0 548.9,178.0 554.8,178.0 560.7,178.0 566.6,178.0 572.5,178.0 578.4,178.0 584.4,178.0 590.3,178.0 596.2,178.0 602.1,178.0 608.0,178.0 613.9,178.0 619.8,178.0 625.8,178.0 631.7,178.0 637.6,178.0 643.5,178.0 649.4,178.0 655.3,178.0 661.3,178.0 667.2,178.0 673.1,178.0 679.0,178.0 684.9,178.0 690.8,178.0 696.8,178.0 702.7,178.0 708.6,178.0 714.5,178.0 720.4,178.0 726.3,178.0 732.3,178.0 738.2,178.0 744.1,178.0 750.0,178.0' fill='none' stroke='#2e9e5b' stroke-width='1.6'/><text x='46.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>0</text><text x='401.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>50%</text><text x='750.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>100%</text><text x='42' y='8.0' font-size='10' fill='#8b949e' text-anchor='end'>%</text></svg>
 </div>
-<h2>附录图 2：调度延迟 P99 时间序列</h2><div class='chart'>
-<div class='legend'><span style='color:#d64545'>■</span> 调度延迟 P99 (ms)</div>
-<svg xmlns='http://www.w3.org/2000/svg' width='760' height='200' font-family='sans-serif'><line x1='46' y1='10.0' x2='750' y2='10.0' stroke='#22303c' stroke-width='1'/><text x='42' y='13.0' font-size='10' fill='#8b949e' text-anchor='end'>111.5</text><line x1='46' y1='52.0' x2='750' y2='52.0' stroke='#22303c' stroke-width='1'/><text x='42' y='55.0' font-size='10' fill='#8b949e' text-anchor='end'>83.7</text><line x1='46' y1='94.0' x2='750' y2='94.0' stroke='#22303c' stroke-width='1'/><text x='42' y='97.0' font-size='10' fill='#8b949e' text-anchor='end'>55.8</text><line x1='46' y1='136.0' x2='750' y2='136.0' stroke='#22303c' stroke-width='1'/><text x='42' y='139.0' font-size='10' fill='#8b949e' text-anchor='end'>27.9</text><line x1='46' y1='178.0' x2='750' y2='178.0' stroke='#22303c' stroke-width='1'/><text x='42' y='181.0' font-size='10' fill='#8b949e' text-anchor='end'>0.0</text><polyline points='46.0,153.6 51.9,33.6 57.8,33.6 63.7,34.4 69.7,113.4 75.6,34.7 81.5,33.6 87.4,33.6 93.3,33.6 99.2,34.4 105.2,113.4 111.1,34.8 117.0,32.7 122.9,33.6 128.8,33.6 134.7,33.6 140.7,113.8 146.6,33.5 152.5,34.4 158.4,33.6 164.3,33.6 170.2,35.2 176.2,113.3 182.1,34.1 188.0,33.6 193.9,33.6 199.8,32.7 205.7,33.6 211.6,113.8 217.6,34.7 223.5,33.6 229.4,33.6 235.3,33.6 241.2,33.6 247.1,113.7 253.1,36.6 259.0,33.6 264.9,33.6 270.8,33.6 276.7,32.7 282.6,113.8 288.6,34.4 294.5,33.6 300.4,33.6 306.3,33.6 312.2,32.7 318.1,114.2 324.1,34.7 330.0,33.6 335.9,33.6 341.8,34.4 347.7,113.3 353.6,34.4 359.5,34.7 365.5,33.6 371.4,32.7 377.3,33.6 383.2,113.3 389.1,34.4 395.0,34.8 401.0,33.6 406.9,33.6 412.8,33.6 418.7,113.3 424.6,34.4 430.5,34.8 436.5,33.6 442.4,33.6 448.3,33.6 454.2,112.9 460.1,34.4 466.0,34.7 471.9,33.6 477.9,33.6 483.8,33.6 489.7,113.4 495.6,34.4 501.5,34.7 507.4,34.4 513.4,33.6 519.3,33.6 525.2,112.8 531.1,34.4 537.0,34.7 542.9,32.7 548.9,33.6 554.8,33.6 560.7,113.3 566.6,34.4 572.5,33.5 578.4,34.4 584.4,33.6 590.3,33.6 596.2,114.4 602.1,34.4 608.0,34.1 613.9,33.6 619.8,33.6 625.8,32.7 631.7,113.3 637.6,33.6 643.5,35.9 649.4,33.6 655.3,33.6 661.3,33.6 667.2,113.4 673.1,33.6 679.0,35.9 684.9,33.6 690.8,33.6 696.8,33.6 702.7,113.4 708.6,33.6 714.5,34.5 720.4,33.6 726.3,33.6 732.3,33.6 738.2,113.3 744.1,34.4 750.0,31.9' fill='none' stroke='#d64545' stroke-width='1.6'/><text x='46.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>0</text><text x='401.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>50%</text><text x='750.0' y='194' font-size='10' fill='#8b949e' text-anchor='middle'>100%</text><text x='42' y='8.0' font-size='10' fill='#8b949e' text-anchor='end'>ms</text></svg>
-</div>
-<div class='footer'>CPU Host 性能分析 Skill 生成 ｜ 仅标准库渲染，可离线打开</div>
+<div class='footer'>HostBound 性能诊断 Skill 生成 ｜ 仅标准库渲染，可离线打开</div>
 </div>
 <script>
 (function(){
@@ -302,5 +419,12 @@ function upd(){
 window.addEventListener('scroll',upd,{passive:true});
 window.addEventListener('resize',upd);upd();
 })();
+function copyBinding(button){
+var text=button.parentNode.querySelector('code').textContent;
+function done(){button.textContent='已复制';setTimeout(function(){button.textContent='复制完整方案'},1800)}
+function fallback(){var a=document.createElement('textarea');a.value=text;document.body.appendChild(a);a.select();
+try{if(document.execCommand('copy'))done();else button.textContent='请手动选择代码复制'}finally{a.remove()}}
+if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(done,fallback);else fallback();
+}
 </script>
 </body></html>

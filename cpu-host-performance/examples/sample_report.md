@@ -1,6 +1,8 @@
-# CPU Host 性能分析报告
+# HostBound 性能诊断报告
 
-> 数据格式：ftrace 文本 (目录内) ｜ 采集时长：10.0 秒 ｜ 核心数：8 ｜ 分析时间：2026-09-09 12:36:08
+> 演示报告：仅 NPU/PID/topo 来自所给案例；NUMA、线程许可范围、PSR、trace 与身份字段为模拟数据，不代表客户当前状态，示例命令不可直接用于客户现场。
+
+> 数据格式：ftrace 文本 (目录内) ｜ 采集时长：1.0 秒 ｜ 核心数：1 ｜ 分析时间：2026-11-02 17:34:44
 
 ## 1. Executive Summary（结论摘要）
 
@@ -8,264 +10,361 @@
 
 ### 核心问题
 
-**软中断集中于 CPU 2**
+**CPU 整体饱和**
 
 ### 影响
 
-软中断处理挤占计算线程运行时间，调度延迟上升，训练/推理吞吐下降
+Host 算力不足，任务排队等待，可能拖慢 NPU 供数
 
-### 解决方案（按优先级）
+完整优化方案与可复制命令见第三部分。
 
-1. 检查 /proc/softirqs 与 /proc/interrupts 中网络中断分布
-2. 开启/调大网卡多队列 (RSS) 并用 ethtool -X 均衡队列
-3. 用 irqbalance 或 smp_affinity 将 NET_RX 分散到多核
-4. 评估业务通信量是否异常 (如 all-reduce 风暴)
+## 2. 问题证据总表与根因判断
 
-## 2. 问题证据总表
+### 2.1 关键指标证据
 
 | 指标 | 当前值 | 基线/阈值 | 状态 |
 |------|-------:|-----------|------|
-| CPU 平均利用率 | 34.8% | <70% 健康 | 正常 |
-| 单核最高利用率 | 95.0% | <90% 健康 | ⚠️ 饱和 |
-| 上下文切换率 | 210 次/秒 | 单核>2000/s 偏高 | 正常 |
-| 调度延迟 P99 | 99.20 ms | ≥5ms 警告 / ≥20ms 严重 | 异常 |
-| 平均 runnable 任务数 | 1.7 | 接近核心数说明排队 | 正常 |
-| 硬中断总占比 | 12.51% | 单核≥15% 关注热点 | 正常 |
-| 软中断总占比 | 57.63% | 单核≥20% 关注热点 | 关注 |
+| CPU 平均利用率 | 100.0% | <70% 健康 | ⚠️ 偏高 |
+| 单核最高利用率 | 100.0% | <90% 健康 | ⚠️ 饱和 |
+| 上下文切换率 | 3 次/秒 | 全机 > 2000×核数/s 偏高 | 正常 |
+| 平均 runnable 任务数 | 0.0 | 接近核心数说明排队 | 正常 |
+| 硬中断总占比 | 0.00% | 单核≥15% 关注热点 | 正常 |
+| 软中断总占比 | 0.00% | 单核≥20% 关注热点 | 正常 |
+| 调度延迟 P99 | 无法计算 | - | 数据缺失 |
 
-> 指标含义见第 14 节「指标与事件说明」。
+> 指标含义见第 13 节「指标与事件说明」。
 
-## 3. 问题详情
+### 2.2 根因判断与证据链
 
-### 问题 1：软中断集中于 CPU 2（严重 / 置信度 HIGH）
+**现象** → CPU 整体饱和
 
-- **类别**：`SOFTIRQ_HOTSPOT` — 软中断热点：软中断（如 NET_RX 网络收包）集中消耗个别核心 CPU
+**证据** → 全机平均 CPU 利用率=100.0%（阈值 ≥90% 判定饱和）
+
+**推断** → 整机 CPU 计算需求超过供给
+
+**候选判断** → `CPU_SATURATION`（CPU 饱和：整体 CPU 已接近打满，算力不足）
+
+### 2.3 NPU 任务与 NUMA 亲和性
+
+allowed CPU 是调度许可范围；PSR 是采样时最近运行核，ftrace 是窗口内观测核。绿色表示全量现有线程的许可范围落在 NPU 亲和 CPU 内；橙色表示可跨节点或证据不足；红色表示观测到非亲和 CPU/绑定范围偏离。CPU 绑定与内存页 NUMA 分布分别核验，亲和性风险不等于已确认的 HostBound 根因。主进程按占卡显存最高推定，所有占卡 PID 均保留。
+
+| NPU/Chip | 主进程/其他进程 | 宿主机 PID | 线程数 | 亲和 NUMA / CPU | 当前 allowed CPU | 观测 NUMA | ftrace / PSR | CPU 亲和判断 | 建议分区 |
+|---|---|---:|---:|---|---|---|---|---|---|
+| 0/0 | python3（主进程（显存占用最高）） | 4115 | 2 | 3 / 144-167 | 0-191 | 0 | 30 / 30 | 观测到非亲和 CPU | 144-155 |
+| 1/0 | python3（主进程（显存占用最高）） | 4116 | 2 | 0 / 0-23 | 0-11 | 0 | 未提供 / 2 | 已绑定亲和 CPU | 0-11 |
+| 2/0 | python3（主进程（显存占用最高）） | 4117 | 2 | 3 / 144-167 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 156-167 |
+| 3/0 | python3（主进程（显存占用最高）） | 4118 | 2 | 0 / 0-23 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 12-23 |
+| 4/0 | python3（主进程（显存占用最高）） | 4119 | 2 | 2 / 96-119 | 0-191 | 2 | 未提供 / 100 | 允许跨 NUMA / 未收敛 | 96-107 |
+| 5/0 | python3（主进程（显存占用最高）） | 4120 | 2 | 1 / 48-71 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 48-59 |
+| 6/0 | python3（主进程（显存占用最高）） | 4121 | 2 | 2 / 96-119 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 108-119 |
+| 7/0 | python3（主进程（显存占用最高）） | 4122 | 2 | 1 / 48-71 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 60-71 |
+
+> NPU 1,3 共享 0-23，按 2 份分区；每份 CPU 互不重叠。
+
+> NPU 5,7 共享 48-71，按 2 份分区；每份 CPU 互不重叠。
+
+> NPU 4,6 共享 96-119，按 2 份分区；每份 CPU 互不重叠。
+
+> NPU 0,2 共享 144-167，按 2 份分区；每份 CPU 互不重叠。
+
+证据来源：hostbound/npu_smi_*.txt、numactl.txt/lscpu_parse.txt、pid_* 状态/线程/affinity/cpuset；ftrace 运行观测与配置快照可能位于不同采样时点。
+
+## 3. 优化建议
+
+### NPU / NUMA 绑核方案（宿主机执行）
+
+以下方案仅在原物理机/宿主机执行，使用宿主机 PID；需要 sudo、taskset 和 python3。taskset -acp 覆盖指定 PID 的现有线程，已有子进程应逐 PID 处理；新线程通常继承创建线程的 affinity，业务可重新设置，执行后需复查。taskset 不迁移既有内存页，不提供跨重启持久化，也不独占 CPU；同机其他业务/IRQ 的 CPU 争用仍须结合负载核验。有效 cpuset 不允许的区间需先在宿主机调整资源配置，再重新采集。
+
+脚本先核验主机/进程身份、在线 CPU 和有效 cpuset，逐 TID 保存原 affinity 后执行；输出备份目录与可运行的回滚命令。
+
+```bash
+# 仅在原物理机/宿主机执行；不要进入容器。先阅读报告，再运行。
+sudo bash <<'HOST_CPU_BIND'
+set -euo pipefail
+[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || { echo "请回到宿主机"; exit 1; }
+if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; then echo "请回到宿主机"; exit 1; fi
+[ "$(cat /proc/sys/kernel/random/boot_id)" = 'test-boot' ] || { echo '主机/启动周期已变化，请重新采集'; exit 1; }
+backup=$(mktemp -d /var/tmp/npu-affinity.XXXXXX)
+echo "备份和回滚脚本：$backup"
+cat > "$backup/rollback.sh" <<'ROLLBACK_HEADER'
+#!/usr/bin/env bash
+set -euo pipefail
+[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || exit 1
+if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; then exit 1; fi
+[ "$(cat /proc/sys/kernel/random/boot_id)" = 'test-boot' ] || { echo '回滚主机/启动周期不一致'; exit 1; }
+failed=0
+restore_tid() {
+  local tid=$1 expected=$2 previous=$3 s
+  if [ ! -r "/proc/$tid/stat" ]; then echo "跳过已退出 TID $tid"; return; fi
+  s=$(cat "/proc/$tid/stat") || { echo "跳过已退出 TID $tid"; return; }
+  s=${s##*) }; set -- $s
+  if [ "${20}" != "$expected" ]; then echo "跳过已复用 TID $tid"; return; fi
+  if ! taskset -pc "$previous" "$tid"; then failed=1; fi
+}
+ROLLBACK_HEADER
+starttime() { local s; s=$(cat "/proc/$1/stat"); s=${s##*) }; set -- $s; printf '%s' "${20}"; }
+check_cpu_list() { local want=$1 have=$2; python3 - "$want" "$have" <<'CPU_CHECK'
+import sys
+def cpus(s):
+    out=set()
+    for part in s.strip().split(','):
+        a,_,b=part.partition('-')
+        if a: out.update(range(int(a),int(b or a)+1))
+    return out
+raise SystemExit(0 if cpus(sys.argv[1]) and cpus(sys.argv[1]) <= cpus(sys.argv[2]) else 1)
+CPU_CHECK
+}
+effective_cpuset() { local p=$1 cg value; cg=$(awk -F: '$1==0 {print $3}' /proc/"$p"/cgroup);
+if [ -n "$cg" ] && [ -r "/sys/fs/cgroup${cg}/cpuset.cpus.effective" ]; then cat "/sys/fs/cgroup${cg}/cpuset.cpus.effective"; return; fi
+cg=$(awk -F: '$2 ~ /(^|,)cpuset(,|$)/ {print $3}' /proc/"$p"/cgroup)
+[ -n "$cg" ] || return 1
+for f in "/sys/fs/cgroup/cpuset${cg}/cpuset.effective_cpus" "/sys/fs/cgroup/cpuset${cg}/cpuset.cpus"; do if [ -r "$f" ]; then value=$(cat "$f"); if [ -n "$value" ]; then printf "%s\n" "$value"; return; fi; fi; done
+return 1; }
+# 全部预检、逐 TID 保存成功之后才执行绑核。
+[ "$(starttime 4115)" = '411500' ] || { echo 'PID 4115 已变化，请重新采集'; exit 1; }
+check_cpu_list '144-155' "$(cat /sys/devices/system/cpu/online)"
+check_cpu_list '144-155' "$(effective_cpuset 4115)" || { echo 'PID 4115 的 cpuset 不允许目标 CPU'; exit 1; }
+for task in /proc/4115/task/*; do
+  tid=${task##*/}
+  check_cpu_list '144-155' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
+  taskset -pc "$tid" >> "$backup/before.txt"
+  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  stamp=$(starttime "$tid")
+  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
+done
+[ "$(starttime 4117)" = '411700' ] || { echo 'PID 4117 已变化，请重新采集'; exit 1; }
+check_cpu_list '156-167' "$(cat /sys/devices/system/cpu/online)"
+check_cpu_list '156-167' "$(effective_cpuset 4117)" || { echo 'PID 4117 的 cpuset 不允许目标 CPU'; exit 1; }
+for task in /proc/4117/task/*; do
+  tid=${task##*/}
+  check_cpu_list '156-167' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
+  taskset -pc "$tid" >> "$backup/before.txt"
+  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  stamp=$(starttime "$tid")
+  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
+done
+[ "$(starttime 4118)" = '411800' ] || { echo 'PID 4118 已变化，请重新采集'; exit 1; }
+check_cpu_list '12-23' "$(cat /sys/devices/system/cpu/online)"
+check_cpu_list '12-23' "$(effective_cpuset 4118)" || { echo 'PID 4118 的 cpuset 不允许目标 CPU'; exit 1; }
+for task in /proc/4118/task/*; do
+  tid=${task##*/}
+  check_cpu_list '12-23' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
+  taskset -pc "$tid" >> "$backup/before.txt"
+  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  stamp=$(starttime "$tid")
+  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
+done
+[ "$(starttime 4119)" = '411900' ] || { echo 'PID 4119 已变化，请重新采集'; exit 1; }
+check_cpu_list '96-107' "$(cat /sys/devices/system/cpu/online)"
+check_cpu_list '96-107' "$(effective_cpuset 4119)" || { echo 'PID 4119 的 cpuset 不允许目标 CPU'; exit 1; }
+for task in /proc/4119/task/*; do
+  tid=${task##*/}
+  check_cpu_list '96-107' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
+  taskset -pc "$tid" >> "$backup/before.txt"
+  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  stamp=$(starttime "$tid")
+  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
+done
+[ "$(starttime 4120)" = '412000' ] || { echo 'PID 4120 已变化，请重新采集'; exit 1; }
+check_cpu_list '48-59' "$(cat /sys/devices/system/cpu/online)"
+check_cpu_list '48-59' "$(effective_cpuset 4120)" || { echo 'PID 4120 的 cpuset 不允许目标 CPU'; exit 1; }
+for task in /proc/4120/task/*; do
+  tid=${task##*/}
+  check_cpu_list '48-59' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
+  taskset -pc "$tid" >> "$backup/before.txt"
+  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  stamp=$(starttime "$tid")
+  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
+done
+[ "$(starttime 4121)" = '412100' ] || { echo 'PID 4121 已变化，请重新采集'; exit 1; }
+check_cpu_list '108-119' "$(cat /sys/devices/system/cpu/online)"
+check_cpu_list '108-119' "$(effective_cpuset 4121)" || { echo 'PID 4121 的 cpuset 不允许目标 CPU'; exit 1; }
+for task in /proc/4121/task/*; do
+  tid=${task##*/}
+  check_cpu_list '108-119' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
+  taskset -pc "$tid" >> "$backup/before.txt"
+  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  stamp=$(starttime "$tid")
+  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
+done
+[ "$(starttime 4122)" = '412200' ] || { echo 'PID 4122 已变化，请重新采集'; exit 1; }
+check_cpu_list '60-71' "$(cat /sys/devices/system/cpu/online)"
+check_cpu_list '60-71' "$(effective_cpuset 4122)" || { echo 'PID 4122 的 cpuset 不允许目标 CPU'; exit 1; }
+for task in /proc/4122/task/*; do
+  tid=${task##*/}
+  check_cpu_list '60-71' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
+  taskset -pc "$tid" >> "$backup/before.txt"
+  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  stamp=$(starttime "$tid")
+  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
+done
+printf '%s\n' 'exit "$failed"' >> "$backup/rollback.sh"
+# -a 覆盖该 PID 的现有线程；已有子进程需要各自的宿主机 PID。
+[ "$(starttime 4115)" = '411500' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
+taskset -acp 144-155 4115
+[ "$(starttime 4117)" = '411700' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
+taskset -acp 156-167 4117
+[ "$(starttime 4118)" = '411800' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
+taskset -acp 12-23 4118
+[ "$(starttime 4119)" = '411900' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
+taskset -acp 96-107 4119
+[ "$(starttime 4120)" = '412000' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
+taskset -acp 48-59 4120
+[ "$(starttime 4121)" = '412100' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
+taskset -acp 108-119 4121
+[ "$(starttime 4122)" = '412200' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
+taskset -acp 60-71 4122
+# 验证所有线程的 allowed CPU，保存执行后快照。
+taskset -apc 4115 | tee -a "$backup/after.txt"
+for task in /proc/4115/task/*; do
+  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  [ "$actual" = '144-155' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
+done
+taskset -apc 4117 | tee -a "$backup/after.txt"
+for task in /proc/4117/task/*; do
+  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  [ "$actual" = '156-167' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
+done
+taskset -apc 4118 | tee -a "$backup/after.txt"
+for task in /proc/4118/task/*; do
+  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  [ "$actual" = '12-23' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
+done
+taskset -apc 4119 | tee -a "$backup/after.txt"
+for task in /proc/4119/task/*; do
+  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  [ "$actual" = '96-107' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
+done
+taskset -apc 4120 | tee -a "$backup/after.txt"
+for task in /proc/4120/task/*; do
+  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  [ "$actual" = '48-59' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
+done
+taskset -apc 4121 | tee -a "$backup/after.txt"
+for task in /proc/4121/task/*; do
+  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  [ "$actual" = '108-119' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
+done
+taskset -apc 4122 | tee -a "$backup/after.txt"
+for task in /proc/4122/task/*; do
+  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
+  [ "$actual" = '60-71' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
+done
+echo "如需回滚，在本宿主机运行：sudo bash $backup/rollback.sh"
+HOST_CPU_BIND
+```
+
+执行后以相同负载复采，比较吞吐、Device 空泡、调度延迟与跨节点运行；无收益或出现副作用时按脚本输出回滚。
+
+**P0（立即处理） — CPU 整体饱和**
+
+1. 识别并优化 Top CPU 任务 (见 Task 分析)
+2. 提高 Host 并行度配置或升级 CPU
+3. 排查业务是否存在无意义忙等/自旋
+
+**P1（尽快处理） — NPU 任务 CPU 亲和性存在风险（待性能验证）**
+
+1. 按第二部分的 NPU/PID 对照核验，第三部分给出宿主机预检、逐 TID 备份、互斥分区、taskset 命令及回滚
+2. 同负载复采验证吞吐与延迟；taskset 不迁移内存页，不越过有效 cpuset
+
+## 4. 问题详情
+
+### 问题 1：CPU 整体饱和（严重 / 置信度 HIGH）
+
+- **类别**：`CPU_SATURATION` — CPU 饱和：整体 CPU 已接近打满，算力不足
 - **证据**：
-  - CPU 2 软中断 CPU 占比 = **56.4%**（判定阈值：≥20% 且≥中位数 2.0 倍）
-  - Top 软中断类型 = **NET_RX(5640ms), RCU(80ms), TIMER(40ms)**（判定阈值：-）
-- **影响**：软中断处理挤占计算线程运行时间，调度延迟上升，训练/推理吞吐下降
-- **可能根因**：该核集中处理了软中断，且以网络收包 (NET_RX) 为主：网卡队列中断亲和性固定于单核，通信/收包量大时极易打满
-- **建议措施**：
-  1. 检查 /proc/softirqs 与 /proc/interrupts 中网络中断分布
-  2. 开启/调大网卡多队列 (RSS) 并用 ethtool -X 均衡队列
-  3. 用 irqbalance 或 smp_affinity 将 NET_RX 分散到多核
-  4. 评估业务通信量是否异常 (如 all-reduce 风暴)
+  - 全机平均 CPU 利用率 = **100.0%**（判定阈值：≥90% 判定饱和；来源：ftrace / 对应系统快照；时间窗：本次采集窗口；累计快照除外）
+- **影响**：Host 算力不足，任务排队等待，可能拖慢 NPU 供数
+- **可能根因**：整机 CPU 计算需求超过供给
+- **优化动作**：见第三部分。
 
-### 问题 2：调度延迟严重（严重 / 置信度 HIGH）
+### 问题 2：NPU 任务 CPU 亲和性存在风险（待性能验证）（警告 / 置信度 MEDIUM）
 
-- **类别**：`SCHEDULER_LATENCY` — 调度延迟过大：任务被唤醒后长时间得不到 CPU
+- **类别**：`NUMA_RISK` — NUMA 风险：存在跨 NUMA 节点访问的可能性
 - **证据**：
-  - 调度延迟 P99 = **99.20 ms**（判定阈值：≥5ms 警告 / ≥20ms 严重）
-  - 调度延迟平均值 = **21.641 ms**（判定阈值：-）
-  - 受影响最大的任务 = **python_main (最大 99.2ms); worker_0 (最大 44.0ms); worker_net (最大 25.4ms)**（判定阈值：-）
-- **影响**：关键线程被唤醒后需等待较久才能运行，通信/数据准备节奏被打断，NPU 等待 Host
-- **可能根因**：CPU 竞争 (饱和/中断/优先级) 导致 runnable 排队
-- **建议措施**：
-  1. 结合 CPU 利用率与中断热点结论处理根源负载
-  2. 提高关键线程优先级 (nice/chrt) 或绑核隔离 (isolcpus/cpuset)
-  3. 减少 Host 线程数，避免过度并发
+  - NPU/PID 与 CPU 亲和性 = **NPU0/PID4115: allowed=0-191, observed=30, local=144-167；NPU2/PID4117: allowed=0-191, observed=30, local=144-167；NPU3/PID4118: allowed=0-191, observed=30, local=0-23；NPU4/PID4119: allowed=0-191, observed=100, local=96-119；NPU5/PID4120: allowed=0-191, observed=30, local=48-71；NPU6/PID4121: allowed=0-191, observed=30, local=96-119；NPU7/PID4122: allowed=0-191, observed=30, local=48-71**（判定阈值：全量线程 allowed CPU 收敛到 NPU 亲和 CPU；观测核应位于亲和范围；来源：hostbound/npu_smi_topology.txt + npu_smi_info.txt + pid_*_thread_affinity.txt/threads.txt + ftrace；时间窗：ftrace 100.000~101.000s；配置/PSR 为采集结束快照）
+- **影响**：配置可能引入跨节点运行或共享 CPU 争用；未关联 Device 空泡/性能差异，不能确认 HostBound 根因
+- **可能根因**：已识别 NPU 对应进程的调度许可范围未收敛，或观测到非亲和 CPU；内存页位置仍待核验
+- **优化动作**：见第三部分。
 
-### 问题 3：CPU 负载严重不均衡（警告 / 置信度 HIGH）
+### 问题 3：本次采集数据维度有限（提示 / 置信度 HIGH）
 
-- **类别**：`CPU_IMBALANCE` — CPU 负载不均衡：少数核心打满而大量核心空闲，常见于绑核不当或中断亲和性集中
+- **类别**：`INSUFFICIENT_EVIDENCE` — 证据不足：当前数据无法支持可靠结论
 - **证据**：
-  - 最高核利用率 (CPU 2) = **95.0%**（判定阈值：≥90%）
-  - 核心利用率中位数 = **5.0%**（判定阈值：差值≥40% 判定不均衡）
-  - 空闲核数量 (利用率≤30%) = **5 个**（判定阈值：-）
-- **影响**：部分核心打满成为瓶颈，同时大量算力闲置，吞吐受限
-- **可能根因**：软中断集中在该核 (疑为 IRQ affinity 将网卡中断固定到单核)
-- **建议措施**：
-  1. 检查 IRQ affinity: cat /proc/interrupts，将高频中断分散 (echo 掩码 > /proc/irq/N/smp_affinity)
-  2. 检查业务线程绑核配置 (taskset/numactl)，把任务分散到空闲核
-  3. 开启 RPS/XPS 或 RSS 多队列分散网络软中断
+  - 缺失维度 = **缺少 cpu_idle 事件，利用率基于 swapper 切换近似估算；缺少 wakeup 事件，无法计算调度延迟；缺少 IRQ 事件，无法分析硬中断；缺少 SoftIRQ 事件，无法分析软中断；缺少 cpu_frequency 事件，无法分析频率**（判定阈值：-；来源：ftrace / 对应系统快照；时间窗：本次采集窗口；累计快照除外）
+  - 采集模式 = **精简模式(仅 sched_switch)**（判定阈值：-；来源：ftrace / 对应系统快照；时间窗：本次采集窗口；累计快照除外）
+- **影响**：相关维度结论缺失，无法覆盖该类问题
+- **可能根因**：采集脚本精简模式或内核不支持部分事件
+- **优化动作**：见第三部分。
 
-### 问题 4：任务迁移频繁（警告 / 置信度 MEDIUM）
+## 5. CPU 总体状态
 
-- **类别**：`TASK_MIGRATION_HIGH` — 任务迁移频繁：任务在核间频繁搬移，破坏缓存局部性
-- **证据**：
-  - 迁移速率 = **129.8 次/秒**（判定阈值：≥50 次/秒 视为频繁 (近似统计)）
-  - 迁移最多的任务 = **pid:1003 (600 次); pid:1002 (399 次); pid:1005 (199 次)**（判定阈值：-）
-- **影响**：跨核迁移导致 L1/L2 缓存与 TLB 失效，可能跨 NUMA 访存，性能抖动
-- **可能根因**：负载均衡器频繁搬移任务或任务未绑核
-- **建议措施**：
-  1. 将关键线程固定核心 (taskset -c / numactl --physcpubind)
-  2. 调小内核调度域负载均衡激进度 (如 sched_migration_cost_ns 调大)
+无 /proc/stat 快照，总体占用以 trace 计算为准。
 
-## 4. CPU 总体状态
-
-/proc/stat 快照（开机以来累计）：user 48.0%、system 11.4%、iowait 0.6%、irq 1.1%、softirq 1.7%、idle 37.2%、steal 0.1%。
-
-> 注意：trace 只能区分 busy/idle；user/system/iowait 为开机累计值，仅供参考。
-
-## 5. CPU Core Balance（各核心负载）
+## 6. CPU Core Balance（各核心负载）
 
 | 核心 | 利用率 | 空闲比 | 上下文切换/s | 硬中断占比 | 软中断占比 |
 |-----|-------:|-------:|------------:|----------:|----------:|
-| CPU 0 | 80.0% | 20.0% | 40 | 0.0% | 0.0% |
-| CPU 1 | 78.0% | 22.0% | 90 | 0.0% | 0.0% |
-| CPU 2 | 95.0% | 5.0% | 60 | 12.5% | 56.4% |
-| CPU 3 | 5.0% | 95.0% | 4 | 0.0% | 0.2% |
-| CPU 4 | 5.0% | 95.0% | 4 | 0.0% | 0.2% |
-| CPU 5 | 5.0% | 95.0% | 4 | 0.0% | 0.2% |
-| CPU 6 | 5.0% | 95.0% | 4 | 0.0% | 0.2% |
-| CPU 7 | 5.0% | 95.0% | 4 | 0.0% | 0.2% |
+| CPU 30 | 100.0% | 0.0% | 3 | 0.0% | 0.0% |
 
-最高负载：2（95.0%），最低：3（5.0%）。**存在明显不均衡，详见问题详情。**
+最高负载：30（100.0%），最低：30（100.0%）。负载分布尚可。
 
-## 6. Scheduler 调度分析
+## 7. Scheduler 调度分析
 
-- 上下文切换总计 **2,095** 次（210 次/秒）
-- 唤醒总计 **895** 次（90 次/秒）— 唤醒率反映任务碎片化程度。
-- 调度延迟：平均 21.641 ms，P50 2.697 ms，P95 99.20 ms，P99 99.20 ms，最大 99.20 ms（共 791 次可配对样本）。
-  - 调度延迟含义：调度延迟 (scheduling latency)：任务从被唤醒 (sched_wakeup) 到真正获得 CPU (sched_switch) 的等待时间，直接体现 runnable 队列拥堵程度。
-- 平均可运行任务数 1.7 — 平均可运行任务数 (runnable)：任意时刻处于等待 CPU 状态的平均任务数，>核心数说明调度拥挤。
+- 上下文切换总计 **3** 次（3 次/秒）
+- 唤醒总计 **0** 次（0 次/秒）— 唤醒率反映任务碎片化程度。
+- 调度延迟：trace 中缺少 wakeup 与 switch 可配对事件，无法计算调度延迟
+- 平均可运行任务数 0.0 — 平均可运行任务数 (runnable)：任意时刻处于等待 CPU 状态的平均任务数，>核心数说明调度拥挤。
 
-| 任务 | 最大延迟 ms | 平均 ms | 次数 |
-|------|----------:|--------:|-----:|
-| python_main (pid 1005) | 99.20 | 49.753 | 199 |
-| worker_0 (pid 1001) | 44.00 | 44.000 | 99 |
-| worker_net (pid 1002) | 25.40 | 18.153 | 17 |
-| worker_2 (pid 1002) | 22.92 | 5.287 | 458 |
-| worker_1 (pid 1002) | 10.00 | 7.300 | 18 |
+## 8. IRQ / SoftIRQ 分析
 
-## 7. IRQ / SoftIRQ 分析
+### 8.1 硬中断
 
-### 7.1 硬中断
+硬中断总 CPU 占比 **0.00%**（0 次）。
 
-硬中断总 CPU 占比 **12.51%**（3,400 次）。
+### 8.2 软中断
 
-| 中断源 | 次数 | 累计耗时 ms | 说明 |
-|--------|-----:|-----------:|------|
-| eth0 | 2,300 | 920.0 | 网卡中断（eth*/enp*/ens*），网络通信的核心中断来源。 |
-| nvme0q2 | 1,100 | 330.0 | NVMe 存储队列中断（nvme0q*），数据加载/日志写入时产生。 |
+软中断总 CPU 占比 **0.00%**（0 次）。
 
-### 7.2 软中断
+各核中断分布见第 6 节表格与 HTML 图表。
 
-软中断总 CPU 占比 **57.63%**（5,000 次）。
+## 9. CPU Frequency / Idle 分析
 
-| 软中断类型 | 次数 | 累计耗时 ms | 说明 |
-|-----------|-----:|-----------:|------|
-| NET_RX | 4,700 | 5640.0 | 网络接收软中断：网卡收到数据包后，协议栈处理（IP/TCP 解析、socket 分发）在软中断中延迟执行。NET_RX 软中断打满单核是分布式训练/推理通信中最常见的 IRQ 热点根因。 |
-| RCU | 200 | 80.0 | RCU 软中断：Read-Copy-Update 宽限期回收，核心数多或 RCU pressure 大时会明显。 |
-| TIMER | 100 | 40.0 | 定时器软中断：内核定时器 (tick/timer_list) 的到期处理，过高说明大量定时器密集到期。 |
+trace 中无 cpu_frequency 事件，频率分析不可用（Available: Unavailable）。
 
-各核中断分布见第 5 节表格与 HTML 图表。
+trace 中无 cpu_idle 事件，空闲比基于 swapper 任务近似。
 
-## 8. CPU Frequency / Idle 分析
-
-| 核心 | 最低 MHz | 平均 MHz | 最高 MHz | 低频样本占比 |
-|------|--------:|--------:|--------:|------------:|
-| CPU 0 | 2400 | 2400 | 2400 | 0% |
-| CPU 1 | 2400 | 2400 | 2400 | 0% |
-| CPU 2 | 2400 | 2400 | 2400 | 0% |
-| CPU 3 | 2400 | 2400 | 2400 | 0% |
-| CPU 4 | 2400 | 2400 | 2400 | 0% |
-| CPU 5 | 1200 | 1320 | 2400 | 90% |
-| CPU 6 | 2400 | 2400 | 2400 | 0% |
-| CPU 7 | 2400 | 2400 | 2400 | 0% |
-
-governor：schedutil。
-
-> 频率单位由 trace 原始值换算（常见 kHz/Hz，已自动识别）；仅凭 trace 不判定硬件故障。
-
-各核空闲占比：平均 65.2%，最高 95.0%（3），最低 5.0%（2）。
-
-## 9. Task / Thread 分析
+## 10. Task / Thread 分析
 
 | Top 运行时间任务 | 累计运行 ms | 说明 |
 |-----------------|-----------:|------|
-| ksoftirqd/2 (pid 26) | 6000 | 普通任务 |
-| worker_0 (pid 1001) | 5600 | 普通任务 |
-| python_main (pid 1005) | 2889 | Python 训练/推理主进程或 dataloader |
-| rcu_preempt (pid 11) | 2500 | 普通任务 |
-| worker_1 (pid 1002) | 2482 | 普通任务 |
-| worker_net (pid 1002) | 15 | 普通任务 |
+| python3 (pid 4115) | 100 | Python 训练/推理主进程或 dataloader |
 
 | Top 切出次数任务 | 次数 |
 |-----------------|-----:|
-| python_main (pid 1005) | 695 |
-| ksoftirqd/2 (pid 26) | 500 |
-| worker_1 (pid 1002) | 200 |
-| worker_0 (pid 1001) | 200 |
-| rcu_preempt (pid 11) | 100 |
+| python3 (pid 4115) | 1 |
 
-| Top 被唤醒任务 | 次数 |
-|---------------|-----:|
-| worker_2 | 495 |
-| python_main | 200 |
-| worker_1 | 100 |
-| worker_0 | 100 |
+## 11. Affinity / NUMA 分析
 
-| Top 迁移任务 | 次数 |
-|-------------|-----:|
-| pid:1003 | 600 |
-| pid:1002 | 399 |
-| pid:1005 | 199 |
-| pid:11 | 99 |
+Top 任务运行分布与各核利用率见第 6 节；任务集中在少数核时可结合绑核配置判断。
+CPU 亲和性、NPU/PID 对应及线程运行核见第二部分；互斥 CPU 分区和宿主机命令见第三部分。
+内存页 NUMA 分布与跨节点内存访问须 `numastat -p PID`、`/proc/PID/numa_maps` 或性能数据验证；taskset 本身不迁移内存页。
 
-## 10. Affinity / NUMA 分析
+## 12. 时间窗口分析
 
-快照包含 NUMA 拓扑信息（1 个节点可见）。
+时间序列数据不足，无法进行时间窗口分析。
 
-Top 任务运行分布与各核利用率见第 5 节；任务集中在少数核时可结合绑核配置判断。
-**证据说明**：当前 trace 未包含跨 NUMA 访问的直接证据，NUMA 结论置信度为低（Evidence insufficient），如需精确判断请补充 `numactl -H` 与 `numastat` 快照。
-
-## 11. 时间窗口分析
-
-以下为利用率最高的时间窗口（桶 = 0.08 秒）：
-
-- 窗口 0.7~0.8 秒：利用率峰值 **90.1%**，同期 上下文切换 216 次/秒、软中断占比 6.9%、调度延迟 P99 95.34 ms
-- 窗口 1.2~1.3 秒：利用率峰值 **90.1%**，同期 上下文切换 204 次/秒、软中断占比 6.9%、调度延迟 P99 95.89 ms
-- 窗口 3.3~3.4 秒：利用率峰值 **90.1%**，同期 上下文切换 192 次/秒、软中断占比 6.9%、调度延迟 P99 42.64 ms
-
-若峰值窗口内同步出现中断/调度延迟上升，可建立「负载升高 → 中断增加 → 调度延迟上升 → worker 运行时间下降 → NPU 等待 Host」的关联链；仅当上述同期证据存在时成立。
-
-## 12. 根因判断
-
-**现象** → 软中断集中于 CPU 2
-
-**证据** → CPU 2 软中断 CPU 占比=56.4%（阈值 ≥20% 且≥中位数 2.0 倍）；Top 软中断类型=NET_RX(5640ms), RCU(80ms), TIMER(40ms)（阈值 -）
-
-**推断** → 该核集中处理了软中断，且以网络收包 (NET_RX) 为主：网卡队列中断亲和性固定于单核，通信/收包量大时极易打满
-
-**根因** → `SOFTIRQ_HOTSPOT`（软中断热点：软中断（如 NET_RX 网络收包）集中消耗个别核心 CPU）
-
-## 13. 优化建议
-
-**P0（立即处理） — 软中断集中于 CPU 2**
-
-1. 检查 /proc/softirqs 与 /proc/interrupts 中网络中断分布
-2. 开启/调大网卡多队列 (RSS) 并用 ethtool -X 均衡队列
-3. 用 irqbalance 或 smp_affinity 将 NET_RX 分散到多核
-4. 评估业务通信量是否异常 (如 all-reduce 风暴)
-
-**P0（立即处理） — 调度延迟严重**
-
-1. 结合 CPU 利用率与中断热点结论处理根源负载
-2. 提高关键线程优先级 (nice/chrt) 或绑核隔离 (isolcpus/cpuset)
-3. 减少 Host 线程数，避免过度并发
-
-**P1（尽快处理） — CPU 负载严重不均衡**
-
-1. 检查 IRQ affinity: cat /proc/interrupts，将高频中断分散 (echo 掩码 > /proc/irq/N/smp_affinity)
-2. 检查业务线程绑核配置 (taskset/numactl)，把任务分散到空闲核
-3. 开启 RPS/XPS 或 RSS 多队列分散网络软中断
-
-**P1（尽快处理） — 任务迁移频繁**
-
-1. 将关键线程固定核心 (taskset -c / numactl --physcpubind)
-2. 调小内核调度域负载均衡激进度 (如 sched_migration_cost_ns 调大)
-
-## 14. 数据说明与指标解释
+## 13. 数据说明与指标解释
 
 ### 数据概况
 
-- trace 时间范围：1000.000 ~ 1009.995（相对秒），时长 10.0 秒
-- CPU 数量（参与统计）：8；报告核数（nproc）：8
-- 内核版本：5.10.0-136.12.0.oe2203sp1.aarch64 ｜ 主机名：atlas-800-9000
-- 可用事件：cpu_frequency, cpu_idle, irq_handler_entry, irq_handler_exit, sched_migrate_task, sched_switch, sched_wakeup, softirq_entry, softirq_exit
-- 解析统计：总行 21,270，成功 21,270，失败 0（失败行已自动跳过）
+- trace 时间范围：100.000 ~ 101.000（相对秒），时长 1.0 秒
+- CPU 数量（参与统计）：1；报告核数（nproc）：-
+- 内核版本：synthetic ｜ 主机名：DEMO-ONLY-NOT-CUSTOMER
+- 可用事件：sched_switch
+- 解析统计：总行 3，成功 3，失败 0（失败行已自动跳过）
 - buffer 溢出：0（未检测到溢出）
+- HostBound 扩展快照：cpu_online.txt、host_context.txt、lscpu_parse.txt、npu_smi_info.txt、npu_smi_topology.txt、numactl.txt、pid_4115_cpuset_effective.txt、pid_4115_starttime.txt、pid_4115_status.txt、pid_4115_thread_affinity.txt、pid_4115_threads.txt、pid_4116_cpuset_effective.txt、pid_4116_starttime.txt、pid_4116_status.txt、pid_4116_thread_affinity.txt、pid_4116_threads.txt、pid_4117_cpuset_effective.txt、pid_4117_starttime.txt、pid_4117_status.txt、pid_4117_thread_affinity.txt、pid_4117_threads.txt、pid_4118_cpuset_effective.txt、pid_4118_starttime.txt、pid_4118_status.txt、pid_4118_thread_affinity.txt、pid_4118_threads.txt、pid_4119_cpuset_effective.txt、pid_4119_starttime.txt、pid_4119_status.txt、pid_4119_thread_affinity.txt、pid_4119_threads.txt、pid_4120_cpuset_effective.txt、pid_4120_starttime.txt、pid_4120_status.txt、pid_4120_thread_affinity.txt、pid_4120_threads.txt、pid_4121_cpuset_effective.txt、pid_4121_starttime.txt、pid_4121_status.txt、pid_4121_thread_affinity.txt、pid_4121_threads.txt、pid_4122_cpuset_effective.txt、pid_4122_starttime.txt、pid_4122_status.txt、pid_4122_thread_affinity.txt、pid_4122_threads.txt（已纳入证据覆盖说明；名称匹配本身不构成根因）。
 
 ### 分析限制
 

@@ -231,13 +231,17 @@ def _load_dir_into_td(dirpath, td):
             # hostbound/ 下的 PID/TID affinity、进程线程等快照以相对路径为 key
             # 保留，供报告列明证据覆盖范围；不会把它们误当作 trace 文本解析。
             rel = os.path.relpath(fp, dirpath).replace(os.sep, "/")
-            is_hostbound_snapshot = rel.startswith("hostbound/") and (fn.endswith(".txt") or fn.endswith(".json"))
+            # Collector archives include a cpu_trace/ wrapper; normalize the evidence
+            # directory at any depth so PID/TID snapshots survive archive loading.
+            parts = rel.split('/')
+            hb_rel = '/'.join(parts[parts.index('hostbound'):]) if 'hostbound' in parts[:-1] else ''
+            is_hostbound_snapshot = bool(hb_rel) and (fn.endswith(".txt") or fn.endswith(".json"))
             if fn in _SNAPSHOT_FILES or is_hostbound_snapshot:
                 try:
                     with io.open(fp, "r", encoding="utf-8", errors="replace") as f:
-                        snapshot[rel if is_hostbound_snapshot else fn] = f.read()
+                        snapshot[hb_rel if is_hostbound_snapshot else fn] = f.read()
                 except Exception:
-                    snapshot[rel if is_hostbound_snapshot else fn] = ""
+                    snapshot[hb_rel if is_hostbound_snapshot else fn] = ""
             else:
                 low = fn.lower()
                 if low.startswith("trace") or low.endswith(".trace") or low.endswith(".log") or low.endswith(".json"):
