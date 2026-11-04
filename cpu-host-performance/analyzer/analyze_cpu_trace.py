@@ -56,7 +56,8 @@ def run_analysis(input_path, out_dir=None, quiet=False):
     say("[1/4] 解析 trace：%s" % input_path)
     td = load_input(input_path)
     try:
-        if not td.events:
+        sidecars=("frequency_start.json","frequency_end.json","frequency_samples.jsonl","process_start.json","capabilities.tsv","capabilities.json")
+        if not td.events and not any(name.rsplit("/",1)[-1] in sidecars for name in td.snapshot):
             raise ValueError(
                 "未能从输入中解析出任何事件。当前识别格式：%s。"
                 "支持的格式：采集脚本 tar.gz/zip、解包目录、裸 ftrace 文本、"
@@ -81,6 +82,7 @@ def run_analysis(input_path, out_dir=None, quiet=False):
         say("报告已生成：")
         say("  Markdown: %s" % md_path)
         say("  HTML    : %s" % html_path)
+        say("  JSON    : %s" % os.path.join(out_dir,"report_data.json"))
         return diag, out_dir
     finally:
         cleanup_temp(td)

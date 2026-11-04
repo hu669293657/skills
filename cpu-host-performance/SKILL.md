@@ -13,7 +13,7 @@ description: "Linux 训练/推理 HostBound 定位（怀疑 Host/CPU 侧拖慢 N
 
 报告采用 13 节顺序：1 结论摘要；2 问题证据总表与根因判断；3 优化建议；4 问题详情；5 CPU 总体状态；6 各核心负载；7 调度；8 IRQ/SoftIRQ；9 频率/Idle；10 Task/Thread；11 Affinity/NUMA；12 时间窗口；13 数据说明与指标解释。
 
-第二部分必须同时呈现关键指标、根因判断/候选证据链，以及 NPU 任务与 NUMA 亲和性。HTML 按 NUMA 分组、每张 NPU 一张任务卡，列出主进程（按显存占用最高推定）、所有占卡宿主机 PID、线程数、NPU 亲和 CPU、当前线程 allowed CPU、ftrace 观测 CPU、PSR 最近运行核、“观测 NUMA → 亲和 NUMA”、CPU 绑定状态和建议分区；MD 用对应表格。根因不再单列尾部章节，具体优化动作统一放在第三部分。
+第二部分必须直接解释CPU平均利用率、单核最高利用率、全机上下文切换率、调度延迟P99、硬中断总占比、软中断总占比，并呈现根因判断/候选证据链，以及 NPU 任务与 NUMA 亲和性。HTML 按 NUMA 分组、每张 NPU 一张任务卡，列出主进程（按显存占用最高推定）、所有占卡宿主机 PID、线程数、NPU 亲和 CPU、当前线程 allowed CPU、ftrace 观测 CPU、PSR 最近运行核、“观测 NUMA → 亲和 NUMA”、CPU 绑定状态和建议分区；MD 用对应表格。根因不再单列尾部章节，具体优化动作统一放在第三部分。
 
 ## 统一入口与采集原则
 
@@ -23,7 +23,7 @@ description: "Linux 训练/推理 HostBound 定位（怀疑 Host/CPU 侧拖慢 N
 sudo bash scripts/cpu_trace_collect.sh --duration 30 --output /tmp --hostbound
 ```
 
-采集必须在物理机/宿主机运行。`scripts/cpu_trace_collect.sh` 是唯一采集脚本，默认全量 ftrace；`--hostbound` 自动发现全部 NPU 占卡 PID，`--pid <PID[,PID...]>` 还可追加指定宿主机 PID。两种方式均增加 CPU/NUMA/SMT、在线 CPU、IRQ、NPU 拓扑/进程、宿主机上下文、进程身份、有效 cpuset 及全线程 affinity 只读快照（`cpu_trace/hostbound/`）。仅在存储或风险限制明确时才用 `--minimal`。清单记录未运行的外部工具，避免把缺失误当正常。
+采集必须在物理机/宿主机运行。`scripts/cpu_trace_collect.sh` 是唯一采集入口，默认全量 ftrace，增强采集需同目录的 `host_snapshot.py`（Python3.7+标准库，缺失时明确降级）；`--hostbound` 自动发现全部 NPU 占卡 PID，`--pid <PID[,PID...]>` 还可指定宿主机根TGID；`--discover`可不依赖NPU直接启用/proc发现。两种方式均增加 CPU/NUMA/SMT、在线 CPU、IRQ、NPU 拓扑/进程、宿主机上下文、进程身份、有效 cpuset 及全线程 affinity 只读快照（`cpu_trace/hostbound/`）。仅在存储或风险限制明确时才用 `--minimal`。清单记录未运行的外部工具，避免把缺失误当正常。
 
 采集前根据现象生成只读工具计划：
 
@@ -73,3 +73,20 @@ python3 <Skill路径>/analyzer/analyze_cpu_trace.py <采集包或trace> --output
 ```
 
 查看生成的 `hostbound_report.html`。分析器不应因缺少 GIL、PMU、msprof 而失败；必须在报告的数据覆盖与限制章节明确这些数据是否存在。
+
+
+## 频率、线程竞争与全核报告（v2）
+
+采集与数据契约需要核对时读取 [v2分析说明](references/analysis_v2.md)。全量显式使用`--full`，默认低开销sysfs轮询1秒，可用`--frequency-interval 2`调整（最小0.2秒）；`--minimal`仅sched_switch，仍保留sysfs频率，不支持完整wakeup延迟。每次使用新的输出目录，不覆盖已有cpu_trace。私有trace instance不受支持时安全停止全局采集，可由客户提供已有trace或helper只读快照。
+
+分析后查看`hostbound_report.html`，并保留`report_data.json`（schema_version=2，时间秒/延迟ms/频率MHz/比例百分比）。第6节支持全CPU折线/柱状图、指标显隐、NUMA与编号范围；第9节按policy展示频率来源与状态；第10节展示TID/TGID发现和四类Top榜、Worker-NPU-CPU/NUMA候选链与cgroup节流增量。
+
+- 缺少cpu_frequency事件时先查看主状态与事件子状态：区分TRACE_AVAILABLE、SYSFS_AVAILABLE、STATIC_ONLY、NO_TRANSITION、UNSUPPORTED、COLLECTION_FAILED，以及NOT_REQUESTED/UNKNOWN。有效sysfs数据不能因为trace没有转换而被否定。NO_TRANSITION不表示降频，缺失不显示0MHz。
+- 频率按related_cpus策略域去重；标准接口kHz显式转MHz；时间加权平均只覆盖已知样本持续区间。低频比例仅使用cpuinfo_max_freq参考；驱动请求频率不是已经验证的实际频率。PMU未获平台语义/权限验证时保持NOT_VALIDATED，不运行或输出估算频率。
+- sched_switch prev_pid/next_pid是TID。依据/proc任务starttime及生命周期区分身份；无TGID证据保留null，跨代/丢失/退出/边界不完整等待不填补。角色依据命令、关系、NPU/cgroup及comm并给出证据，不能将所有Python进程认定为训练。
+- Runqueue Wait包含已完成成功唤醒与R/R+切出等待；Wait P99仅成功wakeup→switch。报告注明样本量、重复/未配对和丢失情况。R/R+是可运行态切出事实，不能断言其他线程因果性抢占。
+- 只有可运行等待和同CPU执行重叠才形成竞争候选；共享Affinity或CPU占用高不能单独形成根因。cgroup quota及throttling用前后增量和祖先限制解释，不能归为整机饱和。未对齐Device时间线仅报告Host侧相关风险。
+- IRQ/SoftIRQ全机比例使用所有有效CPU总观测时间分母，同时保留单核最大值。静默/未采集CPU或缺失事件保留N/A；低平均利用率不能排除局部热点。
+- 第二节六个解释均需包含当前值、定义/公式、作用、动态说明、结论限制与可信度。工具阈值为经验筛选，性能结论需同负载基线验证。
+
+回归与合成示例命令见README。合成数据必须保留SYNTHETIC_TEST_DATA标记，不冒充真实采集。禁止自动执行优化命令、训练或PMU，不自动commit/push。

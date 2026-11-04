@@ -8,6 +8,9 @@ import re
 from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
 from .diagnosis import THRESHOLDS
 from .npu_report import affinity_html, binding_html
+from .report_explanation import explanations_html, fmt
+from .report_sections import frequency_section, thread_section, core_table, coverage_section
+from .core_balance import render_core_balance
 
 
 def _cs_limit(n_cpus):
@@ -41,6 +44,8 @@ border-radius:10px;padding:12px 14px}
 padding:20px 22px;margin:16px 0}
 .status-hero .big{font-size:26px;font-weight:700;margin:4px 0 10px}
 table{width:100%;border-collapse:collapse;margin:8px 0;font-size:13px}
+table{display:block;max-width:100%;overflow-x:auto}p,td,li{overflow-wrap:anywhere}
+.wrap,.card,.finding,.numa-group,.npu-card{min-width:0;max-width:100%}
 th{background:var(--panel2);color:var(--muted);text-align:left;padding:7px 10px;
 border:1px solid var(--border);font-weight:600;white-space:nowrap}
 td{padding:7px 10px;border:1px solid var(--border);vertical-align:top}
@@ -99,7 +104,7 @@ nav#toc a.active{background:#1c3252;color:#4a9eff}
 nav#toc .toc-foot{color:#4a5568;font-size:10.5px;padding:12px 8px 0;margin-top:10px;
 border-top:1px solid var(--border)}
 @media (max-width:1024px){body{padding-left:0}header{margin-left:0;padding-left:0}nav#toc{display:none}}
-@media print{body{padding-left:0}header{margin-left:0;padding-left:0}nav#toc{display:none}}
+@media print{body{padding-left:0}header{margin-left:0;padding-left:0}nav#toc{display:none}table{display:table;table-layout:fixed;font-size:8px;overflow:visible}th,td{white-space:normal;word-break:break-word}.core-table-scroll{overflow:visible}.chart{break-inside:avoid}#core-balance svg{min-width:0}}
 """
 
 _SPY_JS = """
@@ -163,6 +168,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A("<div class='meta'>数据格式：%s ｜ 采集时长：%.1f 秒 ｜ 核心数：%d ｜ 分析时间：%s</div></div></header>"
       % (esc(m.get("format_name", "-")), st["duration"], st["n_cpus"], _now()))
     A("<div class='wrap'>")
+    if m.get("metadata",{}).get("data_origin")=="SYNTHETIC_TEST_DATA":
+        A("<div class='warn-box'><b>合成测试数据 / SYNTHETIC TEST DATA</b>：此报告用于功能验证，不代表真实Kunpeng/Ascend服务器测量。</div>")
     # ---------- 1. 摘要：状态 + KPI ----------
     A("<h2>1. Executive Summary（结论摘要）</h2>")
     sc = sev_color.get(diag["host_status"], "#6b7280")
@@ -179,11 +186,9 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     if sch.get("lat_p99") is not None:
         A(_kpi("%.2f ms" % sch["lat_p99"], "调度延迟 P99", sch["lat_p99"] >= 20, 5))
     irq = m.get("irq", {})
-    A(_kpi("%.2f%%" % irq.get("total_ratio", 0), "硬中断总占比",
-           max([pc.get("irq_ratio", 0) for pc in m["per_cpu"].values()] or [0]) >= 15))
+    A(_kpi(fmt(irq.get("total_ratio"),"%"), "硬中断总占比", (irq.get('max_cpu_ratio') or 0)>=15))
     soft = m.get("softirq", {})
-    A(_kpi("%.2f%%" % soft.get("total_ratio", 0), "软中断总占比",
-           max([pc.get("softirq_ratio", 0) for pc in m["per_cpu"].values()] or [0]) >= 20))
+    A(_kpi(fmt(soft.get("total_ratio"),"%"), "软中断总占比", (soft.get('max_cpu_ratio') or 0)>=20))
     A("</div>")
     p = diag.get("primary")
     if p:
@@ -199,29 +204,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<div class='warn-box'>⚠ <b>数据告警</b>：%s</div>" % esc("；".join(m["warnings"])))
     # ---------- 2. 证据总表 ----------
     A("<h2>2. 问题证据总表与根因判断</h2>")
-    A("<h3>2.1 关键指标证据</h3>")
-    A("<table><tr><th>指标</th><th class='num'>当前值</th><th>基线/阈值</th><th>状态</th></tr>")
-    if st.get("avg_util") is not None:
-        A(_row("CPU 平均利用率", "%.1f%%" % st["avg_util"], "&lt;70% 健康",
-               "偏高" if st["avg_util"] >= 70 else "正常", st["avg_util"] >= 70))
-    if st.get("max_util") is not None:
-        A(_row("单核最高利用率", "%.1f%%" % st["max_util"], "&lt;90% 健康",
-               "饱和" if st["max_util"] >= 90 else "正常", st["max_util"] >= 90))
-    if sch.get("cs_rate") is not None:
-        A(_row("上下文切换率", "%.0f 次/秒" % sch["cs_rate"],
-               "全机 &gt; %.0f×核数/s 偏高" % THRESHOLDS["cs_rate_high"],
-               "偏高" if sch["cs_rate"] > _cs_limit(st["n_cpus"]) else "正常",
-               sch["cs_rate"] > _cs_limit(st["n_cpus"])))
-    if sch.get("lat_p99") is not None:
-        A(_row("调度延迟 P99", "%.2f ms" % sch["lat_p99"], "≥5ms 警告 / ≥20ms 严重",
-               "异常" if sch["lat_p99"] >= 5 else "正常", sch["lat_p99"] >= 5))
-    else:
-        A(_row("调度延迟 P99", "无法计算", "-", "数据缺失", False))
-    A(_row("硬中断总占比", "%.2f%%" % irq.get("total_ratio", 0), "单核≥15% 关注热点",
-           "关注" if max([pc.get("irq_ratio", 0) for pc in m["per_cpu"].values()] or [0]) >= 15 else "正常", False))
-    A(_row("软中断总占比", "%.2f%%" % soft.get("total_ratio", 0), "单核≥20% 关注热点",
-           "关注" if max([pc.get("softirq_ratio", 0) for pc in m["per_cpu"].values()] or [0]) >= 20 else "正常", False))
-    A("</table><p class='note'>指标含义见第 13 节「指标与事件说明」。</p>")
+    A("<h3>2.1 关键指标证据与解释</h3>")
+    A(explanations_html(m,diag))
     # ---------- 2.2 根因 ----------
     A("<h3>2.2 根因判断与证据链</h3>")
     if p:
@@ -270,47 +254,17 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<p>无 /proc/stat 快照，总体占用以 trace 计算为准。</p>")
     # ---------- 6. Core Balance ----------
     A("<h2>6. CPU Core Balance（各核心负载）</h2>")
-    A("<div class='chart'>")
-    if m["per_cpu"]:
-        _known = [(c, pc) for c, pc in sorted(m["per_cpu"].items(), key=lambda kv: int(str(kv[0])) if str(kv[0]).isdigit() else 0)
-                  if pc.get("util_known", True)]
-        items = [("CPU %s" % c, pc["util"],
-                  "#d64545" if pc["util"] >= 90 else ("#d98f00" if pc["util"] >= 70 else "#4a9eff"))
-                 for c, pc in _known][:64]
-        if items:
-            A(bar_fn(items, fmt=lambda v: "%.1f%%" % v))
-        n_unk = len(m["per_cpu"]) - len(_known)
-        if n_unk:
-            A("<p class='note'>%d 个核心无 idle 证据（静默核），利用率记为 N/A。</p>" % n_unk)
-    A("</div>")
-    A("<table><tr><th>核心</th><th class='num'>利用率</th><th class='num'>空闲比</th>"
-      "<th class='num'>上下文切换/s</th><th class='num'>硬中断占比</th><th class='num'>软中断占比</th></tr>")
-    for c in sorted(m["per_cpu"].keys()):
-        pc = m["per_cpu"][c]
-        _k = pc.get("util_known", True)
-        util_s = ("%.1f%%" % pc["util"]) if _k else "N/A"
-        idle_s = ("%.1f%%" % pc["idle_ratio"]) if _k else "N/A"
-        A("<tr><td class='evt'>CPU %s</td><td class='num'>%s</td><td class='num'>%s</td>"
-          "<td class='num'>%.0f</td><td class='num'>%.1f%%</td><td class='num'>%.1f%%</td></tr>"
-          % (esc(c), util_s, idle_s, pc["cs_rate"], pc["irq_ratio"], pc["softirq_ratio"]))
-    A("</table>")
-    known_pcs = {c: pc for c, pc in m["per_cpu"].items() if pc.get("util_known", True)}
-    hot = max(known_pcs.items(), key=lambda kv: kv[1]["util"]) if known_pcs else (None, None)
-    if hot[1]:
-        cold = min(known_pcs.items(), key=lambda kv: kv[1]["util"])
-        A("<p>最高负载：%s（%.1f%%），最低：%s（%.1f%%）。%s</p>" % (
-            esc(hot[0]), hot[1]["util"], esc(cold[0]), cold[1]["util"],
-            "<b style='color:#d98f00'>存在明显不均衡，详见问题详情。</b>"
-            if hot[1]["util"] - cold[1]["util"] >= 40 else "负载分布尚可。"))
+    A(render_core_balance(m))
+    A(core_table(m,True))
     # ---------- 7. Scheduler ----------
     A("<h2>7. Scheduler 调度分析</h2>")
     A("<div class='card'>")
-    A("<p>上下文切换总计 <b>%s</b> 次（%.0f 次/秒）%s</p>" % (
-        format(sch.get("cs_total", 0), ","), sch.get("cs_rate", 0) or 0,
+    A("<p>上下文切换总计 <b>%s</b> 次（%s 次/秒）%s</p>" % (
+        fmt(sch.get("cs_total"),digits=0), fmt(sch.get("cs_rate"),digits=0),
         "— 上下文切换率过高会增加调度开销，任务碎片化明显。"
         if (sch.get("cs_rate") or 0) > _cs_limit(st["n_cpus"]) else ""))
-    A("<p>唤醒总计 <b>%s</b> 次（%.0f 次/秒）— 唤醒率反映任务碎片化程度。</p>" % (
-        format(sch.get("wakeup_total", 0), ","), sch.get("wakeup_rate", 0) or 0))
+    A("<p>唤醒总计 <b>%s</b> 次（%s 次/秒）— 唤醒率反映任务碎片化程度。</p>" % (
+        fmt(sch.get("wakeup_total"),digits=0), fmt(sch.get("wakeup_rate"),digits=0)))
     if sch.get("lat_avg") is not None:
         A("<p>调度延迟：平均 %.3f ms，P50 %.3f ms，P95 %.2f ms，P99 %.2f ms，最大 %.2f ms（共 %s 次可配对样本）。</p>" % (
             sch["lat_avg"], sch["lat_p50"], sch["lat_p95"], sch["lat_p99"], sch["lat_max"],
@@ -319,7 +273,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     else:
         A("<p>调度延迟：%s</p>" % esc(sch.get("lat_note") or "无数据。"))
     if sch.get("runnable_avg") is not None:
-        A("<p>平均可运行任务数 %.1f — %s</p>" % (sch["runnable_avg"], esc(METRIC_EXPLANATIONS["runnable_avg"])))
+        A("<p>已完成可运行等待的平均队列长度下界 %.1f — %s</p>" % (sch["runnable_avg"], esc(METRIC_EXPLANATIONS["runnable_avg"])))
     A("</div>")
     if sch.get("top_lat_tasks"):
         A("<table><tr><th>任务</th><th class='num'>最大延迟 ms</th><th class='num'>平均 ms</th><th class='num'>次数</th></tr>")
@@ -330,7 +284,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     # ---------- 8. IRQ / SoftIRQ ----------
     A("<h2>8. IRQ / SoftIRQ 分析</h2>")
     A("<h3>8.1 硬中断</h3>")
-    A("<p>硬中断总 CPU 占比 <b>%.2f%%</b>（%s 次）。</p>" % (irq.get("total_ratio", 0), format(irq.get("total_count", 0), ",")))
+    A("<p>硬中断全机观测占比 <b>%s</b>；单核最高 %s；配对次数 %s。</p>" % (fmt(irq.get("total_ratio"),"%"),fmt(irq.get("max_cpu_ratio"),"%"),fmt(irq.get("total_count"),digits=0)))
     if irq.get("top_names"):
         A("<table><tr><th>中断源</th><th class='num'>次数</th><th class='num'>累计耗时 ms</th><th>说明</th></tr>")
         for n, cnt, t in irq["top_names"]:
@@ -338,7 +292,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
               % (esc(n), format(cnt, ","), t * 1000, esc(_explain_irq_name(n))))
         A("</table>")
     A("<h3>8.2 软中断</h3>")
-    A("<p>软中断总 CPU 占比 <b>%.2f%%</b>（%s 次）。</p>" % (soft.get("total_ratio", 0), format(soft.get("total_count", 0), ",")))
+    A("<p>软中断全机观测占比 <b>%s</b>；单核最高 %s；配对次数 %s。</p>" % (fmt(soft.get("total_ratio"),"%"),fmt(soft.get("max_cpu_ratio"),"%"),fmt(soft.get("total_count"),digits=0)))
     if soft.get("top_actions"):
         A("<table><tr><th>软中断类型</th><th class='num'>次数</th><th class='num'>累计耗时 ms</th><th>说明</th></tr>")
         for n, cnt, t in soft["top_actions"]:
@@ -349,25 +303,10 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A("<p class='note'>各核中断分布见第 6 节表格与上方图表。</p>")
     # ---------- 9. Freq / Idle ----------
     A("<h2>9. CPU Frequency / Idle 分析</h2>")
-    freq = m.get("freq", {})
-    if freq.get("available"):
-        rows = sorted(freq["per_cpu"].items())
-        if rows:
-            A("<table><tr><th>核心</th><th class='num'>最低 MHz</th><th class='num'>平均 MHz</th>"
-              "<th class='num'>最高 MHz</th><th class='num'>低频样本占比</th></tr>")
-            for c, fv in rows[:32]:
-                A("<tr><td class='evt'>CPU %s</td><td class='num'>%.0f</td><td class='num'>%.0f</td>"
-                  "<td class='num'>%.0f</td><td class='num'>%.0f%%</td></tr>" % (
-                      esc(c), freq_to_mhz(fv["min"]), freq_to_mhz(fv["avg"]),
-                      freq_to_mhz(fv["max"]), fv["low_ratio"]))
-            A("</table>")
-        A("<p>governor：%s。</p>" % esc(m.get("governor") or "快照未提供"))
-        A("<p class='note'>频率单位由 trace 原始值换算（常见 kHz/Hz，已自动识别）；仅凭 trace 不判定硬件故障。</p>")
-    else:
-        A("<p>trace 中无 cpu_frequency 事件，频率分析不可用（Available: Unavailable）。</p>")
+    A(frequency_section(m,True))
     idle = m.get("idle", {})
     if idle.get("available"):
-        avgs = idle.get("per_cpu_ratio") or {}
+        avgs = {c:v for c,v in (idle.get("per_cpu_ratio") or {}).items() if v is not None}
         if avgs:
             A("<p>各核空闲占比：平均 %.1f%%，最高 %.1f%%（%s），最低 %.1f%%（%s）。%s</p>" % (
                 sum(avgs.values()) / len(avgs), max(avgs.values()), esc(max(avgs, key=avgs.get)),
@@ -377,6 +316,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<p>trace 中无 cpu_idle 事件，空闲比基于 swapper 任务近似。</p>")
     # ---------- 10. Task ----------
     A("<h2>10. Task / Thread 分析</h2>")
+    A(thread_section(m,True))
     tk = m.get("tasks", {})
     if tk.get("top_runtime"):
         A("<table><tr><th>Top 运行时间任务</th><th class='num'>累计运行 ms</th><th>说明</th></tr>")
@@ -416,6 +356,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A(_time_window_html(m, esc))
     # ---------- 13. 数据说明与指标解释 ----------
     A("<h2>13. 数据说明与指标解释</h2>")
+    A(coverage_section(m,True))
     A("<h3>数据概况</h3><div class='card'>")
     A("<p>trace 时间范围：%.3f ~ %.3f（相对秒），时长 %.1f 秒</p>" % (m.get("t_start", 0), m.get("t_end", 0), st["duration"]))
     A("<p>CPU 数量（参与统计）：%d；报告核数（nproc）：%s</p>" % (st["n_cpus"], esc(m.get("n_cpus_report") or "-")))
@@ -425,12 +366,12 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A("<p>解析统计：总行 %s，成功 %s，失败 %s（失败行已自动跳过）</p>" % (
         format(m["parse_stats"]["total"], ","), format(m["parse_stats"]["parsed"], ","),
         format(m["parse_stats"]["failed"], ",")))
-    A("<p>buffer 溢出：%s</p></div>" % esc(m.get("buffer_overrun") or "0（未检测到溢出）"))
+    A("<p>buffer 溢出：%s</p></div>" % esc((m.get("buffer_overrun") or "0（统计已提供）") if m.get("buffer_overrun_known") else "未知（未提供丢失统计，不能当作0）"))
     A("<h3>分析限制</h3><div class='card'><ul style='margin-left:20px'>"
       "<li>trace 仅覆盖采集窗口，不代表长期行为。</li>"
-      "<li>利用率基于 idle 事件/swapper 近似；user/system 区分依赖 /proc/stat（开机累计）。</li>"
+      "<li>利用率基于连续sched_switch有效区间；无switch的CPU可用cpu_idle区间降级；user/system快照为开机累计。</li>"
       "<li>调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。</li>"
-      "<li>频率单位自动换算可能存在平台差异，仅作相对比较。</li></ul></div>")
+      "<li>频率按显式单位换算；标准trace/sysfs为kHz，报告为MHz。驱动报告值不等同于已验证的PMU实测频率。</li></ul></div>")
     A("<h3>指标解释（每个指标是什么）</h3>")
     A("<table><tr><th>指标</th><th>解释</th></tr>")
     for k, v in METRIC_EXPLANATIONS.items():
@@ -527,9 +468,9 @@ def _time_window_html(m, esc):
     for i, v in top3:
         seg = "窗口 %.1f~%.1f 秒：利用率峰值 <b>%.1f%%</b>" % (i * b, (i + 1) * b, v)
         extra = []
-        if cs:
+        if cs and cs[i] is not None:
             extra.append("上下文切换 %.0f 次/秒" % cs[i])
-        if soft:
+        if soft and soft[i] is not None:
             extra.append("软中断占比 %.1f%%" % soft[i])
         if lat and lat[i] is not None:
             extra.append("调度延迟 P99 %.2f ms" % lat[i])

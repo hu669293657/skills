@@ -111,16 +111,22 @@ def diagnose(m):
     # 无 idle 证据 (util_known=False) 的核不参与统计, 避免 UNKNOWN(None) 混入数值运算
     known_cpus = [c for c in cpus if per_cpu[c].get("util_known", True)]
     utils = [per_cpu[c]["util"] for c in known_cpus]
-    avg_util = sum(utils) / len(utils) if utils else None
+    obs = sum(per_cpu[c].get("observed_sec",0) for c in known_cpus)
+    avg_util = sum(per_cpu[c]["util"] * per_cpu[c].get("observed_sec",0) for c in known_cpus) / obs if obs else None
     max_cpu = max(utils) if utils else None
     min_cpu = min(utils) if utils else None
     med_util = _med(utils) if utils else None
 
     def add(dtype, severity, confidence, title, evidence, impact, root, rec):
+        for e in evidence:
+            e.setdefault("source", "ftrace sched/irq/power + 对应只读快照；详见原始数据")
+            e.setdefault("time_window", "%.6f~%.6f s" % (m.get("t_start",0),m.get("t_end",0)))
+        if not m.get("scheduler_quality",{}).get("complete",True): confidence="LOW"
         findings.append({
             "type": dtype, "severity": severity, "confidence": confidence,
-            "title": title, "evidence": evidence, "impact": impact,
-            "possible_root_cause": root, "recommendation": rec,
+            "title": title, "evidence": evidence, "impact": impact + "；此为Host侧风险描述，NPU性能因果尚未证实。",
+            "causality": "UNPROVEN", "evidence_class": "observed facts with candidate interpretation",
+            "possible_root_cause": "待验证候选：" + root, "recommendation": rec,
             "explanation": DIAG_EXPLANATIONS.get(dtype, ""),
         })
 
@@ -168,7 +174,7 @@ def diagnose(m):
         conf = "HIGH" if len(cpus) >= 4 else "MEDIUM"
         root = "任务绑核过于集中、负载均衡失效或中断亲和性固定于个别核"
         soft_ratio = per_cpu[top_c]["softirq_ratio"]
-        if soft_ratio >= T["softirq_ratio_warn"]:
+        if soft_ratio is not None and soft_ratio >= T["softirq_ratio_warn"]:
             root = "软中断集中在该核 (疑为 IRQ affinity 将网卡中断固定到单核)"
         add("CPU_IMBALANCE", sev, conf, "CPU 负载严重不均衡",
             ev, "部分核心打满成为瓶颈，同时大量算力闲置，吞吐受限",
@@ -177,10 +183,11 @@ def diagnose(m):
              "检查业务线程绑核配置 (taskset/numactl)，把任务分散到空闲核",
              "开启 RPS/XPS 或 RSS 多队列分散网络软中断"])
     # ============ 3. IRQ_HOTSPOT / SOFTIRQ_HOTSPOT ============
-    irq_ratios = [per_cpu[c]["irq_ratio"] for c in cpus] if cpus else []
+    irq_cpus = [c for c in cpus if per_cpu[c]["irq_ratio"] is not None]
+    irq_ratios = [per_cpu[c]["irq_ratio"] for c in irq_cpus]
     if irq_ratios:
         med_irq = _med(irq_ratios)
-        top_irq_c = max(cpus, key=lambda c: per_cpu[c]["irq_ratio"])
+        top_irq_c = max(irq_cpus, key=lambda c: per_cpu[c]["irq_ratio"])
         v = per_cpu[top_irq_c]["irq_ratio"]
         if v >= T["irq_ratio_warn"] and v >= med_irq * T["hotspot_mult"]:
             top_names = ", ".join("%s(%d 次)" % (n, cnt) for n, cnt, _t in m["irq"]["top_names"][:3]) or "见下表"
@@ -195,14 +202,15 @@ def diagnose(m):
                 ["cat /proc/interrupts 定位中断源设备",
                  "用 irqbalance 或手工修改 /proc/irq/*/smp_affinity 分散中断",
                  "避免将业务关键线程绑定到中断密集核"])
-    soft_ratios = [per_cpu[c]["softirq_ratio"] for c in cpus] if cpus else []
+    soft_cpus = [c for c in cpus if per_cpu[c]["softirq_ratio"] is not None]
+    soft_ratios = [per_cpu[c]["softirq_ratio"] for c in soft_cpus]
     if soft_ratios:
         med_soft = _med(soft_ratios)
-        top_soft_c = max(cpus, key=lambda c: per_cpu[c]["softirq_ratio"])
+        top_soft_c = max(soft_cpus, key=lambda c: per_cpu[c]["softirq_ratio"])
         v = per_cpu[top_soft_c]["softirq_ratio"]
         if v >= T["softirq_ratio_warn"] and v >= med_soft * T["hotspot_mult"]:
             top_act = ", ".join("%s(%.0fms)" % (n, t * 1000) for n, cnt, t in m["softirq"]["top_actions"][:3]) or "见下表"
-            is_net = "NET_RX" in top_act or "NET_TX" in top_act
+            is_net = bool(m["softirq"]["top_actions"] and m["softirq"]["top_actions"][0][0] in ("NET_RX","NET_TX"))
             root = "该核集中处理了软中断" + ("，且以网络收包 (NET_RX) 为主：网卡队列中断亲和性固定于单核，通信/收包量大时极易打满" if is_net else "")
             rec = ["检查 /proc/softirqs 与 /proc/interrupts 中网络中断分布",
                    "开启/调大网卡多队列 (RSS) 并用 ethtool -X 均衡队列",
@@ -248,24 +256,24 @@ def diagnose(m):
     freq_per = _f(m, ["freq", "per_cpu"], {}) or {}
     if freq_per:
         low_cpus = [c for c, fv in freq_per.items()
-                    if fv["max"] and fv["low_ratio"] >= T["low_freq_ratio"]]
+                    if fv.get("low_ratio") is not None and fv["low_ratio"] >= T["low_freq_ratio"]]
         # 优先观察高负载核 (无 idle 证据的核不参与)
         hot_low = [c for c in low_cpus
                    if isinstance(per_cpu.get(c, {}).get("util"), (int, float))
                    and per_cpu[c]["util"] >= 50]
-        if hot_low or (low_cpus and len(low_cpus) >= max(1, len(freq_per) // 2)):
+        if hot_low:
             cs = hot_low or low_cpus
             cc = cs[0]
             fv = freq_per[cc]
             add("CPU_FREQUENCY_LOW", "WARNING",
                 "MEDIUM",
-                "CPU 高负载下运行于低频" if hot_low else "大量核心长期低频",
-                [{"metric": "CPU %s 平均频率" % cc, "value": "%.0f MHz (最高 %.0f MHz)" % (freq_to_mhz(fv["avg"]), freq_to_mhz(fv["max"])),
-                  "threshold": "低频(≤最高50%%)样本占比≥%.0f%%" % T["low_freq_ratio"]},
+                "高负载策略域的报告频率低于硬件最大参考（待验证）",
+                [{"metric": "CPU %s 平均频率" % cc, "value": "%.0f MHz (最高 %.0f MHz)" % (fv["avg"], fv["max"]),
+                  "threshold": "低频(≤cpuinfo_max_freq 50%%)时间占比≥%.0f%%" % T["low_freq_ratio"]},
                  {"metric": "涉及核心数", "value": "%d 个" % len(cs), "threshold": "-"},
                  {"metric": "governor", "value": m.get("governor") or "快照未提供", "threshold": "建议 performance"}],
                 "同负载需要更多周期，实际算力下降，任务变慢",
-                "governor 为 powersave/ondemand、温控降频或平台频率限制",
+                "驱动报告频率偏低；需结合负载、平台温度与功耗证据验证，不等同于已证实降频根因",
                 ["检查 governor: cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor",
                  "建议设置 performance: cpupower frequency-set -g performance",
                  "排查温度/功耗墙 (需结合平台监控)，本分析不判定硬件故障"])
@@ -362,11 +370,11 @@ def diagnose(m):
         pass  # 条件等价改写, 见下方清晰分支
     if avg_util is not None and (100 - avg_util) >= T["idle_high"]:
         imbalance = any(f["type"] in ("CPU_IMBALANCE", "IRQ_HOTSPOT", "SOFTIRQ_HOTSPOT") for f in findings)
-        if not imbalance and not npu_risks:
-            add("HOST_NOT_BOTTLENECK", "OK", "HIGH", "Host CPU 负载健康，不是当前瓶颈",
+        if not imbalance and not npu_risks and not m.get("contention",{}).get("candidates"):
+            add("HOST_NOT_BOTTLENECK", "INFO", "LOW", "已观测核心整体负载较低，仍需检查局部与调度瓶颈",
                 [{"metric": "全机平均 CPU 利用率", "value": "%.1f%%" % avg_util, "threshold": "空闲≥%.0f%%" % T["idle_high"]},
                  {"metric": "最高核利用率", "value": "%.1f%%" % (max_cpu or 0), "threshold": "-"}],
-                "CPU 侧无拥塞，若业务性能仍差，瓶颈大概率在 NPU/IO/框架/算法侧",
+                "平均利用率低不能排除局部饱和、CPU quota、关键线程等待或未观测CPU的风险",
                 "计算负载低于算力供给",
                 ["从 NPU 利用率、数据管道 (dataloader)、算子耗时等方向继续排查",
                  "如需深入可用本 Skill 附带的 Prof/集群分析工具链"])
@@ -379,19 +387,19 @@ def diagnose(m):
                 ["按上方 CPU_IMBALANCE / IRQ 热点建议重新分布负载"])
     # ============ 8. 数据覆盖不足 ============
     limited = []
-    if "cpu_idle" not in av:
-        limited.append("缺少 cpu_idle 事件，利用率基于 swapper 切换近似估算")
-    if not ({"sched_wakeup", "sched_waking", "sched_wakeup_new"} & av):
+    if "sched_switch" not in av:
+        limited.append("缺少sched_switch：无线程调度分析，利用率仅在有cpu_idle配对时可计算")
+    if not ({"sched_wakeup", "sched_wakeup_new"} & av):
         limited.append("缺少 wakeup 事件，无法计算调度延迟")
     if not {"irq_handler_entry", "irq_handler_exit"} <= av:
         limited.append("缺少 IRQ 事件，无法分析硬中断")
     if not {"softirq_entry", "softirq_exit"} <= av:
         limited.append("缺少 SoftIRQ 事件，无法分析软中断")
-    if "cpu_frequency" not in av:
-        limited.append("缺少 cpu_frequency 事件，无法分析频率")
+    if m.get("frequency",{}).get("status") in ("UNSUPPORTED","COLLECTION_FAILED"):
+        limited.append("频率状态 %s：%s" % (m["frequency"]["status"], "；".join(m["frequency"]["reasons"])))
     if limited:
         if len(limited) >= 3:
-            add("INSUFFICIENT_EVIDENCE", "INFO", "HIGH", "本次采集数据维度有限",
+            add("INSUFFICIENT_EVIDENCE", "INFO", "LOW", "本次采集数据维度有限",
                 [{"metric": "缺失维度", "value": "；".join(limited), "threshold": "-"},
                  {"metric": "采集模式", "value": "精简模式(仅 sched_switch)" if
                   str(m.get("metadata", {}).get("minimal_mode", "")) == "1" or
@@ -400,8 +408,28 @@ def diagnose(m):
                 "采集脚本精简模式或内核不支持部分事件",
                 ["如需完整分析请用全量模式重新采集: sudo bash cpu_trace_collect.sh --duration 30 (不加 -m)"])
         else:
-            m["warnings"].extend(["诊断提示: " + s for s in limited])
+            m["warnings"].extend(["诊断提示: " + s for s in limited if "诊断提示: " + s not in m["warnings"]])
 
+    # Thread-level evidence never claims another task causally preempted a Worker.
+    for candidate in m.get('contention',{}).get('candidates',[])[:10]:
+        if not candidate.get('npu_ids'): continue
+        if candidate['overlap_sec'] < T['lat_p99_warn_ms']/1000: continue
+        add('CPU_CONTENTION_CANDIDATE','WARNING',candidate['confidence'],
+            'NPU Worker TID%d 存在同核竞争候选 TID%d' % (candidate['target_tid'],candidate['contender_tid']),
+            [{'metric':'等待窗口内同核运行重叠','value':'%.3f ms；CPU %s；NPU %s' % (candidate['overlap_sec']*1000,candidate['cpus'],candidate['npu_ids']),
+              'threshold':'仅作候选；重叠>=5ms为经验筛选','source':'sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi',
+              'time_window':str(candidate['windows'][:3])+"（完整已观测窗口见第10节/JSON）"}],
+            'Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测',
+            '可运行等待与其他任务执行相关，因果关系尚未证实',
+            ['核验候选线程职责、优先级与有效Affinity/cpuset，比较相同负载下的等待分位数与吞吐',
+             '在用户确认后调整线程并发或隔离策略，保存配置并以前后同窗采集验证'])
+    for quota in m.get('contention',{}).get('cgroups',[]):
+        if not (quota.get('nr_throttled_delta') or 0)>0: continue
+        add('CGROUP_CPU_THROTTLING','WARNING','MEDIUM','cgroup观测到CPU节流（非整机饱和结论）',
+            [{'metric':'cgroup '+quota['path'],'value':str(quota),'threshold':'nr_throttled增量>0','source':quota['evidence']}],
+            '所属任务可能被CPU配额限制，整机空闲仍可能排队',
+            'cgroup自身或祖先限额；累计增量覆盖整个cgroup，尚未证明单个Worker受限',
+            ['对照cpu.max及祖先配额、nr_throttled增量和Worker等待时间；用户确认调整配额后同负载复测'])
     # ============ 汇总 ============
     sev_rank = {"CRITICAL": 3, "WARNING": 2, "INFO": 1, "OK": 0}
     conf_rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -445,4 +473,5 @@ def diagnose(m):
 _KNOWN_EVENTS = set([
     "sched_switch", "sched_wakeup", "sched_waking", "sched_wakeup_new",
     "sched_migrate_task", "task_newtask", "irq_handler_entry", "irq_handler_exit",
-    "softirq_entry", "softirq_exit", "softirq_raise", "cpu_idle", "cpu_frequency"])
+    "softirq_entry", "softirq_exit", "softirq_raise", "cpu_idle", "cpu_frequency",
+    "sched_process_fork", "sched_process_exec", "sched_process_exit", "sched_stat_wait", "tracing_mark_write"])

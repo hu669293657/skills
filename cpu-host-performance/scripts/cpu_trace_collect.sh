@@ -130,12 +130,15 @@ CPU Host 性能采集工具 (统一入口: 全量 ftrace + 可选 HostBound 快�
 用法: sudo bash $0 [选项]
   -t, --duration <秒>     采集时长, 默认 3
   -o, --output <目录>     输出目录, 默认当前目录
-  -b, --buffer-size <KB>  单核 buffer 大小, 默认 140800
+  -b, --buffer-size <KB>  单核 buffer 大小, 默认 4096
   -c, --cpu-list <列表>   CPU 列表, 如 1,2,3 或 0-47 (默认全量)
-  -m, --minimal           精简模式: 仅采集 sched_switch, 体积减小 90%+
+  -m, --minimal           精简模式: 仅 sched_switch；sysfs 频率仍低频轮询
   -p, --pid <PID[,PID]>   追加 HostBound 只读快照: NUMA/NPU 拓扑、IRQ、目标进程与
                           线程 affinity 等, 写入 hostbound/ 目录 (不改 ftrace 采集)
       --hostbound        自动发现全部 NPU 占卡宿主机 PID 并采集亲和性快照
+      --discover         只读 /proc 全进程/全线程前后快照与生命周期事件
+      --frequency-interval <秒>  sysfs 轮询，默认1，最小0.2
+      --full             显式全量模式（默认）
   -h, --help              显示帮助
 示例:
   sudo bash $0 --duration 30
@@ -148,13 +151,16 @@ EOF
 }
 
 # ---------- 参数解析 ----------
-DURATION=3; OUTDIR="."; BUFFER_SIZE=140800; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=0
+DURATION=3; OUTDIR="."; BUFFER_SIZE=4096; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=0; DISCOVER=0; FREQ_INTERVAL=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--duration)    DURATION="$2"; shift 2;;
     -o|--output)      OUTDIR="$2"; shift 2;;
     -b|--buffer-size) BUFFER_SIZE="$2"; shift 2;;
     -c|--cpu-list)    CPU_LIST="$2"; shift 2;;
+    --full) MINIMAL=0; shift;;
+    --discover) DISCOVER=1; HOSTBOUND=1; shift;;
+    --frequency-interval) FREQ_INTERVAL="$2"; shift 2;;
     -m|--minimal)     MINIMAL=1; shift;;
     -p|--pid)         PID_LIST="$2"; HOSTBOUND=1; shift 2;;
     --hostbound)      HOSTBOUND=1; shift;;
@@ -162,9 +168,15 @@ while [[ $# -gt 0 ]]; do
     *) err "未知参数: $1"; usage; exit 1;;
   esac
 done
+if ! awk -v x="$FREQ_INTERVAL" 'BEGIN {exit !(x ~ /^[0-9]+([.][0-9]+)?$/ && x>=0.2)}'; then
+  err "frequency-interval 必须 >=0.2 秒"; exit 1
+fi
+[[ -z "$CPU_LIST" || "$CPU_LIST" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || { err "CPU列表格式错误"; exit 1; }
+[[ ! -e "$OUTDIR/cpu_trace" ]] || { err "输出 cpu_trace 目录已存在，拒绝覆盖，请选择新目录"; exit 1; }
 if [[ "$DURATION" =~ ^[0-9]+$ ]] && [[ "$BUFFER_SIZE" =~ ^[0-9]+$ ]] && (( DURATION>=1 )); then :; else
   err "时长必须为 ≥1 的纯数字, buffer 必须为纯数字"; exit 1; fi
 # PID 合法性: 逗号分隔的正整数 (不校验进程是否存在, 采集阶段自动跳过)
+(( HOSTBOUND )) && DISCOVER=1
 for _p in ${PID_LIST//,/ }; do
   [[ "$_p" =~ ^[1-9][0-9]*$ ]] || { err "pid 必须为正整数: $_p"; exit 1; }
 done
@@ -186,6 +198,11 @@ STATS_OK=0; compgen -G "$TRACE_DIR/per_cpu/cpu*/stats" >/dev/null 2>&1 && STATS_
 if ! echo test_probe_write >/dev/null 2>&1 && [[ ! -w "$TRACE_DIR/tracing_on" ]]; then
   err "tracing 目录不可写, 请确认 root 权限"; exit 1; fi
 
+# 独立 instance 避免破坏其他诊断工具的 events、buffer 和原始 trace。
+TRACE_BASE="$TRACE_DIR"
+TRACE_DIR="$TRACE_BASE/instances/cpu_host_$$"
+mkdir "$TRACE_DIR" 2>/dev/null || { err "内核/权限不支持独立 trace instance；未改动全局 tracing。可用 host_snapshot.py 只读补采。"; exit 1; }
+INSTANCE_CREATED=1
 # ---------- CPU 掩码 ----------
 to_mask() {  # "0-3,8" -> 16 进制 mask (每 32 核一组逗号分隔)
   echo "$1" | awk '{ gsub(/\[|\]|[[:space:]]/,""); n=split($0,p,",");
@@ -198,48 +215,50 @@ to_mask() {  # "0-3,8" -> 16 进制 mask (每 32 核一组逗号分隔)
       for(g=nh/32-1;g>=0;g--){s=sprintf("%08x",hex[g]); mask=(mask=="")?s:mask","s}
       print mask } }'
 }
-SAVED_MASK=$(cat "$TRACE_DIR/tracing_cpumask" 2>/dev/null)
-if [[ -n "$CPU_LIST" ]]; then
-  CPU_MASK=$(to_mask "$CPU_LIST")
-  [[ -z "$CPU_MASK" ]] && { err "CPU 列表解析失败: $CPU_LIST"; exit 1; }
-  echo "$CPU_MASK" > "$TRACE_DIR/tracing_cpumask" || { err "写入 tracing_cpumask 失败"; exit 1; }
-fi
+CPU_MASK=""
+if [[ -n "$CPU_LIST" ]]; then CPU_MASK=$(to_mask "$CPU_LIST"); fi
 
 # ---------- 事件集合 ----------
 if [[ "$MINIMAL" -eq 1 ]]; then
   EVENT_LIST="sched/sched_switch"
 else
   EVENT_LIST="sched/sched_migrate_task sched/sched_wakeup sched/sched_waking sched/sched_switch \
-sched/sched_wakeup_new task/task_newtask irq/irq_handler_entry irq/irq_handler_exit \
+sched/sched_wakeup_new task/task_newtask sched/sched_process_fork sched/sched_process_exec sched/sched_process_exit irq/irq_handler_entry irq/irq_handler_exit \
 irq/softirq_entry irq/softirq_exit irq/softirq_raise power/cpu_idle power/cpu_frequency"
 fi
 
-# ---------- 保存原配置 (结束后恢复) ----------
-SAVED_ON=$(cat "$TRACE_DIR/tracing_on" 2>/dev/null)
-SAVED_EVENTS=$(cat "$TRACE_DIR/events/enable" 2>/dev/null)
-SAVED_TRACER=$(cat "$TRACE_DIR/current_tracer" 2>/dev/null)
-SAVED_BUF=$(cat "$TRACE_DIR/buffer_size_kb" 2>/dev/null)
+# ---------- 私有 instance 清理（包括失败/信号/正常退出） ----------
+FREQ_PID=""; SNAP=""; CLEANED=0
 cleanup() {
-  info "恢复 tracing 原始配置..."
-  echo "$SAVED_ON"     > "$TRACE_DIR/tracing_on"     2>/dev/null
-  echo "$SAVED_TRACER" > "$TRACE_DIR/current_tracer" 2>/dev/null
-  echo "$SAVED_BUF"    > "$TRACE_DIR/buffer_size_kb" 2>/dev/null
-  [[ -n "$SAVED_MASK" ]] && echo "$SAVED_MASK" > "$TRACE_DIR/tracing_cpumask" 2>/dev/null
-  # 关闭本次启用的事件后, 恢复全局 enable 原值
-  for ev in $ENABLED_EVENTS; do echo 0 > "$TRACE_DIR/events/$ev/enable" 2>/dev/null; done
-  echo "$SAVED_EVENTS" > "$TRACE_DIR/events/enable" 2>/dev/null
-  echo > "$TRACE_DIR/trace" 2>/dev/null
+  (( CLEANED )) && return 0
+  CLEANED=1
+  [[ -n "$FREQ_PID" ]] && { kill "$FREQ_PID" 2>/dev/null; wait "$FREQ_PID" 2>/dev/null; }
+  if [[ "$INSTANCE_CREATED" == 1 ]]; then
+    echo 0 > "$TRACE_DIR/tracing_on" 2>/dev/null
+    echo 0 > "$TRACE_DIR/events/enable" 2>/dev/null
+    rmdir "$TRACE_DIR" 2>/dev/null || warn "独立 trace instance 清理失败: $TRACE_DIR"
+  fi
 }
 abort(){
   progress_clear
-  for j in $(jobs -pr 2>/dev/null); do kill "$j" 2>/dev/null; done  # 停掉后台导出/指示器
-  err "检测到中断信号, 停止采集并恢复环境..."
-  [[ -n "${SNAP:-}" ]] && rm -f "$SNAP"/.part_*.txt 2>/dev/null
-  cleanup
-  exit 1
+  for j in $(jobs -pr 2>/dev/null); do kill "$j" 2>/dev/null; done
+  err "采集被中断，清理独立 instance，保留已写入的证据"
+  exit 130
 }
+trap cleanup EXIT
 trap abort INT TERM
 ENABLED_EVENTS=""
+mkdir -p "$OUTDIR/cpu_trace/hostbound" || exit 1
+SNAP="$OUTDIR/cpu_trace"
+CAPS="$SNAP/hostbound/capabilities.tsv"
+printf 'event\texists\twritable\trequested\tenabled\treason\n' > "$CAPS"
+[[ -n "$CPU_MASK" ]] && { echo "$CPU_MASK" > "$TRACE_DIR/tracing_cpumask" || exit 1; }
+# mono 与 Python time.monotonic 同域；不支持时报告不做跨时钟关联。
+TRACE_CLOCK="unknown"
+if grep -qw mono "$TRACE_DIR/trace_clock"; then
+  echo mono > "$TRACE_DIR/trace_clock" && TRACE_CLOCK="mono"
+fi
+printf '%s\n' "$TRACE_CLOCK" > "$SNAP/hostbound/trace_clock.txt"
 
 # ---------- 环境初始化 ----------
 echo 0 > "$TRACE_DIR/tracing_on" 2>/dev/null
@@ -249,21 +268,37 @@ echo "$BUFFER_SIZE" > "$TRACE_DIR/buffer_size_kb" 2>/dev/null \
 echo > "$TRACE_DIR/trace" 2>/dev/null
 
 for ev in $EVENT_LIST; do
+  exists=0; writable=0; enabled=0; reason="unsupported"
   if [[ -f "$TRACE_DIR/events/$ev/enable" ]]; then
-    echo 1 > "$TRACE_DIR/events/$ev/enable" && ENABLED_EVENTS="$ENABLED_EVENTS $ev"
-  else
-    warn "内核不支持事件: $ev (跳过)"
+    exists=1; reason="permission_or_enable_failed"
+    [[ -w "$TRACE_DIR/events/$ev/enable" ]] && writable=1
+    if echo 1 > "$TRACE_DIR/events/$ev/enable" 2>/dev/null && [[ "$(cat "$TRACE_DIR/events/$ev/enable")" == 1 ]]; then
+      enabled=1; reason="ok"; ENABLED_EVENTS="$ENABLED_EVENTS $ev"
+    fi
   fi
+  printf '%s\t%s\t%s\t1\t%s\t%s\n' "$ev" "$exists" "$writable" "$enabled" "$reason" >> "$CAPS"
+  (( enabled )) || warn "事件不可用: $ev ($reason)"
 done
+if (( MINIMAL )); then
+  exists=0; writable=0
+  [[ -f "$TRACE_DIR/events/power/cpu_frequency/enable" ]] && exists=1
+  [[ -w "$TRACE_DIR/events/power/cpu_frequency/enable" ]] && writable=1
+  printf 'power/cpu_frequency\t%s\t%s\t0\t0\tnot_requested_minimal\n' "$exists" "$writable" >> "$CAPS"
+fi
 [[ -z "$ENABLED_EVENTS" ]] && { err "没有任何可用事件, 无法采集"; cleanup; exit 1; }
 ok "已启用事件:$ENABLED_EVENTS"
 print_banner
 
+# sched_stat_wait 仅探测，不默认开启（依赖内核schedstats配置，避免额外高频事件）。
+exists=0; writable=0
+[[ -f "$TRACE_DIR/events/sched/sched_stat_wait/enable" ]] && exists=1
+[[ -w "$TRACE_DIR/events/sched/sched_stat_wait/enable" ]] && writable=1
+printf 'sched/sched_stat_wait\t%s\t%s\t0\t0\tnot_requested_overhead_budget\n' "$exists" "$writable" >> "$CAPS"
 # ---------- 系统快照 ----------
-mkdir -p "$OUTDIR/cpu_trace" || { err "创建输出目录失败: $OUTDIR"; exit 1; }
-SNAP="$OUTDIR/cpu_trace"
+
 snap_file(){ [[ -r "$1" ]] && cp "$1" "$SNAP/$2" 2>/dev/null || echo "N/A (文件不存在)" > "$SNAP/$2"; }
 phase_begin "采集系统静态快照 (/proc, /sys)"
+: > "$SNAP/hostbound/export_errors.txt"
 snap_file /proc/cpuinfo     cpuinfo.txt
 snap_file /proc/stat        proc_stat.txt
 snap_file /proc/loadavg     loadavg.txt
@@ -285,11 +320,32 @@ snap_file /sys/devices/system/cpu/online  cpu_online.txt
   command -v numactl >/dev/null && numactl -H; } > "$SNAP/system_info.txt" 2>/dev/null
 phase_end "静态快照已写入 $SNAP/"
 
+# Python helper 为可选低开销增强；缺失时 ftrace/旧 HostBound 快照继续工作。
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+HELPER="$SCRIPT_DIR/host_snapshot.py"
+PYTHON=""; command -v python3 >/dev/null 2>&1 && PYTHON=python3
+if [[ -n "$PYTHON" && -r "$HELPER" ]]; then
+  "$PYTHON" "$HELPER" frequency --output "$SNAP/hostbound/frequency_start.json"
+  if (( DISCOVER )); then
+    "$PYTHON" "$HELPER" process --output "$SNAP/hostbound/process_start.json"
+    ps -e -o pid,ppid,psr,stat,comm,args > "$SNAP/hostbound/ps_start.txt" 2>&1
+    command -v pstree >/dev/null && pstree -p > "$SNAP/hostbound/pstree_start.txt" 2>&1
+    command -v npu-smi >/dev/null && npu-smi info > "$SNAP/hostbound/npu_smi_info_start.txt" 2>&1
+  fi
+else
+  warn "缺少 python3 或同目录 host_snapshot.py：sysfs 动态频率和 /proc 前后快照降级；ftrace 继续"
+  printf '%s\n' 'python3_or_helper_unavailable' > "$SNAP/hostbound/helper_error.txt"
+fi
+
 # ---------- 执行采集 ----------
 START_TS=$(date +%s); START_TIME=$(date "+%Y-%m-%d %H:%M:%S")
 echo "$START_TIME" > "$SNAP/trace_start_time.txt"
 phase_begin "ftrace 采集 (${DURATION}s · $([[ $MINIMAL -eq 1 ]] && echo 精简 || echo 全量)模式$([[ -n "$PID_LIST" ]] && echo " · HostBound:$PID_LIST"))"
 echo 1 > "$TRACE_DIR/tracing_on" || { err "开启 tracing 失败"; cleanup; exit 1; }
+if [[ -n "$PYTHON" && -r "$HELPER" ]]; then
+  "$PYTHON" "$HELPER" poll --output "$SNAP/hostbound/frequency_samples.jsonl" --interval "$FREQ_INTERVAL" --stop-file "$SNAP/hostbound/poll.stop" & FREQ_PID=$!
+fi
+echo 'CPU_HOST_WINDOW_START' > "$TRACE_DIR/trace_marker"
 T_COL0=$SECONDS; PREV_E=0; PREV_T=$T_COL0
 # 刷新节奏自适应: 短采集 0.5s 刷新, 越长越稀疏, 减少无谓开销
 COLLECT_STEP=0.5
@@ -313,7 +369,16 @@ while :; do
   (( ELAPSED>=DURATION )) && break
 done
 progress_clear
+echo 'CPU_HOST_WINDOW_END' > "$TRACE_DIR/trace_marker"
 echo 0 > "$TRACE_DIR/tracing_on"
+if [[ -n "$FREQ_PID" ]]; then
+  touch "$SNAP/hostbound/poll.stop"
+  wait "$FREQ_PID" || echo "frequency_poll_failed" >> "$SNAP/hostbound/helper_error.txt"; FREQ_PID=""
+fi
+if [[ -n "$PYTHON" && -r "$HELPER" ]]; then
+  "$PYTHON" "$HELPER" frequency --output "$SNAP/hostbound/frequency_end.json"
+  (( DISCOVER )) && "$PYTHON" "$HELPER" process --output "$SNAP/hostbound/process_end.json"
+fi
 END_TIME=$(date "+%Y-%m-%d %H:%M:%S"); echo "$END_TIME" > "$SNAP/trace_end_time.txt"
 phase_end "采集结束 ($END_TIME)"
 
@@ -336,7 +401,7 @@ if [[ ${#PER_CPU_TRACES[@]} -gt 0 ]]; then
     # 回收已完成的导出任务
     for pid in "${!RUNNING[@]}"; do
       if ! kill -0 "$pid" 2>/dev/null; then
-        wait "$pid" 2>/dev/null; unset "RUNNING[$pid]"; DONE=$((DONE+1))
+        wait "$pid" 2>/dev/null || printf 'cpu%s export_failed\n' "${RUNNING[$pid]}" >> "$SNAP/hostbound/export_errors.txt"; unset "RUNNING[$pid]"; DONE=$((DONE+1))
       fi
     done
     BYTES=$(stat -c %s "$SNAP"/.part_*.txt 2>/dev/null | awk '{s+=$1}END{print s+0}')
@@ -361,14 +426,22 @@ else
   # per_cpu 目录不存在时回退为读取全局 trace (兼容旧内核/特殊配置)
   phase_begin "导出 trace (兼容模式: 全局缓冲区)"
   spin_start "读取全局 trace 缓冲区"
-  cat "$TRACE_DIR/trace" > "$SNAP/trace.txt" 2>/dev/null
+  cat "$TRACE_DIR/trace" > "$SNAP/trace.txt" 2>/dev/null || echo "global_export_failed" >> "$SNAP/hostbound/export_errors.txt"
   spin_stop
   phase_end "已导出全局 trace 缓冲区 ($(fmt_bytes "$(stat -c %s "$SNAP/trace.txt" 2>/dev/null || echo 0)"))"
 fi
 shopt -u nullglob
 [[ -s "$SNAP/trace.txt" ]] || { err "trace 为空, 事件可能未产生或 buffer 溢出"; }
 # 记录 buffer 溢出情况 (注意: glob 不能加引号, 否则不展开)
-cat "$TRACE_DIR"/per_cpu/cpu*/stats/overrun 2>/dev/null | paste -sd+ | bc > "$SNAP/trace_overrun.txt" 2>/dev/null
+# stats 是文件而不是 stats/overrun；无 bc 依赖，记录每核丢失证据。
+mkdir -p "$SNAP/hostbound/trace_stats"
+for f in "$TRACE_DIR"/per_cpu/cpu*/stats; do
+  [[ -f "$f" ]] || continue
+  c="${f%/stats}"; c="${c##*/}"
+  cp "$f" "$SNAP/hostbound/trace_stats/$c.txt"
+done
+awk -F': *' '$1 ~ /^(overrun|commit overrun|dropped events)$/ {s+=$2} END {print s+0}' "$SNAP"/hostbound/trace_stats/cpu*.txt > "$SNAP/trace_overrun.txt"
+printf '%s\n' "${CPU_LIST:-$(cat /sys/devices/system/cpu/online)}" > "$SNAP/hostbound/collection_cpus.txt"
 
 cleanup
 
@@ -459,12 +532,17 @@ minimal_mode: $MINIMAL
 cpu_list_input: ${CPU_LIST:-all}
 hostbound_pid: ${PID_LIST:-none}
 enabled_events:$ENABLED_EVENTS
+trace_clock: $TRACE_CLOCK
+frequency_trace_unit: kHz
+frequency_interval_sec: $FREQ_INTERVAL
+process_discovery: $DISCOVER
+nproc: $(nproc 2>/dev/null)
 kernel: $(uname -r 2>/dev/null)
 hostname: $(hostname 2>/dev/null)
 trace_dir: $TRACE_DIR
 EOF
 phase_begin "打包采集包 (tar.gz 压缩)"
-PKG=$(realpath "$OUTDIR" 2>/dev/null || echo "$OUTDIR")/cpu_trace_$(date +%Y%m%d_%H%M%S).tar.gz
+PKG=$(realpath "$OUTDIR" 2>/dev/null || echo "$OUTDIR")/cpu_trace_$(date +%Y%m%d_%H%M%S)_$$.tar.gz
 spin_start "压缩打包中, 数据量大时需要数分钟"
 if tar -czf "$PKG" -C "$OUTDIR" cpu_trace 2>/dev/null; then
   spin_stop

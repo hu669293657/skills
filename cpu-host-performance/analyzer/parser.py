@@ -43,6 +43,9 @@ EVENT_KEYS = {
     "softirq_entry": "softirq_entry", "softirq_exit": "softirq_exit",
     "softirq_raise": "softirq_raise", "cpu_idle": "cpu_idle",
     "cpu_frequency": "cpu_frequency",
+    "sched_process_fork":"sched_process_fork", "sched_process_exec":"sched_process_exec",
+    "sched_process_exit":"sched_process_exit", "sched_stat_wait":"sched_stat_wait",
+    "tracing_mark_write":"tracing_mark_write",
 }
 
 class TraceData(object):
@@ -85,12 +88,23 @@ def _parse_kv(rest):
 
 def _norm_event_name(name):
     name = name.strip().rstrip(":")
+    name = name.split(":")[-1]
     return EVENT_KEYS.get(name, name)
+
+def validate_numeric_fields(event):
+    for key in ('prev_pid','next_pid','pid','child_pid','parent_pid','target_cpu','orig_cpu','dest_cpu','cpu_id','delay'):
+        if key in event.fields:int(str(event.fields[key]))
+
 
 def _mk_event(task, pid, cpu, ts, ename, rest):
     etype = _norm_event_name(ename)
     fields = _parse_kv(rest)
+    if etype == "tracing_mark_write":
+        fields["message"] = rest.strip()
     ev = Event(float(ts), int(cpu) if cpu is not None else None, etype, task, int(pid), fields)
+    for key in ("prev_pid","next_pid","pid","child_pid","parent_pid","target_cpu","orig_cpu","dest_cpu","cpu_id","delay"):
+        if key in fields:
+            int(str(fields[key]))  # raises into parse failure counter; never abort metrics later
     # 归一化常用字段
     if etype == "sched_switch":
         ev.fields.setdefault("prev_pid", "-1")
@@ -99,6 +113,7 @@ def _mk_event(task, pid, cpu, ts, ename, rest):
         ev.fields["idle_exit"] = (st == "4294967295" or st == "-1")
     if etype == "irq_handler_entry":
         ev.fields.setdefault("name", fields.get("irq", "?"))
+    validate_numeric_fields(ev)
     return ev
 
 def parse_ftrace_text(text, td):
@@ -183,11 +198,18 @@ def parse_chrome_json_text(text, td):
             continue
         # 关键字段映射
         for k in ("prev_pid", "next_pid", "pid", "target_cpu", "vec", "action",
-                  "irq", "name", "state", "cpu_id", "state_val"):
+                  "irq", "name", "state", "cpu_id", "state_val", "prev_state", "prev_comm", "next_comm",
+                  "comm", "child_pid", "parent_pid", "child_comm", "filename", "clone_flags", "delay", "orig_cpu", "dest_cpu", "success"):
             if k in args:
                 ev.fields[k] = args[k]
         if etype == "cpu_idle" and "state" in ev.fields:
             ev.fields["idle_exit"] = str(ev.fields["state"]) in ("4294967295", "-1")
+        try:
+            validate_numeric_fields(ev)
+        except (ValueError,TypeError):
+            td.parse_stats["total"]+=1
+            td.parse_stats["failed"]+=1
+            continue
         td.events.append(ev)
         parsed += 1
     td.parse_stats["total"] += parsed
@@ -235,7 +257,7 @@ def _load_dir_into_td(dirpath, td):
             # directory at any depth so PID/TID snapshots survive archive loading.
             parts = rel.split('/')
             hb_rel = '/'.join(parts[parts.index('hostbound'):]) if 'hostbound' in parts[:-1] else ''
-            is_hostbound_snapshot = bool(hb_rel) and (fn.endswith(".txt") or fn.endswith(".json"))
+            is_hostbound_snapshot = bool(hb_rel) and (fn.endswith((".txt", ".json", ".jsonl", ".tsv")))
             if fn in _SNAPSHOT_FILES or is_hostbound_snapshot:
                 try:
                     with io.open(fp, "r", encoding="utf-8", errors="replace") as f:
@@ -246,6 +268,12 @@ def _load_dir_into_td(dirpath, td):
                 low = fn.lower()
                 if low.startswith("trace") or low.endswith(".trace") or low.endswith(".log") or low.endswith(".json"):
                     found_trace.append(fp)
+    td.snapshot = snapshot
+    if "metadata.txt" in snapshot:
+        for line in snapshot["metadata.txt"].splitlines():
+            if ":" in line:
+                key, _, value = line.partition(":")
+                td.metadata[key.strip()] = value.strip()
     if not found_trace:
         td.warnings.append("未在输入中找到 trace 数据文件")
         return False
@@ -308,6 +336,8 @@ def _safe_extract_tar(tf, dest):
     members = []
     for m in tf.getmembers():
         _check_member_name(m.name)
+        if m.issym() or m.islnk() or m.isdev():
+            raise ValueError("拒绝归档链接或设备成员: %r" % m.name)
         total += int(m.size or 0)
         if total > _EXTRACT_MAX_TOTAL_BYTES:
             raise ValueError("累计解压大小超过上限 %d MB" % (_EXTRACT_MAX_TOTAL_BYTES // (1024 * 1024)))

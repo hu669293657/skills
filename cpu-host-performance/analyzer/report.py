@@ -4,10 +4,13 @@ HTML 渲染见 report_html.py
 """
 import os
 import io
+import json
 from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, IRQ_NAME_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
 from .diagnosis import THRESHOLDS
 from .report_html import render_html, _cs_limit
 from .npu_report import affinity_md, binding_md
+from .report_explanation import explanations_md, fmt
+from .report_sections import frequency_section, thread_section, core_table, coverage_section
 
 SEV_COLOR = {"CRITICAL": "#d64545", "WARNING": "#d98f00", "INFO": "#6b7280", "OK": "#2e9e5b"}
 SEV_CN = {"CRITICAL": "严重", "WARNING": "警告", "INFO": "提示", "OK": "健康"}
@@ -19,7 +22,7 @@ STATUS_CN = {"CRITICAL": "CRITICAL（严重异常）", "WARNING": "WARNING（存
 # SVG 图表工具
 # ================================================================
 def _esc(s):
-    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#x27;"))
 
 def svg_bar_chart(items, width=760, bar_h=16, gap=6, unit="%", color="#4a9eff", fmt=None):
     """横向条形图: items=[(label, value, color?)]"""
@@ -125,6 +128,8 @@ def render_md(m, diag):
     A("> 数据格式：%s ｜ 采集时长：%.1f 秒 ｜ 核心数：%d ｜ 分析时间：%s" % (
         m.get("format_name", "-"), st["duration"], st["n_cpus"], _now()))
     A("")
+    if m.get("metadata",{}).get("data_origin")=="SYNTHETIC_TEST_DATA":
+        A("> 合成测试数据 / SYNTHETIC TEST DATA，非真实服务器测量。")
     A("## 1. Executive Summary（结论摘要）")
     A("")
     A("### Host 状态：%s" % STATUS_CN.get(diag["host_status"], diag["host_status"]))
@@ -148,39 +153,11 @@ def render_md(m, diag):
     A("")
     A("## 2. 问题证据总表与根因判断")
     A("")
-    A("### 2.1 关键指标证据")
-    A("")
-    A("| 指标 | 当前值 | 基线/阈值 | 状态 |")
-    A("|------|-------:|-----------|------|")
-    avg_util = st.get("avg_util")
-    if avg_util is not None:
-        A(_md_metric_row("CPU 平均利用率", "%.1f%%" % avg_util, "<70% 健康",
-                         "⚠️ 偏高" if avg_util >= 70 else "正常"))
-    if st.get("max_util") is not None:
-        A(_md_metric_row("单核最高利用率", "%.1f%%" % st["max_util"], "<90% 健康",
-                         "⚠️ 饱和" if st["max_util"] >= 90 else "正常"))
-    sch = m.get("sched", {})
-    if sch.get("cs_rate") is not None:
-        A(_md_metric_row("上下文切换率", "%.0f 次/秒" % sch["cs_rate"],
-                         "全机 > %.0f×核数/s 偏高" % THRESHOLDS["cs_rate_high"],
-                         "偏高" if sch["cs_rate"] > _cs_limit(st["n_cpus"]) else "正常"))
-    if sch.get("lat_p99") is not None:
-        A(_md_metric_row("调度延迟 P99", "%.2f ms" % sch["lat_p99"], "≥5ms 警告 / ≥20ms 严重",
-                         "异常" if sch["lat_p99"] >= 5 else "正常"))
-    if sch.get("runnable_avg") is not None:
-        A(_md_metric_row("平均 runnable 任务数", "%.1f" % sch["runnable_avg"], "接近核心数说明排队",
-                         "正常" if (st["n_cpus"] and sch["runnable_avg"] < st["n_cpus"]) else "偏高"))
-    irq = m.get("irq", {})
-    A(_md_metric_row("硬中断总占比", "%.2f%%" % irq.get("total_ratio", 0), "单核≥15% 关注热点",
-                     "关注" if max([pc.get("irq_ratio", 0) for pc in m["per_cpu"].values()] or [0]) >= 15 else "正常"))
-    soft = m.get("softirq", {})
-    A(_md_metric_row("软中断总占比", "%.2f%%" % soft.get("total_ratio", 0), "单核≥20% 关注热点",
-                     "关注" if max([pc.get("softirq_ratio", 0) for pc in m["per_cpu"].values()] or [0]) >= 20 else "正常"))
-    if sch.get("lat_p99") is None:
-        A(_md_metric_row("调度延迟 P99", "无法计算", "-", "数据缺失"))
-    A("")
-    A("> 指标含义见第 13 节「指标与事件说明」。")
-    A("")
+    A("### 2.1 关键指标证据与解释")
+    A(explanations_md(m,diag))
+    sch=m.get("sched",{})
+    irq=m.get("irq",{})
+    soft=m.get("softirq",{})
     A("### 2.2 根因判断与证据链")
     A("")
     if p:
@@ -235,35 +212,16 @@ def render_md(m, diag):
     A("")
     A("## 6. CPU Core Balance（各核心负载）")
     A("")
-    A("| 核心 | 利用率 | 空闲比 | 上下文切换/s | 硬中断占比 | 软中断占比 |")
-    A("|-----|-------:|-------:|------------:|----------:|----------:|")
-    for c in sorted(m["per_cpu"].keys()):
-        pc = m["per_cpu"][c]
-        _k = pc.get("util_known", True)
-        util_s = ("%.1f%%" % pc["util"]) if _k else "N/A"
-        idle_s = ("%.1f%%" % pc["idle_ratio"]) if _k else "N/A"
-        A("| CPU %s | %s | %s | %.0f | %.1f%% | %.1f%% |"
-          % (c, util_s, idle_s, pc["cs_rate"], pc["irq_ratio"], pc["softirq_ratio"]))
-    n_unk = sum(1 for pc in m["per_cpu"].values() if not pc.get("util_known", True))
-    if n_unk:
-        A("")
-        A("> 注：%d 个核心无 idle 证据（静默核），利用率记为 N/A。" % n_unk)
-    A("")
-    known_pcs = {c: pc for c, pc in m["per_cpu"].items() if pc.get("util_known", True)}
-    hot = max(known_pcs.items(), key=lambda kv: kv[1]["util"]) if known_pcs else (None, None)
-    if hot[1]:
-        cold = min(known_pcs.items(), key=lambda kv: kv[1]["util"])
-        A("最高负载：%s（%.1f%%），最低：%s（%.1f%%）。%s"
-          % (hot[0], hot[1]["util"], cold[0], cold[1]["util"],
-             "**存在明显不均衡，详见问题详情。**" if hot[1]["util"] - cold[1]["util"] >= 40 else "负载分布尚可。"))
+    A(core_table(m))
+    A("完整折线/柱状图、单位分组与NUMA筛选见离线HTML第6节。")
     A("")
     A("## 7. Scheduler 调度分析")
     A("")
-    A("- 上下文切换总计 **%s** 次（%.0f 次/秒）%s" % (
-        format(sch.get("cs_total", 0), ","), sch.get("cs_rate", 0) or 0,
+    A("- 上下文切换总计 **%s** 次（%s 次/秒）%s" % (
+        fmt(sch.get("cs_total"),digits=0), fmt(sch.get("cs_rate"),digits=0),
         "— 上下文切换率过高会增加调度开销，任务碎片化明显。" if (sch.get("cs_rate") or 0) > _cs_limit(st["n_cpus"]) else ""))
-    A("- 唤醒总计 **%s** 次（%.0f 次/秒）— 唤醒率反映任务碎片化程度。" % (
-        format(sch.get("wakeup_total", 0), ","), sch.get("wakeup_rate", 0) or 0))
+    A("- 唤醒总计 **%s** 次（%s 次/秒）— 唤醒率反映任务碎片化程度。" % (
+        fmt(sch.get("wakeup_total"),digits=0), fmt(sch.get("wakeup_rate"),digits=0)))
     if sch.get("lat_avg") is not None:
         A("- 调度延迟：平均 %.3f ms，P50 %.3f ms，P95 %.2f ms，P99 %.2f ms，最大 %.2f ms（共 %s 次可配对样本）。" % (
             sch["lat_avg"], sch["lat_p50"], sch["lat_p95"], sch["lat_p99"], sch["lat_max"], format(sch["lat_count"], ",")))
@@ -283,7 +241,7 @@ def render_md(m, diag):
     A("")
     A("### 8.1 硬中断")
     A("")
-    A("硬中断总 CPU 占比 **%.2f%%**（%s 次）。" % (irq.get("total_ratio", 0), format(irq.get("total_count", 0), ",")))
+    A("硬中断全机观测占比 **%s**；单核最高 %s；配对次数 %s。" % (fmt(irq.get("total_ratio"),"%"),fmt(irq.get("max_cpu_ratio"),"%"),fmt(irq.get("total_count"),digits=0)))
     top_irq = irq.get("top_names") or []
     if top_irq:
         A("")
@@ -294,7 +252,7 @@ def render_md(m, diag):
     A("")
     A("### 8.2 软中断")
     A("")
-    A("软中断总 CPU 占比 **%.2f%%**（%s 次）。" % (soft.get("total_ratio", 0), format(soft.get("total_count", 0), ",")))
+    A("软中断全机观测占比 **%s**；单核最高 %s；配对次数 %s。" % (fmt(soft.get("total_ratio"),"%"),fmt(soft.get("max_cpu_ratio"),"%"),fmt(soft.get("total_count"),digits=0)))
     top_soft = soft.get("top_actions") or []
     if top_soft:
         A("")
@@ -308,25 +266,10 @@ def render_md(m, diag):
     A("")
     A("## 9. CPU Frequency / Idle 分析")
     A("")
-    freq = m.get("freq", {})
-    if freq.get("available"):
-        rows = [(c, fv) for c, fv in sorted(freq["per_cpu"].items())]
-        if rows:
-            A("| 核心 | 最低 MHz | 平均 MHz | 最高 MHz | 低频样本占比 |")
-            A("|------|--------:|--------:|--------:|------------:|")
-            for c, fv in rows[:32]:
-                A("| CPU %s | %.0f | %.0f | %.0f | %.0f%% |" % (
-                    c, freq_to_mhz(fv["min"]), freq_to_mhz(fv["avg"]), freq_to_mhz(fv["max"]), fv["low_ratio"]))
-            A("")
-        A("governor：%s。" % (m.get("governor") or "快照未提供"))
-        A("")
-        A("> 频率单位由 trace 原始值换算（常见 kHz/Hz，已自动识别）；仅凭 trace 不判定硬件故障。")
-    else:
-        A("trace 中无 cpu_frequency 事件，频率分析不可用（Available: Unavailable）。")
-    A("")
+    A(frequency_section(m))
     idle = m.get("idle", {})
     if idle.get("available"):
-        avgs = idle["per_cpu_ratio"]
+        avgs = {c:v for c,v in idle["per_cpu_ratio"].items() if v is not None}
         if avgs:
             A("各核空闲占比：平均 %.1f%%，最高 %.1f%%（%s），最低 %.1f%%（%s）。%s" % (
                 sum(avgs.values()) / len(avgs),
@@ -338,6 +281,7 @@ def render_md(m, diag):
     A("")
     A("## 10. Task / Thread 分析")
     A("")
+    A(thread_section(m))
     tk = m.get("tasks", {})
     def _tbl(rows, head, fmt_fn):
         if not rows:
@@ -389,6 +333,7 @@ def render_md(m, diag):
     A(_time_window_md(m))
     A("")
     A("## 13. 数据说明与指标解释")
+    A(coverage_section(m))
     A("")
     A("### 数据概况")
     A("")
@@ -398,7 +343,7 @@ def render_md(m, diag):
     A("- 可用事件：%s" % ", ".join(sorted(m.get("available", [])) or ["无"]))
     A("- 解析统计：总行 %s，成功 %s，失败 %s（失败行已自动跳过）" % (
         format(m["parse_stats"]["total"], ","), format(m["parse_stats"]["parsed"], ","), format(m["parse_stats"]["failed"], ",")))
-    A("- buffer 溢出：%s" % (m.get("buffer_overrun") or "0（未检测到溢出）"))
+    A("- buffer 溢出：%s" % ((m.get("buffer_overrun") or "0（统计已提供）") if m.get("buffer_overrun_known") else "未知（未提供丢失统计，不能当作0）"))
     hostbound_snapshots = [k for k in (m.get("snapshot", {}) or {}) if k.startswith("hostbound/")]
     if hostbound_snapshots:
         A("- HostBound 扩展快照：%s（已纳入证据覆盖说明；名称匹配本身不构成根因）。" % \
@@ -409,9 +354,9 @@ def render_md(m, diag):
     A("### 分析限制")
     A("")
     A("- trace 仅覆盖采集窗口，不代表长期行为。")
-    A("- 利用率基于 idle 事件/swapper 近似；user/system 区分依赖 /proc/stat（开机累计）。")
+    A("- 利用率基于连续switch有效区间，无switch可用cpu_idle降级；user/system快照为开机累计。")
     A("- 调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。")
-    A("- 频率单位自动换算可能存在平台差异，仅作相对比较。")
+    A("- 频率按显式单位转MHz；驱动报告值不等同于PMU实测频率。")
     A("")
     A("### 指标解释（每个指标是什么）")
     A("")
@@ -451,9 +396,9 @@ def _time_window_md(m):
     for i, v in top3:
         seg = "窗口 %.1f~%.1f 秒：利用率峰值 **%.1f%%**" % (i * b, (i + 1) * b, v)
         extra = []
-        if cs:
+        if cs and cs[i] is not None:
             extra.append("上下文切换 %.0f 次/秒" % cs[i])
-        if soft:
+        if soft and soft[i] is not None:
             extra.append("软中断占比 %.1f%%" % soft[i])
         if lat and lat[i] is not None:
             extra.append("调度延迟 P99 %.2f ms" % lat[i])
@@ -485,4 +430,6 @@ def generate_reports(m, diag, out_dir):
         f.write(md)
     with io.open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
+    with io.open(os.path.join(out_dir,'report_data.json'),'w',encoding='utf-8') as f:
+        json.dump({'schema_version':2,'units':{'time':'s','latency':'ms','frequency':'MHz','ratio':'percent','rate':'events/s'},'metrics':m,'diagnosis':diag},f,ensure_ascii=False,indent=2,allow_nan=False,default=lambda x:sorted(x) if isinstance(x,set) else str(x))
     return md_path, html_path
