@@ -10,7 +10,8 @@ from .diagnosis import THRESHOLDS
 from .report_html import render_html, _cs_limit
 from .npu_report import affinity_md, binding_md
 from .report_explanation import explanations_md, fmt, collection_actions_md
-from .report_sections import frequency_section, thread_section, core_table, coverage_section, topology_section
+from .report_sections import frequency_section, thread_section, core_table, coverage_section, topology_section, resource_section
+from .report_tables import limit_markdown_tables
 
 SEV_COLOR = {"CRITICAL": "#d64545", "WARNING": "#d98f00", "INFO": "#6b7280", "OK": "#2e9e5b"}
 SEV_CN = {"CRITICAL": "严重", "WARNING": "警告", "INFO": "提示", "OK": "健康"}
@@ -172,6 +173,7 @@ def render_md(m, diag):
         A("未发现需要根因判断的问题。")
     A("")
     A(affinity_md(m.get("npu_affinity", {})))
+    A(resource_section(m, summary=True))
     A("")
     A("## 3. 优化建议")
     A(binding_md(m.get("npu_affinity", {})))
@@ -179,13 +181,14 @@ def render_md(m, diag):
     A("## 4. 问题详情")
     A("")
     if diag["findings"]:
-        for i, f in enumerate(diag["findings"], 1):
+        for i, f in enumerate(diag["findings"][:100], 1):
             A(_md_finding(f, i))
             A("")
     else:
         A("未发现问题。")
         A("")
-    A("## 5. CPU 总体状态")
+    A("## 5. 机器资源与 CPU 总体状态")
+    A(resource_section(m))
     A("")
     ps = m.get("proc_stat") or {}
     if ps:
@@ -359,7 +362,7 @@ def render_md(m, diag):
     A("|------|------|")
     for k, v in EVENT_EXPLANATIONS.items():
         A("| %s | %s |" % (k, v))
-    return "\n".join(L)
+    return limit_markdown_tables("\n".join(L))
 
 def _task_hint(comm):
     from .metrics import _explain_task

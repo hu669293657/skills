@@ -1,4 +1,4 @@
-/* Complete evidence stays in the document. Search/sort only alter its view. */
+/* At most 100 rendered records per table; complete evidence stays in JSON. */
 (function () {
   'use strict';
   document.querySelectorAll('details.data-details').forEach(function (panel) {
@@ -32,7 +32,8 @@
         if (!row.hidden) shown += 1;
         body.appendChild(row);
       });
-      panel.querySelector('[data-table-count]').textContent = '显示 ' + shown + ' / ' + rows.length + ' 条';
+      var total = Number(table.getAttribute('data-total-rows')) || rows.length;
+      panel.querySelector('[data-table-count]').textContent = '显示 ' + shown + ' / ' + total + ' 条' + (total > rows.length ? '（搜索当前前100条）' : '');
     }
     input.addEventListener('input', update); select.addEventListener('change', update);
     direction.addEventListener('click', function () { ascending = !ascending; direction.textContent = ascending ? '升序' : '降序'; update(); });

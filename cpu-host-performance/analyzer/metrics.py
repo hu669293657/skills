@@ -184,6 +184,8 @@ def compute_metrics(td):
     m['timeseries']=build_timeseries(m,events)
     m['npu_affinity']=analyze_npu_affinity(m)
     m['topology']=analyze_topology(m)
+    from .resource_analysis import analyze_resources
+    m['resources']=analyze_resources(m)
     m['collection_integrity']=analyze_collection_integrity(m, getattr(td, 'source_files', {}))
     m['source_files']=getattr(td, 'source_files', {})
     m['npu_affinity']['collection_integrity']=m['collection_integrity']

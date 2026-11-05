@@ -7,7 +7,7 @@
 现场只需把 `scripts/cpu_trace_collect.sh` 这一个文件复制到 Linux 宿主机。采集使用 Bash 4+、awk、核心 utils 和内核 tracefs，不需要 Python、jq 或旁边任何文件。NPU/拓扑等可选命令按能力探测，缺失情况记入 Manifest。采集后把包带回有 Python 3.7+ 的机器离线分析。
 
 ```bash
-# 默认30秒、完整安全ftrace、HostBound、NPU发现、全机/proc前后快照
+# 默认3秒、完整安全ftrace、HostBound、NPU发现、全机/proc前后快照
 sudo bash scripts/cpu_trace_collect.sh
 
 # 自定义时长和新的输出目录
@@ -26,13 +26,15 @@ sudo bash scripts/cpu_trace_collect.sh --minimal --frequency-interval 2 --durati
 sudo bash scripts/cpu_trace_collect.sh --duration 10 --cpu-list 128-159 --buffer-size 4096 --output /tmp/cpu-case-005
 ```
 
-`--hostbound` 和 `--discover` 保留兼容，正常完整采集无需添加。`--minimal` 是主动选择的事件精简模式，并不关闭常规安全快照。每次使用新的输出目录；已存在的 `cpu_trace/` 会被拒绝覆盖。默认 sysfs 轮询1秒，最小0.2秒；每个 policy 读取一次。默认 buffer 为4096KB/核，256核约1GiB；实际内核占用、文字导出大小和全机线程快照耗时需现场核验。30秒是 trace 业务窗口，完整命令还包括前后快照及打包时间。
+`--hostbound` 和 `--discover` 保留兼容，正常完整采集无需添加。`--minimal` 是主动选择的事件精简模式，并不关闭常规安全快照。每次在指定输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/` 及同名 tar.gz；可连续重复执行，不覆盖旧数据。默认 sysfs 轮询1秒，最小0.2秒；每个 policy 读取一次。默认 buffer 为4096KB/核，256核约1GiB；实际内核占用、文字导出大小和全机线程快照耗时需现场核验。30秒是 trace 业务窗口，完整命令还包括前后快照及打包时间。
 
 采集使用私有 `instances/cpu_host_<collector-pid>`，不清空全局 trace 或覆盖其他工具配置。tracefs/实例不支持或无权限时停止 tracing，保留已获取的只读快照、Manifest 和错误信息，可直接分析 `cpu_trace/` 降级报告。正常结束、失败和信号退出都会清理私有实例。SIGKILL/断电可能遗留实例，应由管理员核验后处理。
 
 `collection_manifest.json` 同时保存在采集根目录和 `hostbound/`。逐命令记录请求、命令存在性、返回码、原始路径/大小/空文件、解析状态/数量、起止时间和失败原因。`COLLECTED`、`NO_ACTIVE_PROCESS`、`COMMAND_NOT_FOUND`、`PERMISSION_DENIED`、`UNSUPPORTED`、`PARSE_FAILED`、`NOT_REQUESTED`、`NOT_INCLUDED` 分别呈现，额外区分执行失败。Analyzer 核对包内文件，保留 `collector_status` 并生成 `collection_integrity`。ftrace 和 HostBound 完整性分开判断，复采建议按实际原因生成；原始数据已存在时优先离线修复解析/打包。[完整契约](references/collection_contract.md)
 
 全量启用：switch、成功wakeup/wakeup_new、waking（仅作背景）、migrate、task_newtask、process_fork/exec/exit、IRQ/SoftIRQ、cpu_idle、cpu_frequency。每项探测存在、可写、请求与开启读回结果；缺失事件不致命。sched_stat_wait只探测，避免默认增加高频事件；导入已有该事件时可提供补充累计值。
+
+资源采集继续使用单个sh，无Python/jq依赖。`resource_start/end.json`、`resource_samples.jsonl` 保存带时间的proc原文，分析端Python计算CPU增量、可用内存/Swap/回收/OOM、磁盘容量/inode、块设备I/O和PSI，并结合任务内存/pids限额给出资源风险候选。资源窗口与trace窗口分别标明，3秒窗口不能保证捕获所有瞬时问题或消除trace丢失。
 
 ## 离线分析
 
@@ -54,13 +56,13 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 
 ## 报告阅读
 
-固定13节：1摘要；2关键指标解释/候选证据链/NPU亲和性；3优化建议；4发现详情；5整体状态；6全CPU负载；7调度；8中断；9频率/Idle；10进程线程与竞争；11Affinity/NUMA；12时间窗口；13数据覆盖。
+固定13节：1摘要；2关键指标解释/候选证据链/NPU亲和性；3优化建议；4发现详情；5机器资源与CPU总体状态；6全CPU负载；7调度；8中断；9频率/Idle；10进程线程与竞争；11Affinity/NUMA；12时间窗口；13数据覆盖。
 
 第二节直接解释CPU平均利用率、单核最高利用率、上下文切换率、调度延迟P99、硬中断总占比、软中断总占比。每项有当前值、公式、关注原因、动态解读、诊断限制和可信度。阈值为可审查的经验筛选值，不是官方性能标准。
 
 第6节：默认全部CPU利用率折线；可切柱状图、NUMA、CPU范围和指标显隐。百分比、次数/秒、MHz分成独立指标组。256核全部保留，静默/未采集核心显示N/A。悬停/键盘聚焦显示数值；标记热点、均值、极值。无JS和打印使用全核静态图及表格。
 
-所有长表默认收缩，展开后支持搜索/排序并保留总记录数。第9节将 Frequency 与 Idle Residency 放在一个离线交互图中：共用时间轴，MHz 左轴、% 右轴；可按 CPU、NUMA、Policy 筛选并勾选系列，默认仅少量重点曲线。Idle 由进入/退出事件持续时间计算，`-1` 和无符号退出值不作为状态编号；未知区间显示 N/A。频率按策略域展示来源、接口失败和可靠性。查看 `frequency.status` 与 `event_status`：
+HTML/MD每类明细最多展示100条，并保留总记录数；长表默认收缩，搜索/排序仅作用于当前展示记录，完整数据在report_data.json中。2.3已移除逐PID全线程亲和证据表。第9节将 Frequency 与 Idle Residency 放在一个离线交互图中：共用时间轴，MHz 左轴、% 右轴；可按 CPU、NUMA、Policy 筛选并勾选系列，默认仅少量重点曲线。Idle 由进入/退出事件持续时间计算，`-1` 和无符号退出值不作为状态编号；未知区间显示 N/A。频率按策略域展示来源、接口失败和可靠性。查看 `frequency.status` 与 `event_status`：
 
 | 状态 | 含义 |
 |---|---|
@@ -77,7 +79,7 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 
 第10节首先展示 AI 进程、潜在竞争者和系统任务摘要，Top N 之外及无关进程进入可展开列表。TID→TGID→PPID→cgroup→NPU 的关联附 HIGH/MEDIUM/LOW 置信度；名称只作线索。完整线程身份、运行/等待、Affinity、全部竞争重叠窗口和原始快照保留在 JSON。
 
-CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；每个可执行方案检查稳定宿主机 PID/TID、在线 CPU、逐线程 cpuset、完整 SMT 核心组和分区互斥。已合规进程不重复生成命令。第三部分代码块只提供具体 taskset 命令：整进程 `taskset -apc CPU_LIST PID`，指定线程 `taskset -pc CPU_LIST TID`。`-a` 不包含子进程，已知且证据完整的子 PID 分别列出；已有合规窄掩码予以保留。不附执行框架、Python 或查询命令。直接命令执行前需确认身份与资源配置仍与快照一致；taskset 不迁移现有内存页。
+CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；若共同的完整在线本地亲和池、宿主机身份和全TID cpuset均已核验，则生成共享池taskset命令（不承诺隔离）；每个可执行方案检查稳定宿主机 PID/TID、在线 CPU、逐线程 cpuset、完整 SMT 核心组和分区互斥。已合规进程不重复生成命令。第三部分代码块只提供具体 taskset 命令：整进程 `taskset -apc CPU_LIST PID`，指定线程 `taskset -pc CPU_LIST TID`。`-a` 不包含子进程，已知且证据完整的子 PID 分别列出；已有合规窄掩码予以保留。不附执行框架、Python 或查询命令。直接命令执行前需确认身份与资源配置仍与快照一致；taskset 不迁移现有内存页。
 
 竞争候选必须有可运行等待与同核运行时间重叠，Affinity只作旁证。NPU直接归属与父子关联不同；单纯Python名称、CPU高、共享Affinity、R/R+都不能认定根因。没有同域Device窗口时仅报告Host侧风险。详见 [数据契约、算法与限制](references/analysis_v2.md)。
 

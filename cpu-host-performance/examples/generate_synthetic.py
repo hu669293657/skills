@@ -121,6 +121,21 @@ def generate(output):
     eventnames=['sched/sched_switch','sched/sched_wakeup','sched/sched_wakeup_new','sched/sched_migrate_task','sched/sched_process_fork','sched/sched_process_exec','sched/sched_process_exit','irq/irq_handler_entry','irq/irq_handler_exit','irq/softirq_entry','irq/softirq_exit','power/cpu_frequency','power/cpu_idle']
     js('capabilities.json',{'events':{e:{'exists':True,'writable':True,'requested':True,'enabled':True} for e in eventnames}})
     js('device_windows.json',{'clock':'mono','data_origin':'SYNTHETIC_TEST_DATA','windows':[{'npu_id':4,'start':1000.021,'end':1000.06,'kind':'synthetic_device_gap'}]})
+    # Resource evidence is synthetic too; exercise memory, storage and PSI paths.
+    for phase,ts,used,idle,avail,sectors,io_ms,stall in [
+            ('start',1000,10000,90000,16000000,1000,100,100),
+            ('end',1010,16000,94000,8000000,1201000,9600,1000100)]:
+        raw={'/proc/stat':'cpu %d 0 0 %d 0 0 0 0\n'%(used,idle),
+             '/proc/loadavg':'64.00 48.00 32.00 20/2000 12345\n',
+             '/proc/meminfo':'MemTotal: 536870912 kB\nMemAvailable: %d kB\nMemFree: 1000000 kB\nSwapTotal: 16777216 kB\nSwapFree: 8000000 kB\n'%avail,
+             '/proc/vmstat':'pswpin %d\npswpout %d\noom_kill 0\n'%(100 if phase=='start' else 300,100 if phase=='start' else 500),
+             '/proc/diskstats':'259 0 nvme0n1 1000 0 %d 300 2000 0 100000 400 0 %d 1000\n'%(sectors,io_ms),
+             '/proc/pressure/memory':'some avg10=5.0 avg60=2.0 avg300=1.0 total=%d\n'%stall,
+             '/proc/pressure/io':'some avg10=10.0 avg60=3.0 avg300=1.0 total=%d\n'%stall}
+        js('resource_'+phase+'.json',{'ts':ts,'clock':'boottime','files':{key:{'text':value,'status':'COLLECTED'} for key,value in raw.items()}})
+    write('hostbound/resources/df_blocks.txt','Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/nvme0n1 3750000000 3650000000 100000000 98% /data\n')
+    write('hostbound/resources/df_inodes.txt','Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/nvme0n1 1000000 980000 20000 98% /data\n')
+    write('hostbound/resources/lsblk.txt','NAME="nvme0n1" SIZE="3840000000000" TYPE="disk" ROTA="0" MOUNTPOINT="/data"\n')
     # The fixture declares synthetic file generation, never vendor execution.
     for filename, value in [('interrupts.txt','CPU0\n32: 1 synthetic'),('softirqs.txt','CPU0\nNET_RX: 1'),
                             ('proc_stat.txt','cpu 1 0 1 8 0 0 0 0'),('schedstat.txt','version 15\ncpu0 0 0 0 0 0 0 100 10 1')]:
@@ -131,7 +146,7 @@ def generate(output):
              ('processes','hostbound/process_start.json'),('processes','hostbound/process_end.json'),
              ('numa_process','hostbound/process_end.json'),('frequency','hostbound/frequency_samples.jsonl'),
              ('irq','interrupts.txt'),('softirq','softirqs.txt'),('proc_stat','proc_stat.txt'),('schedstat','schedstat.txt'),
-             ('idle','trace.txt'),('trace','trace.txt')]
+             ('idle','trace.txt'),('trace','trace.txt'),('resources','hostbound/resource_start.json'),('resources','hostbound/resource_end.json'),('resources','hostbound/resources/df_blocks.txt'),('resources','hostbound/resources/df_inodes.txt'),('resources','hostbound/resources/lsblk.txt')]
     for category,path in paths:
         manifest['entries'].append({'category':category,'requested':True,'command':['synthetic_fixture_generator'],
             'command_exists':True,'returncode':0,'raw_path':path,'raw_exists':True,'empty':False,

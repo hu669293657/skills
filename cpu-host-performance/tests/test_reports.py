@@ -87,7 +87,9 @@ class ReportDisclosureTests(unittest.TestCase):
         self.assertIn('256', h)
         self.assertIn('data-table-search', h)
         self.assertIn('data-table-sort', h)
-        self.assertIn('<td>255</td>', h)
+        self.assertNotIn('<td>255</td>', h)
+        self.assertIn('<td>99</td>', h)
+        self.assertIn('report_data.json', h)
 
     def test_one_combined_frequency_idle_chart_embeds_policy_unique_data(self):
         from analyzer.report_sections import frequency_section
@@ -147,4 +149,4 @@ class ReportDisclosureTests(unittest.TestCase):
         self.assertIn('当前 allowed CPU',h[:first])
         self.assertIn('原因',h[first:])
         self.assertIn('验证方法',h[first:])
-        self.assertIn('此PID全部线程亲和证据',h[first:])
+        self.assertNotIn('此PID全部线程亲和证据',h)

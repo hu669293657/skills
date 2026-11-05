@@ -10,7 +10,7 @@ from .diagnosis import THRESHOLDS
 from .npu_report import affinity_html, binding_html
 from .report_explanation import explanations_html, fmt, collection_actions_html, collection_integrity_html
 from .report_tables import enhance_long_tables, table_script
-from .report_sections import frequency_section, thread_section, core_table, coverage_section, topology_section, interrupt_tables
+from .report_sections import frequency_section, thread_section, core_table, coverage_section, topology_section, interrupt_tables, resource_section
 from .core_balance import render_core_balance
 
 
@@ -237,18 +237,20 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     else:
         A("<p>未发现需要根因判断的问题。</p>")
     A(affinity_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
+    A(resource_section(m, True, summary=True))
     # ---------- 3. 建议 ----------
     A("<h2>3. 优化建议</h2>")
     A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
     # ---------- 4. 问题详情 ----------
     A("<h2>4. 问题详情</h2>")
     if diag["findings"]:
-        for f in diag["findings"]:
+        for f in diag["findings"][:100]:
             A(_finding_html(f, esc, sev_color, sev_cn))
     else:
         A("<p>未发现问题。</p>")
     # ---------- 5. 总体状态 ----------
-    A("<h2>5. CPU 总体状态</h2>")
+    A("<h2>5. 机器资源与 CPU 总体状态</h2>")
+    A(resource_section(m, True))
     ps = m.get("proc_stat") or {}
     if ps:
         A("<div class='card'><p>/proc/stat 快照（开机以来累计）：user %.1f%%、system %.1f%%、iowait %.1f%%、"

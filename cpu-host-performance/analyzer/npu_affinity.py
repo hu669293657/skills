@@ -384,6 +384,28 @@ def analyze_npu_affinity(m):
             for row in pending:
                 row['blockers'].append('工作进程可用 CPU 部分重叠，缺少可核验的分配策略')
             continue
+        weights = []
+        for row in pending:
+            tasks = [t for t in m.get('thread_metrics', []) if t.get('tgid') == row['pid'] and not t.get('identity_ambiguous')]
+            weights.append(sum((t.get('runtime_sec') or 0) + (t.get('runqueue_wait_sec') or 0) for t in tasks))
+        group_pids = {r['pid'] for r in group}
+        occupants = [r for r in rows if r['pid'] and cpus(r['affinity']) & pool]
+        unknown_peer = any(r['pid'] not in group_pids for r in occupants)
+        if unknown_peer or (len(group) > 1 and (not all(w > 0 for w in weights) or not m.get('scheduler_quality', {}).get('complete'))):
+            mapped = cpus(group[0]['affinity'])
+            valid_pool = (all(cpus(r['affinity']) == mapped for r in occupants) and
+                          all(mapped <= nodes.get(r['numa'][0], set()) for r in group) and
+                          pool == mapped & online)
+            if valid_pool:
+                for row in pending:
+                    row['target'] = cpu_list(pool)
+                    row['allocation_mode'] = 'SHARED_LOCALITY'
+                    row['recommendation_status'] = 'PROPOSED_SHARED'
+                    row['reasons'].append('调度证据不足以细分互斥核组；按已核验拓扑、身份及全 TID cpuset 约束到完整在线本地亲和池，组内共享，不按卡数均分。')
+                continue
+            for row in pending:
+                row['blockers'].append('共享池负载证据不完整，且无法核验共同的完整在线本地亲和池')
+            continue
         units = defaultdict(set)
         for cpu in pool:
             if cpu in cores:
@@ -400,16 +422,6 @@ def analyze_npu_affinity(m):
             for row in pending:
                 row['blockers'].append('缺少完整且互斥的在线物理核心/SMT 同胞组')
             continue
-        weights = []
-        for row in pending:
-            ts = [t for t in m.get('thread_metrics', []) if t.get('tgid') == row['pid'] and not t.get('identity_ambiguous')]
-            runtime = sum(t.get('runtime_sec') or 0 for t in ts)
-            wait = sum(t.get('runqueue_wait_sec') or 0 for t in ts)
-            weights.append(runtime + wait)
-        if len(group) > 1 and (not all(w > 0 for w in weights) or not m.get('scheduler_quality', {}).get('complete')):
-            for row in pending:
-                row['blockers'].append('共享亲和 CPU 缺少各工作进程完整 runtime/等待负载证据，不能按卡数平均分区')
-            continue
         counts = [1] * len(pending)
         extra = len(available) - len(pending)
         total = sum(weights)
@@ -424,12 +436,15 @@ def analyze_npu_affinity(m):
             target = set().union(*available[offset:offset + count]); offset += count
             row['target'] = cpu_list(target)
             row['recommendation_status'] = 'PROPOSED' if not row['blockers'] else 'BLOCKED'
+            row['allocation_mode'] = 'EXCLUSIVE_CORE_GROUPS'
             row['reasons'].append('仅使用显式 NPU CPU 映射与全 TID cpuset 交集；完整 SMT 核心组互斥。')
             if len(group) > 1:
                 row['reasons'].append('按已观测进程 runtime + runnable wait 权重分配核心组；分配需业务灰度验证。')
     # Pools that look disjoint at logical CPU level may still share one physical core.
     owners = defaultdict(list)
     for row in rows:
+        if row.get('allocation_mode') == 'SHARED_LOCALITY':
+            continue
         for key in {cores[c] for c in cpus(row['target']) if c in cores}:
             owners[key].append(row)
     for owners_rows in owners.values():
@@ -448,7 +463,7 @@ def analyze_npu_affinity(m):
             actions.append(row)
         if not row['reasons']:
             row['reasons'] = ['当前证据不足以提出安全的具体 CPU 掩码。']
-    notes.append('不按卡数或 NUMA 节点等分 CPU；不默认预留系统核。共享范围只有完整运行/等待证据支持时才提出互斥核心组方案。')
+    notes.append('不按卡数或 NUMA 节点等分 CPU；不默认预留系统核。完整运行/等待证据支持互斥核心组；调度证据不足时仅在拓扑、身份和 cpuset 均已核验后给共享本地亲和池方案，不承诺隔离或性能收益。')
     children, child_evidence = _child_binding_actions(rows, m, online) if context.get('execution_context') == 'host' else ([], [])
     actions.extend(children)
     return {'rows': rows, 'notes': notes, 'host_context': context,

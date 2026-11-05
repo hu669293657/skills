@@ -1,5 +1,14 @@
 # 升级最终验证
 
+## 2026-11-05 3秒采集、资源与展示优化
+
+全量回归 `python -X utf8 -m unittest discover -s tests -v`：179项通过（91.149秒）。随后新增NPU卡片/命令展示上限回归并复测报告、绑核与真实离线浏览器交互：56项通过（3.876秒）。单文件采集仍不依赖Python/jq；每次mktemp原子生成时间目录，默认3秒，旧目录保留。
+
+资源数据包含原始proc前后/周期快照、df容量/inode、lsblk、CPU与v1/v2 memory/pids控制器限额；在Python端计算CPU/内存/Swap/回收/OOM/I/O/PSI并形成风险候选。已验证计数回退、混时钟、坏JSON、仅磁盘容量清单、v1独立挂载、重复采集、完整JSON保留和每类记录最多100条。2.3已删除逐PID线程证据表，空NUMA显示文字；调度数据不完整时按已核验共同亲和池给SHARED_LOCALITY建议，不声称隔离。
+
+独立只读fixture复核原5个边界问题全部通过。仅Windows/Git Bash、合成proc/sysfs/tracefs及本地离线Chromium验证，未连接Ascend目标服务器。以下保留历史记录。
+
+
 ## 2026-11-05 单文件采集与直接绑核命令
 
 本轮执行 `python -X utf8 -m unittest discover -s tests -v`：169 项全部通过，79.512 秒；skill-creator 格式校验、Bash 语法与 Git diff 空白检查通过。现场 scripts 目录仅保留 cpu_trace_collect.sh，LF 行尾，不需要 Python/jq/helper 文件。原 Python 采集 helper 与其专属测试已替换为单文件 Bash/awk 测试。

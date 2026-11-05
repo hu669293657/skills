@@ -79,7 +79,7 @@ CPU Host 性能分析报告骨架模板
 
 **优化动作**：见第三部分。
 
-## 5. CPU 总体状态
+## 5. 机器资源与 CPU 总体状态
 
 <!-- 总利用率、每核利用率分布、runnable 占比、idle 占比；异常核单独点出 -->
 | CPU | 利用率 | runnable占比 | idle占比 | IRQ占比 | SoftIRQ占比 |
@@ -87,6 +87,8 @@ CPU Host 性能分析报告骨架模板
 | {N} | {%} | {%} | {%} | {%} | {%} |
 
 > 指标解释：{util / runnable / idle / irq_ratio / softirq_ratio 的中文释义}
+
+{展示CPU容量/负载/增量、内存MemAvailable/Swap/回收/OOM、磁盘容量/inode/I/O、PSI、cgroup内存/pids限额；缺失用N/A，资源窗口与trace分别注明。每类明细最多100条，完整记录保留JSON。}
 
 ## 6. CPU Core Balance（各核心负载）
 

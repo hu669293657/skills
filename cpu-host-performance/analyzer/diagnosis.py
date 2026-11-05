@@ -422,6 +422,15 @@ def diagnose(m):
             '所属任务可能被CPU配额限制，整机空闲仍可能排队',
             'cgroup自身或祖先限额；累计增量覆盖整个cgroup，尚未证明单个Worker受限',
             ['对照cpu.max及祖先配额、nr_throttled增量和Worker等待时间；用户确认调整配额后同负载复测'])
+    for candidate in m.get('resources', {}).get('risks', []):
+        add(candidate['type'], 'WARNING', 'MEDIUM', candidate['title'],
+            [{'metric': '机器资源证据', 'value': candidate['evidence'],
+              'threshold': '经验筛选：内存可用<10%；文件系统空间/inode≥95%；I/O PSI≥5%；cgroup使用≥95%',
+              'source': '资源前后快照/proc/df/cgroup',
+              'time_window': str(m.get('resources', {}).get('window', []))}],
+            candidate['note'], '资源容量、压力或任务配额可能限制业务',
+            ['结合相同业务窗口的吞吐/时延与 Device 时间线核验；资源压力本身不等于已确认的 HostBound 根因'])
+        findings[-1]['evidence_state'] = candidate['evidence_state']
     # ============ 汇总 ============
     sev_rank = {"CRITICAL": 3, "WARNING": 2, "INFO": 1, "OK": 0}
     conf_rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}

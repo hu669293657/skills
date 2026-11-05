@@ -2,7 +2,7 @@
 from html import escape
 from .report_explanation import fmt
 from .npu_affinity import _topology, cpu_list
-from .report_tables import disclose_table
+from .report_tables import disclose_table, limit_markdown_tables
 from .frequency_idle_chart import render_frequency_idle
 
 
@@ -18,7 +18,7 @@ def table(headers,rows,html=False,title="完整明细",force=False):
         markup = '<div class="core-table-scroll"><table><thead><tr>'+''.join('<th>%s</th>'%escape(x) for x in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>%s</td>'%escape(_text(x)) for x in row)+'</tr>' for row in rows)+'</tbody></table></div>'
         return disclose_table(markup,title,len(rows),force)
     def clean(x):return _text(x).replace('|','\\|').replace('\n',' ')
-    return '| '+' | '.join(headers)+' |\n|'+'|'.join('---' for _ in headers)+'|\n'+'\n'.join('| '+' | '.join(clean(x) for x in row)+' |' for row in rows)+'\n'
+    return limit_markdown_tables('| '+' | '.join(headers)+' |\n|'+'|'.join('---' for _ in headers)+'|\n'+'\n'.join('| '+' | '.join(clean(x) for x in row)+' |' for row in rows))+'\n'
 
 
 def paragraph(text,html):
@@ -134,6 +134,54 @@ def topology_section(m,html=False):
         rows.append([node.get('node'),cpu_list(node.get('cpus',[])),gib(node.get('total_kb',memory.get('MemTotal'))),gib(node.get('free_kb',memory.get('MemFree'))),node.get('distance_by_node') or node.get('distance'),node.get('errors',{})])
     out.append(table(['NUMA','CPU列表','内存容量','内存空闲','节点距离','读取限制'],rows,html,title='全部NUMA拓扑与容量',force=html))
     out.append(paragraph('CPU许可范围、PSR/trace运行位置、Mems_allowed许可内存节点、numa_maps/numastat实际页分布分别核验。节点距离是拓扑成本提示，实际页不在本地不能单独证明跨节点访问导致性能损失；相关任务证据见2.3节。',html))
+    return ''.join(out) if html else '\n'.join(out)
+
+
+def resource_section(m, html=False, summary=False):
+    r = m.get('resources', {})
+    out = [heading('2.4 机器资源风险' if summary else '机器资源与压力（CPU / 内存 / 磁盘）', html)]
+    if not r.get('available'):
+        out.append(paragraph('本包缺少机器资源数据；无法据此排除内存、磁盘或资源配额不足。', html))
+        return ''.join(out) if html else '\n'.join(out)
+    out.append(paragraph('资源快照窗口 %s 秒，共 %s 份样本；与 trace 窗口分别计时。%s' %
+        (fmt(r.get('window_sec')), r.get('sample_count', 0), r.get('note', '')), html))
+    risks = r.get('risks', [])
+    if risks:
+        out.append(table(['风险候选', '依据', '判断限制'], [[x['title'], x['evidence'], x['note']] for x in risks], html, title='机器资源风险明细'))
+    else:
+        out.append(paragraph('已有资源数据未触发经验筛选条件；短窗口不能排除其他时段的资源不足。', html))
+    if summary:
+        return ''.join(out) if html else '\n'.join(out)
+    cpu, memory = r.get('cpu', {}), r.get('memory', {})
+    def gib(kb):
+        return fmt(kb / 1048576., ' GiB') if isinstance(kb, (int, float)) else 'N/A'
+    vm_text = '；'.join('%s %s' % (name, fmt(r.get('vm', {}).get(key), digits=0)) for name, key in
+        [('换入页', 'pswpin_delta'), ('换出页', 'pswpout_delta'), ('重大缺页', 'pgmajfault_delta'),
+         ('直接回收页', 'pgscan_direct_delta'), ('OOM kill', 'oom_kill_delta')])
+    out.append(table(['资源', '当前容量 / 状态', '含义'], [
+        ['CPU', '%s 逻辑核；窗口忙碌 %s；I/O wait %s；Load1 %s' % (fmt(cpu.get('logical_cpus'), digits=0), fmt(cpu.get('busy_percent'), '%'), fmt(cpu.get('iowait_percent'), '%'), fmt(cpu.get('load1'))), '来自 /proc/stat 前后增量；Load1 是1分钟负载，并非3秒均值'],
+        ['内存', '总量 %s；MemAvailable %s（%s）；窗口最低 %s' % (gib(memory.get('total_kb')), gib(memory.get('available_kb')), fmt(memory.get('available_percent'), '%'), fmt(memory.get('minimum_available_percent'), '%')), '可用内存采用 MemAvailable，不用 MemFree 代替'],
+        ['Swap', '总量 %s；剩余 %s' % (gib(memory.get('swap_total_kb')), gib(memory.get('swap_free_kb'))), '无 Swap 不等于异常；增量缺失显示 N/A'],
+        ['内存回收 / OOM', vm_text, '计数回退或窗口不足不计算增量']
+    ], html))
+    out.append(table(['文件系统', '挂载点', '容量', '剩余', '空间使用率', 'inode使用率'], [
+        [x['device'], x['mount'], gib(x['total_kb']), gib(x['available_kb']), fmt(x.get('used_percent'), '%'), fmt(x.get('inode_used_percent'), '%')]
+        for x in r.get('filesystems', [])], html, title='文件系统容量与 inode'))
+    out.append(table(['磁盘/块设备', '类型', '容量', '读取', '写入', 'IOPS', '平均请求耗时', 'I/O忙碌', '当前在途I/O'], [
+        [x['name'], x.get('type'), gib(x['size_bytes']/1024.) if x.get('size_bytes') is not None else 'N/A',
+         fmt(x['read_bytes_per_sec']/1048576., ' MiB/s') if x.get('read_bytes_per_sec') is not None else 'N/A',
+         fmt(x['write_bytes_per_sec']/1048576., ' MiB/s') if x.get('write_bytes_per_sec') is not None else 'N/A',
+         fmt(x.get('iops')), fmt(x.get('await_ms'), ' ms'), fmt(x.get('busy_percent'), '%'), x.get('in_flight')]
+        for x in r.get('disks', [])], html, title='磁盘 I/O 明细'))
+    out.append(table(['CPU/内存/I/O', '压力类型', '窗口停顿比例', '过去10秒平均', '过去60秒平均'], [
+        [resource, kind, fmt(x.get('stall_percent'), '%'), fmt(x.get('avg10'), '%'), fmt(x.get('avg60'), '%')]
+        for resource, kinds in r.get('pressure', {}).items() for kind, x in kinds.items()], html, title='PSI 资源压力'))
+    out.append(table(['cgroup', '内存用量', '内存限额', '进程/线程数', '数量限额', 'OOM kill增量'], [
+        [x['path'], gib(x['memory_current_bytes']/1024.) if x.get('memory_current_bytes') is not None else 'N/A',
+         gib(x['memory_max_bytes']/1024.) if x.get('memory_max_bytes') is not None else '无限额或未知',
+         x.get('pids_current'), x.get('pids_max'), x.get('oom_kill_delta')] for x in r.get('cgroups', [])], html, title='任务资源配额'))
+    for note in r.get('limitations', []):
+        out.append(paragraph(note, html))
     return ''.join(out) if html else '\n'.join(out)
 
 

@@ -1,16 +1,17 @@
 # 默认完整采集与证据契约
 
-此契约用于解释 Manifest、读取原始数据和判断是否复采。入口是 `sudo bash scripts/cpu_trace_collect.sh`，默认30秒全量事件、HostBound、NPU自动发现及全机进程/线程前后快照。安全快照仍受内核能力、工具和权限限制；完整采集指尝试并记录所有常规能力，不能承诺每台机器都有每项数据。
+此契约用于解释 Manifest、读取原始数据和判断是否复采。入口是 `sudo bash scripts/cpu_trace_collect.sh`，默认3秒全量事件、HostBound、NPU自动发现及全机进程/线程前后快照。安全快照仍受内核能力、工具和权限限制；完整采集指尝试并记录所有常规能力，不能承诺每台机器都有每项数据。
 
 ## 数据链
 
-1. `cpu_trace_collect.sh` 探测环境，先保留只读快照，再创建私有 trace instance。
+1. `cpu_trace_collect.sh` 每次原子创建带时间及随机后缀的独立采集目录，再保留只读快照、创建私有 trace instance；tar.gz与目录同名。
 2. 同一个 sh 内的 Bash/awk 函数逐命令/接口记录状态，标准化 sysfs、proc、cgroup 和身份；现场无需 Python、jq 或其他脚本。
 3. NPU 三个原始命令保存在 `hostbound/npu_smi_info{_start,}.txt`、`npu_smi_map.txt`、`npu_smi_topology.txt`，离线分析时由 `analyzer/npu_parser.py` 解析，采集端保留原文与返回码，不依赖 Python 生成 NPU 规范化副本。显式保留解析错误，不能把格式变化解释成没有任务。
 4. `hostbound/numa_topology.json` 与 `hostbound/sysfs/node/nodeN/{cpulist,distance,meminfo}` 保存 NUMA 降级证据；lscpu、lscpu 扩展/可解析输出、numactl、numastat 保留原文。
 5. `process_start/end.json` 保留所有可读进程与线程；所有进程保留 NUMA 页汇总，指定目标另保存 NUMA 原始文件与 numastat -p。`frequency_start/end.json`、`frequency_samples.jsonl` 和 `idle_start/end.json` 是各自的 sysfs 来源。
-6. 根目录及 hostbound 的 Manifest 随整个 `cpu_trace/` 打包。`parser.py` 保留声明的原始文件和真实包内路径清单，不把 JSONL/vendor 原始输出误当 trace。
-7. `collection_integrity.py` 对账声明、包内存在性及实际解析；`report_data.json` 保留原文、字段、来源与诊断；HTML 展示摘要和可展开完整数据。
+6. 资源原始快照位于 `hostbound/resource_start/end.json` 及 `resource_samples.jsonl`，包含boottime时间和 `/proc/stat/loadavg/meminfo/vmstat/diskstats/pressure/{cpu,memory,io}` 等原文及缺失状态。`hostbound/resources/df_blocks.txt`、`df_inodes.txt`、`lsblk.txt` 保留容量/inode/块设备原文。进程 cgroup 快照另含memory/pids限制；资源分析不依赖ftrace完整性。
+7. 根目录及 hostbound 的 Manifest 随整个 `cpu_trace/` 打包。`parser.py` 保留声明的原始文件和真实包内路径清单，不把 JSONL/vendor 原始输出误当 trace。
+8. `collection_integrity.py` 对账声明、包内存在性及实际解析；`report_data.json` 保留原文、字段、来源与诊断；HTML 展示摘要和可展开完整数据。
 
 Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、`command`（argv数组或null）、`command_exists`、`returncode`、`raw_path`（相对 cpu_trace）、`raw_exists`、`empty`、`parse_success`、`parsed_count`、`started_at`、`ended_at`、`failure_reason`、`status`。允许附加 size_bytes、PID/starttime、item_errors 等。opaque 原文没有语义解析时 parse_success/count 为null；不能将非空文件本身视为已正确解析。
 
@@ -37,7 +38,7 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 - NPU→CPU 需要明确 CPU Affinity 字段。只有 HCCS/PCIe 或 Logic/Physical ID 时映射未知；不输出猜测命令。
 - 调度字段是 TID；TGID 来自 proc 或可证明的 clone 关系。使用 boot_id、starttime、进程/线程前后快照及生命周期隔离 PID 复用。未确认宿主机命名空间时不生成可执行方案。
 - 当前 CPU、allowed CPUs、有效 cpuset、Mems_allowed 与实际 numa_maps 页分布有不同语义。各 TID 的 cgroup 可能不同，需要逐线程核对。
-- 绑核计划只使用在线 CPU 与所有相关 TID 有效 cpuset 的交集，保留 SMT 完整组和 Worker 分区互斥。共享池没有完整运行/等待需求证据时不平均分配。任务已合规则保留掩码。报告给出直接 taskset 命令，执行时应确认身份、线程集合与 cpuset 仍与快照一致；直接命令本身不包含自动预检或回滚。
+- 绑核计划只使用在线 CPU 与所有相关 TID 有效 cpuset 的交集，保留 SMT 完整组和 Worker 分区互斥。共享池没有完整运行/等待需求证据时不平均分配。若显式原始池完全一致、全部CPU归同一NUMA且全TID cpuset允许完整在线池，可给共享本地亲和池命令；不缩成随意子集、不声称隔离。任务已合规则保留掩码。报告给出直接 taskset 命令，执行时应确认身份、线程集合与 cpuset 仍与快照一致；直接命令本身不包含自动预检或回滚。
 - CPU 绑定不迁移现有内存页。启动命令 `numactl --physcpubind=... --membind=... COMMAND` 仅在有独立内存策略证据时讨论，不作为运行 PID 的迁移命令。
 - 允许跨节点、单次 PSR 或页分布偏离只是潜在风险。已分配页不等于远端访问流量；风险升级需要关联迁移、实际内存访问、等待及性能退化证据。建议不直接修改全局调度参数。
 - AI HIGH 置信度来自稳定 NPU PID 归属；父子/cgroup/命令等关联分别标注 MEDIUM/LOW。高CPU或名称匹配不能单独认定 AI/竞争。竞争候选需要 AI 可运行等待与其他任务同 CPU 执行窗口交集，因果标记保持 UNPROVEN。
@@ -48,3 +49,5 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 `python3 -m unittest discover -s tests -v` 包括假 proc/sysfs/tracefs、归档与报告端到端用例。`tests/offline_report_browser.js` 在已有 Playwright/浏览器环境验证离线交互；依赖不可用会明确跳过。Python 3.7 语法兼容检查不等于实际在该解释器/目标内核运行。发布报告时分别说明模拟验证、本机浏览器验证与 openEuler/Kunpeng/Ascend 现场验证。
 
 单文件采集使用 `/proc/uptime` 的 boottime 时间戳；频率样本和进程快照声明 `clock=boottime`，优先选择 ftrace `boot` 时钟。内核不支持 boot 时钟时保留数据但不叠加不同域时间线。旧版 Python 采集包的 monotonic/mono 组合继续兼容。
+
+展示契约：HTML与MD每类明细最多100条，完整指标和原始证据保留于report_data.json。截断只发生在渲染层；2.3不生成逐PID全部线程亲和证据表。资源速率依赖同钟不同时间点与非回退计数，缺失显示N/A；MemAvailable不能用MemFree替代，磁盘分区与整盘不累加，短窗口及磁盘busy%本身不证明资源瓶颈。

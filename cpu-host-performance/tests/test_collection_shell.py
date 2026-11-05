@@ -26,7 +26,7 @@ class CollectionShellTests(unittest.TestCase):
         self.assertIn('--frequency-interval',r.stdout)
         self.assertIn('--discover',r.stdout)
         self.assertIn('--no-hostbound',r.stdout)
-        self.assertIn('default: 30 s',r.stdout)
+        self.assertIn('default: 3 s',r.stdout)
 
     def test_missing_option_value_fails_promptly(self):
         for flag in ('--duration', '--output', '--pid', '--frequency-interval'):
@@ -35,11 +35,20 @@ class CollectionShellTests(unittest.TestCase):
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn('missing option value', r.stdout + r.stderr)
 
-    def test_existing_output_rejected_without_modification(self):
+    def test_repeated_collection_uses_unique_timestamp_directories(self):
         with tempfile.TemporaryDirectory() as d:
             out=Path(d);(out/'cpu_trace').mkdir();target=out/'cpu_trace/user.txt';target.write_text('keep')
-            r=self.run_bash(REPO/'scripts/cpu_trace_collect.sh','--output',out.as_posix())
-            self.assertNotEqual(r.returncode,0)
+            text=(REPO/'scripts/cpu_trace_collect.sh').read_text(encoding='utf-8')
+            # Stop after directory allocation, without reading host interfaces.
+            text=text.replace('hb_phase start', 'printf "%s\\n" "$SNAP"; exit 0',1)
+            script=out/'test.sh';script.write_text(text,encoding='utf-8',newline='\n')
+            for _ in range(2):
+                result=self.run_bash(script,'--output',out.as_posix())
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                self.assertNotIn('拒绝覆盖',result.stdout+result.stderr)
+            captures=[p for p in out.glob('cpu_trace_*') if p.is_dir()]
+            self.assertEqual(len(captures),2)
+            self.assertTrue(all(__import__('re').match(r'cpu_trace_\d{8}_\d{6}_',p.name) for p in captures))
             self.assertEqual(target.read_text(),'keep')
 
     def test_fake_tracefs_full_and_minimal_capability(self):
@@ -76,7 +85,7 @@ rmdir(){ printf '%s\\n' "$1" >> "CLEANUP_LOG"; }
                 if minimal:args.append('--minimal')
                 r=self.run_bash(script,*args)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr)
-                snap=base/'out/cpu_trace'
+                snap=next(p for p in (base/'out').glob('cpu_trace_*') if p.is_dir())
                 self.assertEqual((snap/'trace_overrun.txt').read_text().strip(),'4')
                 caps=(snap/'hostbound/capabilities.tsv').read_text()
                 self.assertIn('power/cpu_frequency\t1\t1\t%d\t%d'%(0 if minimal else 1,0 if minimal else 1),caps)

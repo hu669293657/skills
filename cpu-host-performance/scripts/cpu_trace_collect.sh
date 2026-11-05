@@ -3,12 +3,12 @@
 # CPU Host 性能采集脚本 (cpu_trace_collect.sh) — 统一采集入口
 # - Bash 4+ + awk + ftrace + /proc + /sys；单文件，无 Python/jq 依赖
 # - 仅写独立 trace instance，退出时清理，不修改全局 tracing
-# - 默认 30 秒全量采集；--no-hostbound 显式降级，--minimal 仅精简 trace 事件
+# - 默认 3 秒全量采集；--no-hostbound 显式降级，--minimal 仅精简 trace 事件
 # - --pid <PID[,PID...]>: 追加 HostBound 只读快照 (NUMA/NPU 拓扑、IRQ、目标进程
 #   及线程 affinity 等), 写入采集包 hostbound/ 目录; 不改变 ftrace 事件与恢复行为
 # - 全程进度展示: 阶段导航 + 动态进度条 (百分比/已用时/预计剩余/速率/事件数),
 #   管道或重定向输出时自动降级为纯文本日志 (无 ANSI 颜色与 \r 刷新, 支持 NO_COLOR)
-# - 产物: cpu_trace_YYYYMMDD_HHMMSS.tar.gz (trace + 系统快照 + hostbound/ 证据清单)
+# - 产物: cpu_trace_YYYYMMDD_HHMMSS_XXXXXX.tar.gz (trace + 系统快照 + hostbound/ 证据清单)
 # ==========================================================
 set +e  # 单项能力缺失不致命，由脚本自行控制
 
@@ -128,7 +128,7 @@ usage() {
 cat <<EOF
 CPU Host 性能采集工具 (统一入口: 默认全量 ftrace + HostBound + 进程发现)
 用法: sudo bash $0 [选项]
-  -t, --duration <秒>     采集时长, 默认 30 (default: 30 s)
+  -t, --duration <秒>     采集时长, 默认 3 (default: 3 s)
   -o, --output <目录>     输出目录, 默认当前目录
   -b, --buffer-size <KB>  单核 buffer 大小, 默认 4096
   -c, --cpu-list <列表>   CPU 列表, 如 1,2,3 或 0-47 (默认全量)
@@ -182,13 +182,18 @@ hb_snapshot(){
   function status(s,k, a,n,i,v){n=split(s,a,"\n");for(i=1;i<=n;i++)if(index(a[i],k ":")==1){v=substr(a[i],length(k)+2);sub(/^[[:space:]]+/,"",v);return v}return ""}
   function allowed(s,k, v){v=status(s,k);return v=="" && index(s,k ":")==0?"null":cpus(v)}
   function unescape(s){gsub(/\\040/," ",s);gsub(/\\011/,"\t",s);gsub(/\\012/,"\n",s);gsub(/\\134/,"\\",s);return s}
-  function mountgroup(rel,controllers,version, lines,n,i,a,j,fs,opts,root,point,best,tail){
+  function mountgroup(rel,controllers,version, lines,n,i,a,j,fs,opts,root,point,best,tail,parts,nparts,k,matchall){
     n=split(mountinfo,lines,"\n");best=-1;cgroot="";cgpath=""
     for(i=1;i<=n;i++){
       split(lines[i],a," ");j=7;while(j<=length(a) && a[j]!="-")j++
       fs=a[j+1];opts="," a[j+3] ","
       if(version==2 && fs!="cgroup2")continue
-      if(version==1 && (fs!="cgroup" || ("," controllers "," ~ /,cpuset,/ && opts!~/,cpuset,/) || ("," controllers "," ~ /,cpu,/ && opts!~/,cpu,/)))continue
+      if(version==1){
+        if(fs!="cgroup")continue
+        nparts=split(controllers,parts,",");matchall=1
+        for(k=1;k<=nparts;k++)if(index(opts,"," parts[k] ",")==0)matchall=0
+        if(!matchall)continue
+      }
       root=unescape(a[4]);point=unescape(a[5]);if(root!="/" && rel!=root && index(rel,root "/")!=1)continue
       if(length(root)>best){best=length(root);cgroot=point;tail=(root=="/"?rel:substr(rel,length(root)+1));cgpath=point (tail=="/"?"":tail)}
     }
@@ -207,12 +212,12 @@ hb_snapshot(){
   function cgroups(cg, lines,n,i,a,v,controllers,rel,path,keys,nk,j,value,row,rows,sep,ver,candidates,k){
     if(cg in cgcache){cgrows=cgcache[cg];effcpu=effcache[cg];effmem=memcache[cg];return}
     rows="[";sep="";effcpu="null";effmem="null";n=split(cg,lines,"\n")
-    nk=split("cpu.max cpu.stat cpu.cfs_quota_us cpu.cfs_period_us cpuset.cpus.effective cpuset.mems.effective cpuset.effective_cpus cpuset.effective_mems cpuset.cpus cpuset.mems",keys," ")
+    nk=split("cpu.max cpu.stat cpu.cfs_quota_us cpu.cfs_period_us cpuset.cpus.effective cpuset.mems.effective cpuset.effective_cpus cpuset.effective_mems cpuset.cpus cpuset.mems memory.current memory.max memory.high memory.events memory.swap.current memory.swap.max memory.usage_in_bytes memory.limit_in_bytes memory.failcnt pids.current pids.max pids.events",keys," ")
     for(i=1;i<=n;i++){
       split(lines[i],a,":");controllers=a[2];rel=substr(lines[i],length(a[1])+length(a[2])+3)
       if(rel~/\/\.\.(\/|$)/ || rel~/\/\.(\/|$)/)continue
       if(a[1]=="0")ver=2
-      else if(("," controllers ",")~/,(cpu|cpuset),/)ver=1
+      else if(("," controllers ",")~/,(cpu|cpuset|memory|pids),/)ver=1
       else continue
       if(!mountgroup(rel,controllers,ver))continue
       path=cgpath
@@ -271,7 +276,11 @@ hb_snapshot(){
     }
   }
   END{
-    if(kind=="process"){
+    if(kind=="resources"){
+      nf=split("stat loadavg meminfo vmstat diskstats pressure/cpu pressure/memory pressure/io sys/fs/file-nr net/dev",rf," ");raw="";count=0
+      for(ri=1;ri<=nf;ri++){value=readfile(pr "/" rf[ri]);ok=exists;if(ok)count++;raw=raw (ri>1?",":"") q("/proc/" rf[ri]) ":{\"text\":" (ok?q(value):"null") ",\"status\":" q(ok?"COLLECTED":"UNAVAILABLE") "}"}
+      print "{\"schema_version\":1,\"ts\":" begin ",\"end_ts\":" stamp() ",\"clock\":\"boottime\",\"files\":{" raw "}}"
+    }else if(kind=="process"){
       ps="";ts="";count=0;for(i=1;i<=pc;i++){id=porder[i];if(!stat(pr "/" id) || start!=pstamp[id]){error(id,"leader_changed_during_snapshot");delete pjson[id];continue}ps=ps (count++?",":"") pjson[id]}
       nt=0;for(i=1;i<=tc;i++)if(tp[i] in pjson)ts=ts (nt++?",":"") tjson[i]
       print "{\"schema_version\":2,\"clock\":\"boottime\",\"clock_ticks\":" ticks ",\"ts\":" begin ",\"end_ts\":" stamp() ",\"processes\":[" ps "],\"threads\":[" ts "],\"errors\":[" errs "]}"
@@ -368,6 +377,18 @@ hb_phase(){
     hb_entry host_context COLLECTED hostbound/host_context.txt "" 0 true 1
     for tool in gil_tracer function_monitor msprof host_analyzer;do hb_entry external_tools NOT_REQUESTED "" "external_tool:$tool" null null null false;done
   fi
+  hb_data resources resources "hostbound/resource_$phase.json"
+  if [[ "$phase" == start ]];then
+    mkdir -p -- "$SNAP/hostbound/resources"
+    hb_command resources hostbound/resources/df_blocks.txt df -Pk
+    hb_command resources hostbound/resources/df_inodes.txt df -Pi
+    hb_command resources hostbound/resources/lsblk.txt lsblk -b -P -o NAME,SIZE,TYPE,ROTA,MOUNTPOINT
+    hb_file resources "$HB_PROC/self/mountinfo" hostbound/resources/mountinfo.txt
+  fi
+  if [[ "$phase" == end ]];then
+    hb_command resources hostbound/resources/df_blocks_end.txt df -Pk
+    hb_command resources hostbound/resources/df_inodes_end.txt df -Pi
+  fi
   hb_data frequency frequency "hostbound/frequency_$phase.json"
   hb_data idle idle "hostbound/idle_$phase.json"
   if ((HOSTBOUND));then
@@ -402,8 +423,8 @@ record_trace_status(){
   printf '%s: %s\n' "$status" "$reason" > "$SNAP/hostbound/trace_error.txt"
   if [[ "$status" == COLLECTED && ! -s "$SNAP/trace.txt" ]];then status=PARSE_FAILED;reason=empty_trace_export;fi
   hb_entry trace "$status" trace.txt "$reason"
-  for rel in hostbound/frequency_samples.jsonl hostbound/capabilities.tsv;do
-    category=frequency;[[ "$rel" == *capabilities* ]] && category=trace_capabilities
+  for rel in hostbound/frequency_samples.jsonl hostbound/resource_samples.jsonl hostbound/capabilities.tsv;do
+    category=frequency;[[ "$rel" == *resource_samples* ]] && category=resources;[[ "$rel" == *capabilities* ]] && category=trace_capabilities
     if [[ -f "$SNAP/$rel" ]];then hb_entry "$category" COLLECTED "$rel";else hb_entry "$category" "$([[ "$status" == COLLECTED ]] && echo EXECUTION_FAILED || echo "$status")" "$rel" not_generated;fi
   done
   hb_manifest
@@ -412,13 +433,15 @@ hb_poll(){
   while [[ ! -e "$SNAP/hostbound/poll.stop" ]];do
     hb_snapshot frequency "$SNAP/hostbound/.frequency_poll.json" || return 1
     cat "$SNAP/hostbound/.frequency_poll.json" >> "$SNAP/hostbound/frequency_samples.jsonl"
+    hb_snapshot resources "$SNAP/hostbound/.resource_poll.json" || return 1
+    cat "$SNAP/hostbound/.resource_poll.json" >> "$SNAP/hostbound/resource_samples.jsonl"
     sleep "$FREQ_INTERVAL"
   done
 }
 # END standalone evidence
 
 # ---------- 参数解析 ----------
-DURATION=30; OUTDIR="."; BUFFER_SIZE=4096; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=1; DISCOVER=1; FREQ_INTERVAL=1
+DURATION=3; OUTDIR="."; BUFFER_SIZE=4096; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=1; DISCOVER=1; FREQ_INTERVAL=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--duration|-o|--output|-b|--buffer-size|-c|--cpu-list|-p|--pid|--frequency-interval)
@@ -444,7 +467,6 @@ if ! awk -v x="$FREQ_INTERVAL" 'BEGIN {exit !(x ~ /^[0-9]+([.][0-9]+)?$/ && x>=0
   err "frequency-interval 必须 >=0.2 秒"; exit 1
 fi
 [[ -z "$CPU_LIST" || "$CPU_LIST" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || { err "CPU列表格式错误"; exit 1; }
-[[ ! -e "$OUTDIR/cpu_trace" ]] || { err "输出 cpu_trace 目录已存在，拒绝覆盖，请选择新目录"; exit 1; }
 if [[ "$DURATION" =~ ^[0-9]+$ ]] && [[ "$BUFFER_SIZE" =~ ^[0-9]+$ ]] && (( DURATION>=1 )); then :; else
   err "时长必须为 ≥1 的纯数字, buffer 必须为纯数字"; exit 1; fi
 # PID 合法性: 逗号分隔的正整数 (不校验进程是否存在, 采集阶段自动跳过)
@@ -455,8 +477,10 @@ done
 # 创建证据目录与只读侧车在 tracefs/root 探测之前；降级结果也必须可审计。
 PHASE_TOTAL=5
 phase_begin "采集只读能力、拓扑与进程前置证据"
-mkdir -p "$OUTDIR/cpu_trace/hostbound" || exit 1
-SNAP="$OUTDIR/cpu_trace"
+mkdir -p -- "$OUTDIR" || exit 1
+SNAP=$(mktemp -d "$OUTDIR/cpu_trace_$(date +%Y%m%d_%H%M%S)_XXXXXX") || { err "无法创建采集目录: $OUTDIR"; exit 1; }
+CAPTURE_NAME=${SNAP##*/}
+mkdir -p -- "$SNAP/hostbound" || exit 1
 HB_TICKS=$(getconf CLK_TCK 2>/dev/null || echo 100)
 : > "$SNAP/hostbound/collection_entries.jsonl"
 hb_phase start
@@ -733,9 +757,9 @@ hostname: $(hostname 2>/dev/null)
 trace_dir: $TRACE_DIR
 EOF
 phase_begin "打包采集包 (tar.gz 压缩)"
-PKG=$(realpath "$OUTDIR" 2>/dev/null || echo "$OUTDIR")/cpu_trace_$(date +%Y%m%d_%H%M%S)_$$.tar.gz
+PKG=$(realpath "$OUTDIR" 2>/dev/null || echo "$OUTDIR")/${CAPTURE_NAME}.tar.gz
 spin_start "压缩打包中, 数据量大时需要数分钟"
-if tar -czf "$PKG" -C "$OUTDIR" cpu_trace 2>/dev/null; then
+if tar -czf "$PKG" -C "$OUTDIR" "$CAPTURE_NAME" 2>/dev/null; then
   spin_stop
   PKG_SIZE=$(stat -c %s "$PKG" 2>/dev/null || echo 0)
   phase_end "打包完成"

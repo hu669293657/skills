@@ -91,3 +91,7 @@ comm可能截断且会重名；角色分类结合关系、NPU、命令行和comm
 - [Linux v5.10 ARMv8 PMU事件映射](https://raw.githubusercontent.com/torvalds/linux/v5.10/arch/arm64/kernel/perf_event.c)
 - [perf权限](https://docs.kernel.org/admin-guide/perf-security.html)
 - [ARM64 perf执行层级过滤](https://www.kernel.org/doc/html/latest/arch/arm64/perf.html)
+
+## 资源与展示增补
+
+默认采集3秒，每次使用独立时间目录。新增resources指标来自原始proc前后/周期快照、df、lsblk和cgroup memory/pids。第2.4节汇总候选，第5节展示容量、增量、I/O和PSI；窗口与trace分开声明，旧包缺失不填0。HTML/MD每张明细表最多100条，完整CPU曲线和report_data.json保留全部指标。

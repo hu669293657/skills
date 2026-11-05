@@ -14,7 +14,7 @@ from .npu_parser import parse_npu_info, parse_npu_mapping, parse_npu_topology
 SUCCESS = {'COLLECTED', 'NO_ACTIVE_PROCESS'}
 CORE = ('cpu_topology', 'npu_info', 'npu_mapping', 'npu_topology', 'processes',
         'numa_process', 'irq', 'softirq', 'proc_stat', 'schedstat', 'frequency', 'idle')
-DEFAULT_COMMAND = 'sudo bash scripts/cpu_trace_collect.sh --duration 30 --output /tmp/cpu-host-$(date +%Y%m%d_%H%M%S)'
+DEFAULT_COMMAND = 'sudo bash scripts/cpu_trace_collect.sh --duration 3 --output /tmp/cpu-host-$(date +%Y%m%d_%H%M%S)'
 
 
 def evidence_path(path):

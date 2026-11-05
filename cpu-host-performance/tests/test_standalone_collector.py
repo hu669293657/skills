@@ -69,6 +69,30 @@ class StandaloneTests(unittest.TestCase):
             self.run_library(base,proc,sys,out,'hb_snapshot process "$SNAP/end.json"\n')
             self.assertIsNone(json.loads((out/'end.json').read_text())['threads'][0]['cpuset_cpus_effective'])
 
+    def test_resources_keep_raw_values_for_offline_python(self):
+        with tempfile.TemporaryDirectory() as d:
+            base=Path(d);proc,sys,out=fixture(base)
+            put(proc,'meminfo','MemTotal: 1000000 kB\nMemAvailable: 40000 kB\n')
+            put(proc,'diskstats','8 0 sda 1 0 10 1 1 0 20 1 0 2 3\n')
+            self.run_library(base,proc,sys,out,'hb_snapshot resources "$SNAP/resource.json"\n')
+            data=json.loads((out/'resource.json').read_text())
+            self.assertEqual(data['clock'],'boottime')
+            self.assertIn('MemAvailable: 40000 kB',data['files']['/proc/meminfo']['text'])
+            self.assertEqual(data['files']['/proc/diskstats']['status'],'COLLECTED')
+            self.assertIsNone(data['files']['/proc/pressure/io']['text'])
+
+    def test_v1_memory_and_pids_controller_limits_are_collected(self):
+        with tempfile.TemporaryDirectory() as d:
+            base=Path(d);proc,sys,out=fixture(base)
+            cg='2:cpuset:/job\n3:memory:/job\n4:pids:/job\n'
+            for path in ('4001/cgroup','4001/task/4001/cgroup'):put(proc,path,cg)
+            put(proc,'self/mountinfo','11 1 0:2 / %s rw - cgroup cgroup rw,cpuset\n12 1 0:3 / %s rw - cgroup cgroup rw,memory\n13 1 0:4 / %s rw - cgroup cgroup rw,pids\n' % tuple((sys/('fs/cgroup/'+x)).as_posix() for x in ('cpuset','memory','pids')))
+            for path,value in [('memory/job/memory.usage_in_bytes','990'),('memory/job/memory.limit_in_bytes','1000'),('pids/job/pids.current','99'),('pids/job/pids.max','100')]:put(sys,'fs/cgroup/'+path,value)
+            self.run_library(base,proc,sys,out,'hb_snapshot process "$SNAP/process.json"\n')
+            rows=json.loads((out/'process.json').read_text())['processes'][0]['cgroup_cpu']
+            self.assertTrue(any(r.get('memory.usage_in_bytes')=='990' for r in rows))
+            self.assertTrue(any(r.get('pids.max')=='100' for r in rows))
+
     def test_custom_mount_root_maps_to_correct_cgroup(self):
         with tempfile.TemporaryDirectory() as d:
             base=Path(d);proc,sys,out=fixture(base)
@@ -158,7 +182,7 @@ else printf '| NPU Chip | Process id | Process name | Process memory(MB) |\n| 0 
 ''')
             put(tools,'lscpu','#!/bin/bash\nif [[ "$1" == -p=* ]]; then\n'+''.join('echo %d,%d,0,0,Y\n' % (c,c) for c in range(64))+'fi\n')
             put(tools,'systemd-detect-virt','#!/bin/bash\necho none\nexit 1\n')
-            for name in ('numactl','numastat','pstree','ps'):
+            for name in ('numactl','numastat','pstree','ps','df','lsblk'):
                 put(tools,name,'#!/bin/bash\necho fixture-optional-command\n')
             put(tools,'taskset','#!/bin/bash\n[[ "$#" == 2 && "$1" == -pc ]] || exit 98\necho "query only"\n')
             code=(REPO/'scripts/cpu_trace_collect.sh').read_text(encoding='utf-8')
@@ -178,15 +202,17 @@ rmdir(){ :; }
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertFalse((base/'forbidden-runtime').exists())
             self.assertFalse(list(base.glob('*.py')))
-            capture=out/'cpu_trace'
+            capture=next(p for p in out.glob('cpu_trace_*') if p.is_dir())
             manifest=json.loads((capture/'collection_manifest.json').read_text())
             self.assertEqual([r for r in manifest['entries'] if r['category']=='trace'][-1]['status'],'COLLECTED')
             self.assertTrue((capture/'hostbound/process_end.json').exists())
+            self.assertTrue((capture/'hostbound/resource_end.json').exists())
+            self.assertTrue((capture/'hostbound/resource_samples.jsonl').exists())
             archives=list(out.glob('cpu_trace_*.tar.gz'))
             self.assertTrue(archives,result.stdout+result.stderr)
             archive=archives[0]
             with tarfile.open(archive) as package:
-                self.assertIn('cpu_trace/hostbound/frequency_samples.jsonl',package.getnames())
+                self.assertIn(capture.name+'/hostbound/frequency_samples.jsonl',package.getnames())
             run_analysis(str(archive),str(base/'report'),quiet=True)
             metrics=json.loads((base/'report/report_data.json').read_text(encoding='utf-8'))['metrics']
             self.assertIn('taskset -apc 32-63 4001',metrics['npu_affinity']['commands'],str(metrics['npu_affinity']))
