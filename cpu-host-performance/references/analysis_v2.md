@@ -18,7 +18,7 @@
 | collection_cpus.txt / trace_clock.txt | 实际请求CPU范围与时钟模式 |
 | device_windows.json（仅导入，可选） | clock=mono且与metadata一致的NPU窗口；本工具不自动采集Device |
 
-保留对旧 `pid_*_status/threads/thread_affinity/starttime/cpuset_effective.txt` 文件的读取兼容。新采集使用完整 process_start/end.json、逐 TID cgroup/cpuset 和目标 *_start/end 原文，详见 [采集契约](collection_contract.md)。采集中的 taskset 只查询，不设置 CPU；报告建议脚本不自动执行。
+保留对旧 `pid_*_status/threads/thread_affinity/starttime/cpuset_effective.txt` 文件的读取兼容。新采集使用完整 process_start/end.json、逐 TID cgroup/cpuset 和目标 *_start/end 原文，详见 [采集契约](collection_contract.md)。采集中的 taskset 只查询，不设置 CPU；报告建议命令不自动执行。
 
 ## 统一输出
 
@@ -73,7 +73,7 @@ comm可能截断且会重名；角色分类结合关系、NPU、命令行和comm
 
 已验证：标准库离线分析、8/64/256核、8NUMA、旧归档/NPU亲和性回归、sysfs/proc/cgroup模拟、全量/精简fake tracefs、HTML交互与无外部脚本。Python3.7语法检查通过；实际执行解释器为3.14，3.7运行时不在本机。
 
-需要真实平台验证：目标内核trace instance/mono支持、事件权限与实际产生率、Ascend npu-smi输出版本、CPUFreq驱动语义、PID namespace/cgroup挂载布局、256核采集buffer丢失率与CPU/IO开销、Device时钟对齐和优化收益。没有声称已完成Kunpeng/Ascend实机验证。
+需要真实平台验证：目标内核trace instance/boot 时钟支持、事件权限与实际产生率、Ascend npu-smi输出版本、CPUFreq驱动语义、PID namespace/cgroup挂载布局、256核采集buffer丢失率与CPU/IO开销、Device时钟对齐和优化收益。没有声称已完成Kunpeng/Ascend实机验证。
 
 不支持项按现场capabilities报告，不能从内核版本猜测：cpu_frequency、sched_process_*、task_newtask、sched_stat_wait都可能受CONFIG/驱动/权限限制。sched_stat_wait默认只探测；无NPU工具不阻断/proc与用户PID发现。无私有trace instance时不退回破坏全局trace，helper快照仍可离线报告。
 

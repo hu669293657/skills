@@ -20,6 +20,17 @@ def policy(**kw):
 
 
 class FrequencyTests(unittest.TestCase):
+    def test_shell_boottime_matches_boot_trace_clock(self):
+        from analyzer.frequency_analysis import analyze_frequency
+        samples = [dict(ts=t, clock='boottime',policies=[dict(id='policy0',scaling_cur_freq=2000000)]) for t in (0,5,10)]
+        m={'snapshot':{'hostbound/frequency_start.json':json.dumps(policy()),
+                       'hostbound/frequency_samples.jsonl':'\n'.join(map(json.dumps,samples)),
+                       'hostbound/trace_clock.txt':'boot'}, 't_start':0,'t_end':10,'events_ok':True}
+        f=analyze_frequency(m,[])
+        self.assertEqual(f['clock_alignment'],'MONOTONIC')
+        self.assertEqual(f['domains'][0]['average_mhz'],2000)
+        m['snapshot']['hostbound/trace_clock.txt']='mono'
+        self.assertEqual(analyze_frequency(m,[])['clock_alignment'],'INCOMPATIBLE')
     def test_trace_uses_cpu_id_and_time_weighting(self):
         m = data([Event(1, 7, 'cpu_frequency', fields={'cpu_id': 0, 'state': 1000000}), Event(9, 7, 'cpu_frequency', fields={'cpu_id': 0, 'state': 2000000})], policy())
         f = m['frequency']

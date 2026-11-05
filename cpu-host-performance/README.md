@@ -4,7 +4,7 @@
 
 ## 采集
 
-将完整 Skill 目录部署到 Linux 宿主机，保留 `scripts/cpu_trace_collect.sh`、`host_snapshot.py`、`collection_evidence.py` 和 `analyzer/npu_parser.py` 的相对位置。Bash 5.1、核心 utils、Python 3.7+ 标准库及内核 tracefs 为目标环境，不需要第三方 Python 包。缺少 Python/helper 时 ftrace 仍可运行，Manifest 会明确标记增强能力降级。
+现场只需把 `scripts/cpu_trace_collect.sh` 这一个文件复制到 Linux 宿主机。采集使用 Bash 4+、awk、核心 utils 和内核 tracefs，不需要 Python、jq 或旁边任何文件。NPU/拓扑等可选命令按能力探测，缺失情况记入 Manifest。采集后把包带回有 Python 3.7+ 的机器离线分析。
 
 ```bash
 # 默认30秒、完整安全ftrace、HostBound、NPU发现、全机/proc前后快照
@@ -77,7 +77,7 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 
 第10节首先展示 AI 进程、潜在竞争者和系统任务摘要，Top N 之外及无关进程进入可展开列表。TID→TGID→PPID→cgroup→NPU 的关联附 HIGH/MEDIUM/LOW 置信度；名称只作线索。完整线程身份、运行/等待、Affinity、全部竞争重叠窗口和原始快照保留在 JSON。
 
-CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；每个可执行方案检查稳定宿主机 PID/TID、在线 CPU、逐线程 cpuset、完整 SMT 核心组和分区互斥。已合规进程不重复生成命令。脚本提供身份预检、备份、逐 TID 应用、核验及回滚；taskset 不迁移现有内存页。
+CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；每个可执行方案检查稳定宿主机 PID/TID、在线 CPU、逐线程 cpuset、完整 SMT 核心组和分区互斥。已合规进程不重复生成命令。第三部分代码块只提供具体 taskset 命令：整进程 `taskset -apc CPU_LIST PID`，指定线程 `taskset -pc CPU_LIST TID`。`-a` 不包含子进程，已知且证据完整的子 PID 分别列出；已有合规窄掩码予以保留。不附执行框架、Python 或查询命令。直接命令执行前需确认身份与资源配置仍与快照一致；taskset 不迁移现有内存页。
 
 竞争候选必须有可运行等待与同核运行时间重叠，Affinity只作旁证。NPU直接归属与父子关联不同；单纯Python名称、CPU高、共享Affinity、R/R+都不能认定根因。没有同域Device窗口时仅报告Host侧风险。详见 [数据契约、算法与限制](references/analysis_v2.md)。
 

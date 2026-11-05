@@ -73,6 +73,8 @@ def _validate(category, path, raw, m):
             data = json.loads(raw)
             if not isinstance(data, dict) or not isinstance(data.get('processes'), list) or not isinstance(data.get('threads'), list):
                 raise ValueError('missing process/thread arrays')
+            if not data['processes'] and data.get('errors'):
+                raise ValueError('acquisition errors without a stable process identity')
             if any(not isinstance(p, dict) or 'tgid' not in p for p in data['processes']):
                 raise ValueError('missing process identity')
             if any(not isinstance(t, dict) or not {'tid', 'tgid'} <= set(t) for t in data['threads']):

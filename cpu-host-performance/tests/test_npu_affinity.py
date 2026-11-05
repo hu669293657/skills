@@ -89,9 +89,8 @@ class NpuAffinityTests(unittest.TestCase):
         self.assertEqual(result['rows'][0]['state'], 'REMOTE_OBSERVED')
         self.assertEqual(result['rows'][0]['observed'], '30')
         self.assertEqual(result['rows'][0]['numa'], [3])
-        self.assertIn('taskset -pc 144-155 4115', result['commands'])
-        self.assertIn('taskset -pc 144-155 14115', result['commands'])
-        self.assertIn('trap on_error EXIT', result['commands'])
+        self.assertIn('taskset -apc 144-155 4115', result['commands'])
+        self.assertTrue(all(line.startswith('taskset ') for line in result['commands'].splitlines()))
 
     def test_local_last_cpu_does_not_prove_affinity_is_confined(self):
         s = snapshots()
@@ -208,7 +207,7 @@ class NpuAffinityTests(unittest.TestCase):
         for report in [md, html]:
             self.assertIn('4115', report)
             self.assertIn('144-155', report)
-            self.assertIn('taskset -pc 144-155 4115', report)
+            self.assertIn('taskset -apc 144-155 4115', report)
             self.assertIn('宿主机', report)
 
     def test_npu_mismatch_is_a_configuration_risk_in_diagnosis(self):
@@ -244,7 +243,7 @@ class NpuAffinityTests(unittest.TestCase):
                     td = load_input(str(source))
                     try:
                         self.assertIn('hostbound/pid_4115_thread_affinity.txt', td.snapshot)
-                        self.assertIn('taskset -pc 144-155 4115', compute_metrics(td)['npu_affinity']['commands'])
+                        self.assertIn('taskset -apc 144-155 4115', compute_metrics(td)['npu_affinity']['commands'])
                     finally:
                         cleanup_temp(td)
 

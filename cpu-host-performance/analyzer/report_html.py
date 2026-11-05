@@ -141,7 +141,7 @@ window.addEventListener('resize',upd);upd();
 })();
 function copyBinding(button){
 var text=button.parentNode.querySelector('code').textContent;
-function done(){button.textContent='已复制';setTimeout(function(){button.textContent='复制完整方案'},1800)}
+function done(){button.textContent='已复制';setTimeout(function(){button.textContent='复制绑核命令'},1800)}
 function fallback(){var a=document.createElement('textarea');a.value=text;document.body.appendChild(a);a.select();
 try{if(document.execCommand('copy'))done();else button.textContent='请手动选择代码复制'}finally{a.remove()}}
 if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(done,fallback);else fallback();
@@ -239,21 +239,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A(affinity_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
     # ---------- 3. 建议 ----------
     A("<h2>3. 优化建议</h2>")
-    pri = {"CRITICAL": "P0（立即处理）", "WARNING": "P1（尽快处理）", "INFO": "P2（择机处理）", "OK": "—"}
     A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
-    A(collection_actions_html(m.get("collection_integrity", {})))
-    shown = False
-    for f in diag["findings"]:
-        if f["severity"] in ("INFO", "OK") and not f.get('priority'):
-            continue
-        shown = True
-        A("<div class='finding' style='border-left-color:%s'>" % sev_color.get(f["severity"], "#6b7280"))
-        A("<h3>%s — %s</h3><ol class='pri'>" % (esc(f.get('priority') or pri[f["severity"]]), esc(f["title"])))
-        for r in f["recommendation"]:
-            A("<li>%s</li>" % esc(r))
-        A("</ol></div>")
-    if not shown:
-        A("<p>当前无需紧急优化动作；保持对 NPU 侧性能的持续观察即可。</p>")
     # ---------- 4. 问题详情 ----------
     A("<h2>4. 问题详情</h2>")
     if diag["findings"]:

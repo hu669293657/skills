@@ -54,8 +54,7 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(target <= cpus(row['affinity']))
             self.assertFalse(used & target)
             used.update(target)
-            for task in row['thread_rows']:
-                self.assertIn('taskset -pc %s %d' % (row['target'], task['tid']), self.data['metrics']['npu_affinity']['commands'])
+            self.assertIn('taskset -apc %s %d' % (row['target'], row['pid']), self.data['metrics']['npu_affinity']['commands'])
         self.assertTrue(any(r['state'] == 'LOCAL' for r in rows))
 
     def test_zip_and_directory_preserve_evidence_and_results(self):

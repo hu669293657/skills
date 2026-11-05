@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==========================================================
 # CPU Host 性能采集脚本 (cpu_trace_collect.sh) — 统一采集入口
-# - bash 5.1 + ftrace + /proc + /sys；Python 3.7 stdlib 生成完整证据侧车
+# - Bash 4+ + awk + ftrace + /proc + /sys；单文件，无 Python/jq 依赖
 # - 仅写独立 trace instance，退出时清理，不修改全局 tracing
 # - 默认 30 秒全量采集；--no-hostbound 显式降级，--minimal 仅精简 trace 事件
 # - --pid <PID[,PID...]>: 追加 HostBound 只读快照 (NUMA/NPU 拓扑、IRQ、目标进程
@@ -151,6 +151,272 @@ CPU Host 性能采集工具 (统一入口: 默认全量 ftrace + HostBound + 进
 EOF
 }
 
+# BEGIN standalone evidence
+# All normalized sidecars are produced by Bash + POSIX awk; no interpreter helper.
+HB_PROC=/proc; HB_SYS=/sys
+hb_quote(){ LC_ALL=C awk 'BEGIN{for(i=1;i<32;i++)esc[sprintf("%c",i)]=sprintf("\\u%04x",i)} {if(NR>1)s=s "\n";s=s $0} END{out="\"";for(i=1;i<=length(s);i++){c=substr(s,i,1);out=out (c=="\\"?"\\\\":c=="\""?"\\\"":c in esc?esc[c]:c)}print out "\""}'; }
+hb_now(){ date -u +%FT%TZ; }
+hb_snapshot(){
+  local kind=$1 output=$2 p t paths=()
+  case "$kind" in
+    process) for p in "$HB_PROC"/[0-9]*; do
+      [[ -d "$p" ]] || continue; paths+=("P" "$p")
+      for t in "$p"/task/[0-9]*; do [[ -d "$t" ]] && paths+=("T" "$t"); done
+    done;;
+    frequency)
+      for p in "$HB_SYS"/devices/system/cpu/cpufreq/policy[0-9]*; do [[ -d "$p" ]] && paths+=(F "$p"); done
+      if ((${#paths[@]}==0)); then
+        for p in "$HB_SYS"/devices/system/cpu/cpu[0-9]*/cpufreq; do [[ -d "$p" ]] && paths+=(F "$p"); done
+      fi;;
+    idle) for p in "$HB_SYS"/devices/system/cpu/cpu[0-9]*/cpuidle/state*; do [[ -d "$p" ]] && paths+=(I "$p"); done;;
+    topology) for p in "$HB_SYS"/devices/system/node/node[0-9]*; do [[ -d "$p" ]] && paths+=(N "$p"); done;;
+  esac
+  # One awk process per snapshot, not one process per thread or sysfs field.
+  printf '%s\n' "${paths[@]}" | LC_ALL=C awk -v kind="$kind" -v pr="$HB_PROC" -v sy="$HB_SYS" -v ticks="${HB_TICKS:-100}" -v countfile="$SNAP/hostbound/.snapshot_count" '
+  function q(s, i,c,o){o="\"";for(i=1;i<=length(s);i++){c=substr(s,i,1);o=o (c=="\\"?"\\\\":c=="\""?"\\\"":c in esc?esc[c]:c)}return o "\""}
+  function readfile(p, x,s,r){s="";found=0;while((r=(getline x < p))>0){s=s (found?"\n":"") x;found=1}close(p);exists=(r>=0);return s}
+  function stamp( a){split(readfile(pr "/uptime"),a," ");return a[1]+0}
+  function basename(p,a,n){n=split(p,a,"/");return a[n]}
+  function cpus(s, a,b,n,i,j,o,sep){gsub(/,/," ",s);n=split(s,a,/[[:space:]]+/);o="[";sep="";for(i=1;i<=n;i++){if(a[i]=="")continue;split(a[i],b,"-");if(b[1]!~/^[0-9]+$/ || (b[2]!="" && (b[2]!~/^[0-9]+$/ || b[2]<b[1] || b[2]-b[1]>100000)))return "null";for(j=b[1]+0;j<=(b[2]==""?b[1]:b[2]);j++){o=o sep sprintf("%.0f",j);sep=","}}return o "]"}
+  function stat(p, a,s,n){s=readfile(p "/stat");if(!exists)return 0;sub(/^.*\) /,"",s);n=split(s,a," ");if(n<37 || a[20]!~/^[0-9]+$/)return 0;state=a[1];ppid=a[2]+0;flags=a[7]+0;ut=a[12]+0;st=a[13]+0;start=a[20]+0;cpu=a[37]+0;return 1}
+  function status(s,k, a,n,i,v){n=split(s,a,"\n");for(i=1;i<=n;i++)if(index(a[i],k ":")==1){v=substr(a[i],length(k)+2);sub(/^[[:space:]]+/,"",v);return v}return ""}
+  function allowed(s,k, v){v=status(s,k);return v=="" && index(s,k ":")==0?"null":cpus(v)}
+  function unescape(s){gsub(/\\040/," ",s);gsub(/\\011/,"\t",s);gsub(/\\012/,"\n",s);gsub(/\\134/,"\\",s);return s}
+  function mountgroup(rel,controllers,version, lines,n,i,a,j,fs,opts,root,point,best,tail){
+    n=split(mountinfo,lines,"\n");best=-1;cgroot="";cgpath=""
+    for(i=1;i<=n;i++){
+      split(lines[i],a," ");j=7;while(j<=length(a) && a[j]!="-")j++
+      fs=a[j+1];opts="," a[j+3] ","
+      if(version==2 && fs!="cgroup2")continue
+      if(version==1 && (fs!="cgroup" || ("," controllers "," ~ /,cpuset,/ && opts!~/,cpuset,/) || ("," controllers "," ~ /,cpu,/ && opts!~/,cpu,/)))continue
+      root=unescape(a[4]);point=unescape(a[5]);if(root!="/" && rel!=root && index(rel,root "/")!=1)continue
+      if(length(root)>best){best=length(root);cgroot=point;tail=(root=="/"?rel:substr(rel,length(root)+1));cgpath=point (tail=="/"?"":tail)}
+    }
+    return cgroot!=""
+  }
+  function effective(path,version,which, root,v,controllers){root=cgroot;while(1){
+    v=readfile(path "/cpuset." which ".effective");if(exists)return cpus(v)
+    v=readfile(path "/cpuset.effective_" which);if(exists)return cpus(v)
+    if(version==2){
+      # A readable controllers file without cpuset proves this level inherits.
+      # Missing/unreadable interfaces with cpuset enabled remain unknown.
+      controllers=readfile(path "/cgroup.controllers");if(!exists || (" " controllers " ")~/ cpuset /)return "null"
+    }else{v=readfile(path "/cpuset." which);if(!exists)return "null";if(v!="")return cpus(v)}
+    if(path==root)break;sub(/\/[^/]+$/,"",path)
+  }return "null"}
+  function cgroups(cg, lines,n,i,a,v,controllers,rel,path,keys,nk,j,value,row,rows,sep,ver,candidates,k){
+    if(cg in cgcache){cgrows=cgcache[cg];effcpu=effcache[cg];effmem=memcache[cg];return}
+    rows="[";sep="";effcpu="null";effmem="null";n=split(cg,lines,"\n")
+    nk=split("cpu.max cpu.stat cpu.cfs_quota_us cpu.cfs_period_us cpuset.cpus.effective cpuset.mems.effective cpuset.effective_cpus cpuset.effective_mems cpuset.cpus cpuset.mems",keys," ")
+    for(i=1;i<=n;i++){
+      split(lines[i],a,":");controllers=a[2];rel=substr(lines[i],length(a[1])+length(a[2])+3)
+      if(rel~/\/\.\.(\/|$)/ || rel~/\/\.(\/|$)/)continue
+      if(a[1]=="0")ver=2
+      else if(("," controllers ",")~/,(cpu|cpuset),/)ver=1
+      else continue
+      if(!mountgroup(rel,controllers,ver))continue
+      path=cgpath
+      if(ver==2 || ("," controllers ",")~/,cpuset,/){effcpu=effective(path,ver,"cpus");effmem=effective(path,ver,"mems")}
+      while(1){row="{\"path\":" q(path) ",\"version\":" ver ",\"controllers\":" q(controllers==""?"unified":controllers)
+        for(j=1;j<=nk;j++){value=readfile(path "/" keys[j]);if(exists)row=row "," q(keys[j]) ":" q(value)}
+        rows=rows sep row "}";sep=",";if(path==cgroot)break;sub(/\/[^/]+$/,"",path);if(length(path)<length(cgroot))break
+      }
+    }
+    cgrows=rows "]";cgcache[cg]=cgrows;effcache[cg]=effcpu;memcache[cg]=effmem
+  }
+  function mapjson(a, k,o,sep){o="{";sep="";for(k in a){o=o sep q(k) ":" sprintf("%.0f",a[k]);sep=","}return o "}"}
+  function numa(p, text,lines,n,i,a,j,b,size,np,k,pol){
+    text=readfile(p "/numa_maps");if(!exists){numamissing++;return "{\"available\":false,\"node_pages\":{},\"node_kb\":{},\"unknown_page_size_pages\":{},\"mapping_count\":0}"}
+    for(k in pages)delete pages[k];for(k in kb)delete kb[k];for(k in unknown)delete unknown[k];for(k in policies)delete policies[k]
+    n=split(text,lines,"\n");np=0;for(i=1;i<=n;i++){if(split(lines[i],a," ")<2)continue;np++;policies[a[2]]++;size=0;for(j=3;j<=length(a);j++)if(a[j]~/^kernelpagesize_kB=/){split(a[j],b,"=");size=b[2]+0}
+      for(j=3;j<=length(a);j++)if(a[j]~/^N[0-9]+=[0-9]+$/){split(a[j],b,"=");k=substr(b[1],2);pages[k]+=b[2];if(size)kb[k]+=b[2]*size;else unknown[k]+=b[2]}
+    }
+    return "{\"available\":true,\"node_pages\":" mapjson(pages) ",\"node_kb\":" mapjson(kb) ",\"unknown_page_size_pages\":" mapjson(unknown) ",\"mapping_count\":" np ",\"policies\":" mapjson(policies) "}"
+  }
+  function error(id,reason){errcount++;errs=errs (errs==""?"":",") "{\"id\":" q(id) ",\"reason\":" q(reason) "}"}
+  BEGIN{CONVFMT="%.17g";OFMT="%.17g";mountinfo=readfile(pr "/self/mountinfo");for(i=1;i<32;i++)esc[sprintf("%c",i)]=sprintf("\\u%04x",i);begin=stamp();pc=0;tc=0;count=0}
+  NR%2==1{type=$0;next}
+  {
+    path=$0;if(path=="")next
+    if(type=="P" || type=="T"){
+      id=basename(path)+0;identity_begin=stamp();if(!stat(path)){error(id,"stat_unreadable_or_exited");next}
+      saved=start;s=readfile(path "/status");if(!exists){error(id,"status_unreadable_or_exited");next}
+      tgid=status(s,"Tgid")+0;if(tgid<=0 || (type=="P" && tgid!=id)){error(id,"invalid_tgid");next}
+      cg=readfile(path "/cgroup");source=exists?"task":"leader_fallback";if(type=="T" && !exists)cg=readfile(pr "/" tgid "/cgroup");cgroups(cg)
+      row="{\"tgid\":" tgid ",\"starttime\":" sprintf("%.0f",saved) ",\"state\":" q(state) ",\"ppid\":" ppid ",\"flags\":" sprintf("%.0f",flags) ",\"last_cpu\":" cpu ",\"utime_ticks\":" ut ",\"stime_ticks\":" st ",\"cpu_time_sec\":" ((ut+st)/ticks)
+      row=row ",\"name\":" q(status(s,"Name")) ",\"namespace_pids\":" cpus(status(s,"NSpid")) ",\"allowed_cpus\":" allowed(s,"Cpus_allowed_list") ",\"cpus_allowed_list\":" q(status(s,"Cpus_allowed_list")) ",\"mems_allowed_list\":" q(status(s,"Mems_allowed_list"))
+      row=row ",\"cgroup\":" q(cg) ",\"cgroup_cpu\":" cgrows ",\"cpuset_cpus_effective\":" (type=="T" && source!="task"?"null":effcpu) ",\"cpuset_mems_effective\":" (type=="T" && source!="task"?"null":effmem) ",\"identity_started_at\":" identity_begin
+      if(type=="P"){cmd=readfile(path "/cmdline");gsub(sprintf("%c",0)," ",cmd);row=row ",\"pid\":" id ",\"cmdline\":" q(cmd) ",\"threads\":" (status(s,"Threads")+0) ",\"kernel_thread\":" (int(flags/2097152)%2?"true":"false") ",\"numa_maps\":" numa(path)}
+      else row=row ",\"tid\":" id ",\"cgroup_source\":" q(source)
+      if(!stat(path) || start!=saved){error(id,"identity_changed_during_snapshot");next}
+      row=row ",\"identity_verified_at\":" stamp() "}"
+      if(type=="P"){pjson[id]=row;pstamp[id]=saved;porder[++pc]=id}else{tjson[++tc]=row;tp[tc]=tgid}
+    }else if(type=="F"){
+      rel=readfile(path "/related_cpus");if(rel=="")rel=readfile(path "/affected_cpus");id=basename(path)
+      if(rel=="" && id=="cpufreq"){parent=path;sub(/\/cpufreq$/,"",parent);rel=substr(basename(parent),4)}
+      group=cpus(rel);identity=(group=="[]"?path:group);if(identity in seen)next;seen[identity]=1
+      if(id=="cpufreq")id="cpus_" rel
+      row="{\"id\":" q(id) ",\"cpus\":" group ",\"path\":" q(path) ",\"unit\":\"kHz\"";errors="";n=split("related_cpus scaling_cur_freq cpuinfo_cur_freq cpuinfo_max_freq scaling_min_freq scaling_max_freq scaling_governor",keys," ")
+      for(i=1;i<=n;i++){v=readfile(path "/" keys[i]);if(exists)row=row "," q(keys[i]) ":" (v~/^[0-9]+$/ && keys[i]!="related_cpus" && keys[i]!="scaling_governor"?v:q(v));else errors=errors (errors==""?"":",") q(keys[i]) ":\"missing_or_unreadable\""}
+      items=items (count++?",":"") row ",\"errors\":{" errors "}}"
+    }else if(type=="I"){
+      parent=path;sub(/\/cpuidle\/[^/]+$/,"",parent);row="{\"cpu\":" (substr(basename(parent),4)+0) ",\"state\":" q(basename(path));errors="";n=split("name desc disable latency residency time usage",keys," ")
+      for(i=1;i<=n;i++){v=readfile(path "/" keys[i]);if(exists)row=row "," q(keys[i]) ":" (v~/^[0-9]+$/?v:q(v));else errors=errors (errors==""?"":",") q(keys[i]) ":\"missing_or_unreadable\""}
+      items=items (count++?",":"") row ",\"errors\":{" errors "}}"
+    }else if(type=="N"){
+      row="{\"node\":" (substr(basename(path),5)+0) ",\"cpus\":" cpus(readfile(path "/cpulist"));errors="";n=split("cpulist distance meminfo numastat vmstat",keys," ")
+      for(i=1;i<=n;i++){v=readfile(path "/" keys[i]);row=row "," q(keys[i] "_raw") ":" (exists?q(v):"null");if(!exists)errors=errors (errors==""?"":",") q(keys[i]) ":\"missing_or_unreadable\""}
+      v=readfile(path "/distance");row=row ",\"distance\":" cpus(v);v=readfile(path "/meminfo");n=split(v,lines,"\n");mem="";for(i=1;i<=n;i++){split(lines[i],a," ");if(a[4]~/^[0-9]+$/){sub(/:$/,"",a[3]);mem=mem (mem==""?"":",") q(a[3]) ":" a[4]}}
+      items=items (count++?",":"") row ",\"memory_kb\":{" mem "},\"errors\":{" errors "}}"
+    }
+  }
+  END{
+    if(kind=="process"){
+      ps="";ts="";count=0;for(i=1;i<=pc;i++){id=porder[i];if(!stat(pr "/" id) || start!=pstamp[id]){error(id,"leader_changed_during_snapshot");delete pjson[id];continue}ps=ps (count++?",":"") pjson[id]}
+      nt=0;for(i=1;i<=tc;i++)if(tp[i] in pjson)ts=ts (nt++?",":"") tjson[i]
+      print "{\"schema_version\":2,\"clock\":\"boottime\",\"clock_ticks\":" ticks ",\"ts\":" begin ",\"end_ts\":" stamp() ",\"processes\":[" ps "],\"threads\":[" ts "],\"errors\":[" errs "]}"
+    }else if(kind=="topology")print "{\"schema_version\":1,\"ts\":" begin ",\"online_cpus\":" cpus(readfile(sy "/devices/system/cpu/online")) ",\"online_nodes\":" cpus(readfile(sy "/devices/system/node/online")) ",\"distance_node_order\":" cpus(readfile(sy "/devices/system/node/online")) ",\"nodes\":[" items "]}"
+    else print "{\"schema_version\":2,\"ts\":" begin ",\"clock\":\"boottime\",\"" (kind=="frequency"?"policies":"states") "\":[" items "],\"capability\":" q(count?"available":"unsupported_or_unreadable") (kind=="idle"?",\"time_unit\":\"microseconds\",\"usage_unit\":\"entries\"":"") "}"
+    print count,errcount+0,numamissing+0 > countfile;close(countfile)
+  }' > "$output.tmp" && mv -f -- "$output.tmp" "$output"
+}
+hb_manifest(){
+  local tmp="$SNAP/hostbound/collection_manifest.json.tmp"
+  { printf '{"schema_version":1,"collector":"cpu_trace_collect.sh","duration_sec":%s,"minimal":%s,"hostbound":%s,"discover":%s,"entries":[' "$DURATION" "$MINIMAL" "$HOSTBOUND" "$DISCOVER"
+    awk 'NR>1{printf ","}{printf "%s",$0}' "$SNAP/hostbound/collection_entries.jsonl"
+    printf ']}\n'
+  } > "$tmp" && mv -f -- "$tmp" "$SNAP/hostbound/collection_manifest.json"
+  cp -- "$SNAP/hostbound/collection_manifest.json" "$SNAP/collection_manifest.json"
+}
+hb_entry(){
+  local category=$1 status=$2 rel=$3 reason=${4:-} rc=${5:-null} parsed=${6:-null} count=${7:-null} requested=${8:-true} command=${9:-null} command_exists=${10:-null}
+  local present=false empty=null size=null
+  if [[ -n "$rel" && -f "$SNAP/$rel" ]]; then
+    present=true;empty=true;[[ -s "$SNAP/$rel" ]] && empty=false;size=$(wc -c < "$SNAP/$rel");size=${size//[[:space:]]/}
+  fi
+  printf '{"category":"%s","requested":%s,"status":"%s","command":%s,"command_exists":%s,"returncode":%s,"raw_path":%s,"raw_exists":%s,"empty":%s,"size_bytes":%s,"parse_success":%s,"parsed_count":%s,"started_at":"%s","ended_at":"%s","failure_reason":%s}\n' \
+    "$category" "$requested" "$status" "$command" "$command_exists" "$rc" "$(if [[ -n "$rel" ]]; then printf '%s' "$rel" | hb_quote; else printf null; fi)" "$present" "$empty" "$size" "$parsed" "$count" "${HB_STARTED:-$(hb_now)}" "$(hb_now)" "$(if [[ -n "$reason" ]]; then printf '%s' "$reason" | hb_quote; else printf null; fi)" >> "$SNAP/hostbound/collection_entries.jsonl"
+}
+hb_file(){
+  local category=$1 source=$2 rel=$3 status=COLLECTED reason="" rc=0
+  if [[ "$rel" == */* ]]; then mkdir -p -- "${SNAP}/${rel%/*}"; fi
+  if [[ ! -e "$source" ]]; then status=UNSUPPORTED;reason=interface_missing;rc=1
+  elif ! cat -- "$source" > "$SNAP/$rel" 2> "$SNAP/hostbound/.read_error"; then
+    status=EXECUTION_FAILED;reason=$(cat "$SNAP/hostbound/.read_error");rc=1
+    [[ "$reason" == *[Pp]ermission* || "$reason" == *'not permitted'* ]] && status=PERMISSION_DENIED
+  fi
+  hb_entry "$category" "$status" "$rel" "$reason" "$rc"
+}
+hb_command(){
+  local category=$1 rel=$2;shift 2
+  local status=COLLECTED reason="" rc=0 argv="[" sep="" arg
+  for arg in "$@"; do argv+="$sep$(printf '%s' "$arg" | hb_quote)";sep=,;done;argv+=']'
+  HB_STARTED=$(hb_now)
+  if ! command -v "$1" >/dev/null 2>&1; then hb_entry "$category" COMMAND_NOT_FOUND "$rel" "executable_not_found:$1" null null null true "$argv" false;unset HB_STARTED;return 0;fi
+  if command -v timeout >/dev/null 2>&1; then timeout -k 2 15 "$@" > "$SNAP/$rel" 2>&1;else "$@" > "$SNAP/$rel" 2>&1;fi;rc=$?
+  if ((rc));then
+    reason=$(tail -c 2000 "$SNAP/$rel");status=EXECUTION_FAILED
+    [[ "$reason" == *[Pp]ermission* || "$reason" == *'not permitted'* || "$reason" == *'Access denied'* ]] && status=PERMISSION_DENIED
+    [[ "$reason" == *[Uu]nsupported* || "$reason" == *'not supported'* || "$reason" == *'invalid option'* || "$reason" == *'Invalid argument'* ]] && status=UNSUPPORTED
+    ((rc==124 || rc==137)) && reason=command_timed_out
+  fi
+  hb_entry "$category" "$status" "$rel" "$reason" "$rc" null null true "$argv" true
+  unset HB_STARTED
+}
+hb_data(){
+  local kind=$1 category=$2 rel=$3 count errors missing reason="" status=COLLECTED parsed=true
+  HB_STARTED=$(hb_now)
+  if hb_snapshot "$kind" "$SNAP/$rel"; then
+    read -r count errors missing < "$SNAP/hostbound/.snapshot_count"
+    [[ "$count" == 0 ]] && { status=UNSUPPORTED;[[ "$kind" == process ]] && status=NO_ACTIVE_PROCESS; }
+    if [[ "$kind" == process ]];then
+      HB_PROCESS_COUNT=$count;HB_NUMA_MISSING=$missing
+      if ((errors>0));then reason="partial_process_snapshot:$errors";((count==0)) && { status=EXECUTION_FAILED;parsed=false; };fi
+    fi
+    hb_entry "$category" "$status" "$rel" "$reason" 0 "$parsed" "$count"
+  else hb_entry "$category" EXECUTION_FAILED "$rel" snapshot_failed 1 false;fi
+  unset HB_STARTED
+}
+hb_phase(){
+  local phase=$1 name rel suffix="" tool p node context=unknown detector pid f
+  [[ "$phase" == end ]] && suffix=_at_end
+  for name in stat interrupts softirqs schedstat;do
+    rel="$name.txt";[[ "$name" == stat ]] && rel=proc_stat.txt
+    [[ "$phase" == end ]] && rel="hostbound/$name$suffix.txt"
+    case "$name" in stat) p=proc_stat;;interrupts)p=irq;;softirqs)p=softirq;;*)p=schedstat;;esac
+    hb_file "$p" "$HB_PROC/$name" "$rel"
+  done
+  if [[ "$phase" == start ]];then
+    for name in cpuinfo loadavg meminfo vmstat cmdline;do rel="$name.txt";[[ "$name" == cmdline ]] && rel=hostbound/kernel_cmdline.txt;hb_file host_context "$HB_PROC/$name" "$rel";done
+    hb_file cpu_topology "$HB_SYS/devices/system/cpu/online" hostbound/cpu_online.txt
+    hb_data topology cpu_topology hostbound/numa_topology.json
+    for p in "$HB_SYS"/devices/system/node/online "$HB_SYS"/devices/system/node/node[0-9]*/{cpulist,distance,meminfo}; do
+      [[ -e "$p" ]] && hb_file cpu_topology "$p" "hostbound/sysfs/node/${p#"$HB_SYS/devices/system/node/"}"
+    done
+    hb_command cpu_topology hostbound/lscpu.txt lscpu
+    hb_command cpu_topology hostbound/lscpu_extended.txt lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE
+    hb_command cpu_topology hostbound/lscpu_parse.txt lscpu -p=CPU,CORE,SOCKET,NODE,ONLINE
+    hb_command cpu_topology hostbound/numactl.txt numactl -H
+    hb_command cpu_topology hostbound/numastat.txt numastat
+    hb_command cpu_topology hostbound/numastat_memory.txt numastat -m
+    hb_command host_context hostbound/container_detector.txt systemd-detect-virt --container
+    detector=$(cat "$SNAP/hostbound/container_detector.txt" 2>/dev/null)
+    [[ "$detector" == none ]] && context=host
+    [[ -n "$detector" && "$detector" != none && "$detector" =~ ^[a-zA-Z0-9_-]+$ ]] && context=container
+    [[ -e /.dockerenv || -e /run/.containerenv ]] && context=container
+    { printf 'execution_context=%s\nboot_id=%s\ncollector_pid=%s\npid_namespace=%s\ninit_pid_namespace=%s\n' "$context" "$(cat "$HB_PROC/sys/kernel/random/boot_id" 2>/dev/null)" "$$" "$(readlink "$HB_PROC/self/ns/pid" 2>/dev/null)" "$(readlink "$HB_PROC/1/ns/pid" 2>/dev/null)"; } > "$SNAP/hostbound/host_context.txt"
+    hb_entry host_context COLLECTED hostbound/host_context.txt "" 0 true 1
+    for tool in gil_tracer function_monitor msprof host_analyzer;do hb_entry external_tools NOT_REQUESTED "" "external_tool:$tool" null null null false;done
+  fi
+  hb_data frequency frequency "hostbound/frequency_$phase.json"
+  hb_data idle idle "hostbound/idle_$phase.json"
+  if ((HOSTBOUND));then
+    hb_data process processes "hostbound/process_$phase.json"
+    hb_command processes "hostbound/ps_$phase.txt" ps -e -o pid,ppid,psr,stat,comm,args
+    hb_command processes "hostbound/pstree_$phase.txt" pstree -p
+    rel=hostbound/npu_smi_info.txt;[[ "$phase" == start ]] && rel=hostbound/npu_smi_info_start.txt
+    hb_command npu_info "$rel" npu-smi info
+    # Raw vendor tables are parsed offline; never equate unknown format with no tasks.
+    [[ "$phase" == start && -f "$SNAP/$rel" ]] && cp -- "$SNAP/$rel" "$SNAP/hostbound/npu_smi_info.txt"
+    if [[ "$phase" == start ]];then
+      hb_command npu_mapping hostbound/npu_smi_map.txt npu-smi info -m
+      hb_command npu_topology hostbound/npu_smi_topology.txt npu-smi info -t topo
+    fi
+    # All processes (including NPU workers and descendants) have NUMA page summaries
+    # in process_*.json. Explicit roots additionally retain complete raw maps.
+    p=COLLECTED
+    ((HB_PROCESS_COUNT==0 || HB_NUMA_MISSING>=HB_PROCESS_COUNT)) && p=EXECUTION_FAILED
+    hb_entry numa_process "$p" "hostbound/process_$phase.json" "numa_maps_unavailable:${HB_NUMA_MISSING:-0};raw_maps_for_explicit_pids" 0 null
+    for pid in ${PID_LIST//,/ };do
+      for f in status cgroup numa_maps stat cmdline;do hb_file numa_process "$HB_PROC/$pid/$f" "hostbound/pid_${pid}_${f}_${phase}.txt";done
+      hb_command numa_process "hostbound/pid_${pid}_numastat_${phase}.txt" numastat -p "$pid"
+      hb_command processes "hostbound/pid_${pid}_affinity_${phase}.txt" taskset -pc "$pid"
+    done
+  else
+    for p in processes npu_info npu_mapping npu_topology numa_process;do hb_entry "$p" NOT_REQUESTED "" disabled_by_no_hostbound null null null false;done
+  fi
+  hb_manifest
+}
+record_trace_status(){
+  local status=$1 reason=${2:-} rel category
+  printf '%s: %s\n' "$status" "$reason" > "$SNAP/hostbound/trace_error.txt"
+  if [[ "$status" == COLLECTED && ! -s "$SNAP/trace.txt" ]];then status=PARSE_FAILED;reason=empty_trace_export;fi
+  hb_entry trace "$status" trace.txt "$reason"
+  for rel in hostbound/frequency_samples.jsonl hostbound/capabilities.tsv;do
+    category=frequency;[[ "$rel" == *capabilities* ]] && category=trace_capabilities
+    if [[ -f "$SNAP/$rel" ]];then hb_entry "$category" COLLECTED "$rel";else hb_entry "$category" "$([[ "$status" == COLLECTED ]] && echo EXECUTION_FAILED || echo "$status")" "$rel" not_generated;fi
+  done
+  hb_manifest
+}
+hb_poll(){
+  while [[ ! -e "$SNAP/hostbound/poll.stop" ]];do
+    hb_snapshot frequency "$SNAP/hostbound/.frequency_poll.json" || return 1
+    cat "$SNAP/hostbound/.frequency_poll.json" >> "$SNAP/hostbound/frequency_samples.jsonl"
+    sleep "$FREQ_INTERVAL"
+  done
+}
+# END standalone evidence
+
 # ---------- 参数解析 ----------
 DURATION=30; OUTDIR="."; BUFFER_SIZE=4096; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=1; DISCOVER=1; FREQ_INTERVAL=1
 while [[ $# -gt 0 ]]; do
@@ -191,85 +457,9 @@ PHASE_TOTAL=5
 phase_begin "采集只读能力、拓扑与进程前置证据"
 mkdir -p "$OUTDIR/cpu_trace/hostbound" || exit 1
 SNAP="$OUTDIR/cpu_trace"
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-HELPER="$SCRIPT_DIR/host_snapshot.py"
-EVIDENCE_HELPER="$SCRIPT_DIR/collection_evidence.py"
-PYTHON=""; command -v python3 >/dev/null 2>&1 && PYTHON=python3
-EVIDENCE_READY=0; SIDECAR_FAILURE_STATUS=COMMAND_NOT_FOUND; SIDECAR_FAILURE_REASON=python3_not_found
-if [[ -n "$PYTHON" ]]; then
-  if [[ ! -r "$HELPER" ]]; then
-    SIDECAR_FAILURE_REASON=host_snapshot.py_not_found
-  elif [[ ! -r "$EVIDENCE_HELPER" ]]; then
-    SIDECAR_FAILURE_REASON=collection_evidence.py_not_found
-  else
-    SIDECAR_FAILURE_STATUS=UNSUPPORTED; SIDECAR_FAILURE_REASON=python3_or_collection_helper_unusable
-    "$PYTHON" "$EVIDENCE_HELPER" --help >/dev/null 2>&1 && EVIDENCE_READY=1
-  fi
-fi
-record_trace_status(){
-  local status="$1" reason="$2"
-  printf '%s: %s\n' "$status" "$reason" > "$SNAP/hostbound/trace_error.txt"
-  if (( EVIDENCE_READY )); then
-    "$PYTHON" "$EVIDENCE_HELPER" trace --root "$SNAP" --status "$status" --reason "$reason"
-  else
-    # Only fixed identifiers, booleans, status enum and UTC date enter JSON.
-    local stamp trace_exists=false trace_empty=null helper_exists=false category requested category_reason
-    stamp=$(date -u +%FT%TZ)
-    [[ -n "$PYTHON" ]] && helper_exists=true
-    [[ -f "$SNAP/trace.txt" ]] && { trace_exists=true; trace_empty=true; [[ -s "$SNAP/trace.txt" ]] && trace_empty=false; }
-    [[ -e "$SNAP/hostbound/helper_error.txt" ]] || printf '%s\n' "$SIDECAR_FAILURE_REASON" > "$SNAP/hostbound/helper_error.txt"
-    printf '{"schema_version":1,"entries":[{"category":"sidecar_helper","requested":true,"command":["python3","collection_evidence.py"],"command_exists":%s,"returncode":null,"raw_path":"hostbound/helper_error.txt","raw_exists":true,"empty":false,"parse_success":false,"parsed_count":0,"started_at":"%s","ended_at":"%s","failure_reason":"%s","status":"%s"}' "$helper_exists" "$stamp" "$stamp" "$SIDECAR_FAILURE_REASON" "$SIDECAR_FAILURE_STATUS" > "$SNAP/hostbound/collection_manifest.json"
-    for category in cpu_topology npu_info npu_mapping npu_topology processes numa_process irq softirq proc_stat schedstat frequency idle; do
-      requested=true; local category_status="$SIDECAR_FAILURE_STATUS"; category_reason="$SIDECAR_FAILURE_REASON"
-      if [[ "$category" == npu_* || "$category" == processes || "$category" == numa_process ]] && (( ! HOSTBOUND )); then requested=false; category_status=NOT_REQUESTED; category_reason=disabled_by_no_hostbound; fi
-      printf ',{"category":"%s","requested":%s,"command":null,"command_exists":null,"returncode":null,"raw_path":null,"raw_exists":false,"empty":null,"parse_success":null,"parsed_count":null,"started_at":"%s","ended_at":"%s","failure_reason":"%s","status":"%s"}' "$category" "$requested" "$stamp" "$stamp" "$category_reason" "$category_status" >> "$SNAP/hostbound/collection_manifest.json"
-    done
-    printf ',{"category":"trace","requested":true,"command":["ftrace","private_instance"],"command_exists":null,"returncode":null,"raw_path":"trace.txt","raw_exists":%s,"empty":%s,"parse_success":null,"parsed_count":null,"started_at":"%s","ended_at":"%s","failure_reason":"see hostbound/trace_error.txt","status":"%s"}]}\n' "$trace_exists" "$trace_empty" "$stamp" "$stamp" "$status" >> "$SNAP/hostbound/collection_manifest.json"
-    cp "$SNAP/hostbound/collection_manifest.json" "$SNAP/collection_manifest.json"
-  fi
-}
-record_sidecar_failure(){
-  local phase="$1" rc="$2"
-  printf 'sidecar_%s_failed returncode=%s\n' "$phase" "$rc" >> "$SNAP/hostbound/helper_error.txt"
-  # Keep the ledger independent of the failed helper and preserve prior rows.
-  "$PYTHON" - "$SNAP" "$phase" "$rc" <<'SIDECAR_FAILURE_LEDGER'
-import datetime, json, os, sys
-from pathlib import Path
-root, phase, rc = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
-path = root / 'hostbound/collection_manifest.json'
-try:
-    data = json.loads(path.read_text(encoding='utf-8'))
-    if not isinstance(data, dict) or not isinstance(data.get('entries'), list):
-        raise ValueError('invalid manifest')
-except (OSError, ValueError):
-    data = {'schema_version': 1, 'entries': []}
-stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-raw = root / 'hostbound/helper_error.txt'
-data['entries'].append({'category': 'sidecar_'+phase, 'requested': True,
-    'command': [sys.executable, 'collection_evidence.py', phase], 'command_exists': True,
-    'returncode': rc, 'raw_path': 'hostbound/helper_error.txt', 'raw_exists': raw.is_file(),
-    'empty': raw.stat().st_size == 0 if raw.is_file() else None,
-    'parse_success': False, 'parsed_count': None, 'started_at': stamp, 'ended_at': stamp,
-    'failure_reason': 'sidecar_%s_failed returncode=%d; phase snapshots may be incomplete' % (phase, rc),
-    'status': 'EXECUTION_FAILED'})
-for name in ('collection_manifest.json', 'hostbound/collection_manifest.json'):
-    dest = root / name
-    temp = dest.with_suffix('.json.tmp')
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-    os.replace(str(temp), str(dest))
-SIDECAR_FAILURE_LEDGER
-}
-if (( EVIDENCE_READY )); then
-  if ! "$PYTHON" "$EVIDENCE_HELPER" start --root "$SNAP" --hostbound "$HOSTBOUND" --discover "$DISCOVER" --pids "$PID_LIST" --duration "$DURATION" --minimal "$MINIMAL"; then
-    printf '%s\n' 'sidecar_start_failed' >> "$SNAP/hostbound/helper_error.txt"
-    SIDECAR_FAILURE_STATUS=EXECUTION_FAILED; SIDECAR_FAILURE_REASON=sidecar_start_failed
-    EVIDENCE_READY=0; record_trace_status NOT_INCLUDED sidecar_start_failed
-  fi
-else
-  printf '%s\n' "$SIDECAR_FAILURE_REASON" > "$SNAP/hostbound/helper_error.txt"
-  record_trace_status NOT_INCLUDED sidecar_helper_unavailable
-  warn "完整侧车不可用，原因已写入 hostbound/helper_error.txt 与 collection_manifest.json"
-fi
+HB_TICKS=$(getconf CLK_TCK 2>/dev/null || echo 100)
+: > "$SNAP/hostbound/collection_entries.jsonl"
+hb_phase start
 phase_end "前置证据状态已保存: $SNAP/hostbound/collection_manifest.json"
 if [[ "$EUID" -ne 0 ]]; then
   record_trace_status PERMISSION_DENIED root_required_for_private_ftrace_instance
@@ -349,10 +539,10 @@ ENABLED_EVENTS=""
 CAPS="$SNAP/hostbound/capabilities.tsv"
 printf 'event\texists\twritable\trequested\tenabled\treason\n' > "$CAPS"
 [[ -n "$CPU_MASK" ]] && { echo "$CPU_MASK" > "$TRACE_DIR/tracing_cpumask" || { record_trace_status PERMISSION_DENIED tracing_cpumask_write_failed; exit 1; }; }
-# mono 与 Python time.monotonic 同域；不支持时报告不做跨时钟关联。
+# /proc/uptime 使用 boottime；仅 boot trace clock 与其对齐。
 TRACE_CLOCK="unknown"
-if grep -qw mono "$TRACE_DIR/trace_clock"; then
-  echo mono > "$TRACE_DIR/trace_clock" && TRACE_CLOCK="mono"
+if grep -qw boot "$TRACE_DIR/trace_clock"; then
+  echo boot > "$TRACE_DIR/trace_clock" && TRACE_CLOCK="boot"
 fi
 printf '%s\n' "$TRACE_CLOCK" > "$SNAP/hostbound/trace_clock.txt"
 
@@ -416,15 +606,13 @@ snap_file /sys/devices/system/cpu/online  cpu_online.txt
   command -v numactl >/dev/null && numactl -H; } > "$SNAP/system_info.txt" 2>/dev/null
 phase_end "静态快照已写入 $SNAP/"
 
-# 频率轮询使用与快照相同的只读 helper；能力缺失已写入 manifest。
+# 频率轮询复用内嵌 awk；能力缺失写入 manifest。
 # ---------- 执行采集 ----------
 START_TS=$(date +%s); START_TIME=$(date "+%Y-%m-%d %H:%M:%S")
 echo "$START_TIME" > "$SNAP/trace_start_time.txt"
 phase_begin "ftrace 采集 (${DURATION}s · $([[ $MINIMAL -eq 1 ]] && echo 精简 || echo 全量)模式$([[ -n "$PID_LIST" ]] && echo " · HostBound:$PID_LIST"))"
 echo 1 > "$TRACE_DIR/tracing_on" || { record_trace_status PERMISSION_DENIED tracing_start_failed; err "开启 tracing 失败"; cleanup; exit 1; }
-if (( EVIDENCE_READY )); then
-  "$PYTHON" "$HELPER" poll --output "$SNAP/hostbound/frequency_samples.jsonl" --interval "$FREQ_INTERVAL" --stop-file "$SNAP/hostbound/poll.stop" & FREQ_PID=$!
-fi
+hb_poll & FREQ_PID=$!
 echo 'CPU_HOST_WINDOW_START' > "$TRACE_DIR/trace_marker"
 T_COL0=$SECONDS; PREV_E=0; PREV_T=$T_COL0
 # 刷新节奏自适应: 短采集 0.5s 刷新, 越长越稀疏, 减少无谓开销
@@ -455,11 +643,7 @@ if [[ -n "$FREQ_PID" ]]; then
   touch "$SNAP/hostbound/poll.stop"
   wait "$FREQ_PID" || echo "frequency_poll_failed" >> "$SNAP/hostbound/helper_error.txt"; FREQ_PID=""
 fi
-if (( EVIDENCE_READY )); then
-  "$PYTHON" "$EVIDENCE_HELPER" end --root "$SNAP" --hostbound "$HOSTBOUND" --discover "$DISCOVER" --pids "$PID_LIST" --duration "$DURATION" --minimal "$MINIMAL"
-  SIDECAR_END_RC=$?
-  (( SIDECAR_END_RC == 0 )) || record_sidecar_failure end "$SIDECAR_END_RC"
-fi
+hb_phase end
 END_TIME=$(date "+%Y-%m-%d %H:%M:%S"); echo "$END_TIME" > "$SNAP/trace_end_time.txt"
 phase_end "采集结束 ($END_TIME)"
 
@@ -522,16 +706,12 @@ for f in "$TRACE_DIR"/per_cpu/cpu*/stats; do
   cp "$f" "$SNAP/hostbound/trace_stats/$c.txt"
 done
 awk -F': *' '$1 ~ /^(overrun|commit overrun|dropped events)$/ {s+=$2} END {print s+0}' "$SNAP"/hostbound/trace_stats/cpu*.txt > "$SNAP/trace_overrun.txt"
-printf '%s\n' "${CPU_LIST:-$(cat /sys/devices/system/cpu/online)}" > "$SNAP/hostbound/collection_cpus.txt"
+printf '%s\n' "${CPU_LIST:-$(cat "$HB_SYS/devices/system/cpu/online")}" > "$SNAP/hostbound/collection_cpus.txt"
 
 cleanup
 
-# HostBound/进程/NUMA 前后证据已由 collection_evidence.py 收集。
-if (( EVIDENCE_READY )); then
-  "$PYTHON" "$EVIDENCE_HELPER" trace --root "$SNAP" --status COLLECTED
-else
-  record_trace_status COLLECTED helper_unavailable_raw_trace_retained
-fi
+# 所有证据由本文件内嵌 Bash/awk 生成。
+record_trace_status COLLECTED
 
 # ---------- 元数据与打包 ----------
 cat > "$SNAP/metadata.txt" <<EOF

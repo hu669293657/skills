@@ -180,14 +180,12 @@ class NpuSafetyTests(unittest.TestCase):
         self.assertTrue(risks)
         self.assertTrue(all(f['priority'] == 'P2' and f['evidence_state'] == 'POTENTIAL' for f in risks))
 
-    def test_binding_script_checks_every_tid_identity_and_rolls_back_on_exit(self):
-        script = metrics(snapshots(), measured=True)['npu_affinity']['commands']
-        self.assertIn('thread_ids 4115', script)
-        self.assertIn('starttime 14115', script)
-        self.assertIn('effective_cpuset 14115', script)
-        self.assertIn('restore_tid 14115', script)
-        self.assertIn('trap on_error EXIT', script)
-        self.assertNotIn('taskset -acp', script)
+    def test_report_commands_only_contain_concrete_taskset_settings(self):
+        import re
+        commands = metrics(snapshots(), measured=True)['npu_affinity']['commands']
+        self.assertTrue(commands)
+        self.assertTrue(all(re.fullmatch(r'taskset -(?:apc|pc) [0-9,-]+ [1-9][0-9]*', line)
+                            for line in commands.splitlines()))
 
 
 if __name__ == '__main__':

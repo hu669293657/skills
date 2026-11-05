@@ -344,7 +344,7 @@ def analyze_npu_affinity(m):
                                           'taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。'],
                        expected_improvement='待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。',
                        verification=['逐 TID taskset -pc 与有效 cpuset 核验', '同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡'],
-                       rollback='执行脚本逐 TID 保存原 affinity/starttime；在同宿主机运行备份目录 rollback.sh。',
+                       rollback='原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。',
                        thread_rows=ev.get('thread_rows', []), _candidate=candidate,
                        memory_locality=_memory_locality(snapshot, pid, ev, local_nodes) if pid else {})
             rows.append(row)
@@ -449,88 +449,67 @@ def analyze_npu_affinity(m):
         if not row['reasons']:
             row['reasons'] = ['当前证据不足以提出安全的具体 CPU 掩码。']
     notes.append('不按卡数或 NUMA 节点等分 CPU；不默认预留系统核。共享范围只有完整运行/等待证据支持时才提出互斥核心组方案。')
+    children, child_evidence = _child_binding_actions(rows, m, online) if context.get('execution_context') == 'host' else ([], [])
+    actions.extend(children)
     return {'rows': rows, 'notes': notes, 'host_context': context,
+            'children': child_evidence,
             'commands': _binding_script(actions, context) if actions else '',
             'mapping': {k: v for k, v in mapping.items() if k != 'by_npu'},
             'process_parser': {k: v for k, v in parsed_info.items() if k != 'processes'},
             'coverage': '显式 NPU CPU 映射/宿主机进程身份/全线程 affinity 与 cpuset/实际 NUMA 页分布/运行与等待证据'}
 
 def _binding_script(actions, context):
-    # Numeric PID/CPU/starttime inputs are parsed above; boot_id is shell-quoted defensively.
-    boot_id = context['boot_id'].replace("'", "'\"'\"'")
-    lines = ["# 仅在原物理机/宿主机执行；不要进入容器。先阅读报告，再运行。",
-             "sudo bash <<'HOST_CPU_BIND'", 'set -euo pipefail',
-             '[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || { echo "请回到宿主机"; exit 1; }',
-             'if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; then echo "请回到宿主机"; exit 1; fi',
-             "[ \"$(cat /proc/sys/kernel/random/boot_id)\" = '%s' ] || { echo '主机/启动周期已变化，请重新采集'; exit 1; }" % boot_id,
-             'backup=$(mktemp -d /var/tmp/npu-affinity.XXXXXX)',
-             'echo "备份和回滚脚本：$backup"',
-             "cat > \"$backup/rollback.sh\" <<'ROLLBACK_HEADER'",
-             '#!/usr/bin/env bash', 'set -euo pipefail',
-             '[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || exit 1',
-             'if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; then exit 1; fi',
-             "[ \"$(cat /proc/sys/kernel/random/boot_id)\" = '%s' ] || { echo '回滚主机/启动周期不一致'; exit 1; }" % boot_id,
-             'failed=0', 'restore_tid() {', '  local tid=$1 expected=$2 previous=$3 s',
-             '  if [ ! -r "/proc/$tid/stat" ]; then echo "跳过已退出 TID $tid"; return; fi',
-             '  s=$(cat "/proc/$tid/stat") || { echo "跳过已退出 TID $tid"; return; }',
-             '  s=${s##*) }; set -- $s',
-             '  if [ "${20}" != "$expected" ]; then echo "跳过已复用 TID $tid"; return; fi',
-             '  if ! taskset -pc "$previous" "$tid"; then failed=1; fi', '}', 'ROLLBACK_HEADER',
-             "starttime() { local s; s=$(cat \"/proc/$1/stat\"); s=${s##*) }; set -- $s; printf '%s' \"${20}\"; }",
-             "check_cpu_list() { local want=$1 have=$2; python3 - \"$want\" \"$have\" <<'CPU_CHECK'",
-             'import sys',
-             'def cpus(s):',
-             '    out=set()',
-             "    for part in s.strip().split(','):",
-             "        a,_,b=part.partition('-')",
-             '        if a: out.update(range(int(a),int(b or a)+1))',
-             '    return out',
-             'raise SystemExit(0 if cpus(sys.argv[1]) and cpus(sys.argv[1]) <= cpus(sys.argv[2]) else 1)',
-             'CPU_CHECK', '}',
-             "effective_cpuset() { local p=$1 cg value; cg=$(awk -F: '$1==0 {print $3}' /proc/\"$p\"/cgroup);",
-             'if [ -n "$cg" ] && [ -r "/sys/fs/cgroup${cg}/cpuset.cpus.effective" ]; then cat "/sys/fs/cgroup${cg}/cpuset.cpus.effective"; return; fi',
-             "cg=$(awk -F: '$2 ~ /(^|,)cpuset(,|$)/ {print $3}' /proc/\"$p\"/cgroup)",
-             '[ -n "$cg" ] || return 1',
-             'for f in "/sys/fs/cgroup/cpuset${cg}/cpuset.effective_cpus" "/sys/fs/cgroup/cpuset${cg}/cpuset.cpus"; do if [ -r "$f" ]; then value=$(cat "$f"); if [ -n "$value" ]; then printf "%s\\n" "$value"; return; fi; fi; done',
-             'return 1; }', '# 全部预检、逐 TID 保存成功之后才执行绑核。']
-    lines += ['thread_ids() { local p=$1 task; for task in /proc/"$p"/task/*; do printf "%s\\n" "${task##*/}"; done | sort -n | paste -sd " " -; }',
-              '# 先暂停业务层线程创建；脚本发现线程集合变化会停止并回滚已保存的线程。']
+    """Only concrete taskset settings; preserve already suitable narrow masks."""
+    lines = []
     for row in actions:
-        pid, target, ev = row['pid'], row['target'], row['evidence']
-        expected_tids = ' '.join(str(t) for t in sorted(ev['tids']))
-        lines += ["[ \"$(starttime %d)\" = '%s' ] || { echo 'PID %d 已变化，请重新采集'; exit 1; }" % (pid, ev['starttime'], pid),
-                  "[ \"$(thread_ids %d)\" = '%s' ] || { echo '线程集合已变化，请重新核验'; exit 1; }" % (pid, expected_tids),
-                  "check_cpu_list '%s' \"$(cat /sys/devices/system/cpu/online)\"" % target,
-                  "check_cpu_list '%s' \"$(effective_cpuset %d)\" || { echo 'PID %d 的 cpuset 不允许目标 CPU'; exit 1; }" % (target, pid, pid)]
-        for tid in sorted(ev['tids']):
-            lines += ["[ \"$(starttime %d)\" = '%s' ] || { echo 'TID %d 已变化'; exit 1; }" % (tid, ev['thread_starttime'][tid], tid),
-                      "check_cpu_list '%s' \"$(effective_cpuset %d)\" || { echo 'TID %d 的 cpuset 不允许目标 CPU'; exit 1; }" % (target, tid, tid),
-                      'taskset -pc %d >> "$backup/before.txt"' % tid,
-                      "old=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/%d/task/%d/status)" % (pid, tid),
-                      "[ \"$old\" = '%s' ] || { echo 'TID %d affinity 已变化，请重新核验'; exit 1; }" % (cpu_list(ev['allowed'][tid]), tid),
-                      "printf 'restore_tid %d %s %%s\\n' \"$old\" >> \"$backup/rollback.sh\"" % (tid, ev['thread_starttime'][tid])]
-    lines += ["printf '%s\\n' 'exit \"$failed\"' >> \"$backup/rollback.sh\"",
-              'on_error() { local rc=$?; trap - EXIT INT TERM; echo "操作未完成，回滚已保存线程；检查 $backup"; bash "$backup/rollback.sh" || true; exit "$rc"; }',
-              'trap on_error EXIT', 'trap \'exit 130\' INT', 'trap \'exit 143\' TERM',
-              '# 逐 TID 应用，避免 -a 将未备份的新线程一并改动。']
-    for row in actions:
-        lines.append("[ \"$(starttime %d)\" = '%s' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }" % (row['pid'], row['evidence']['starttime']))
-        lines.append("[ \"$(thread_ids %d)\" = '%s' ] || { echo '线程集合已变化'; false; }" % (row['pid'], ' '.join(str(t) for t in sorted(row['evidence']['tids']))))
-        for tid in sorted(row['evidence']['tids']):
-            lines += ["[ \"$(starttime %d)\" = '%s' ] || { echo 'TID 已复用'; false; }" % (tid, row['evidence']['thread_starttime'][tid]),
-                      "check_cpu_list '%s' \"$(cat /sys/devices/system/cpu/online)\"" % row['target'],
-                      "check_cpu_list '%s' \"$(effective_cpuset %d)\"" % (row['target'], tid),
-                      'taskset -pc %s %d' % (row['target'], tid)]
-    lines += ['# 验证所有线程的 allowed CPU，保存执行后快照。']
-    for row in actions:
-        pid, target = row['pid'], row['target']
-        lines += ["[ \"$(starttime %d)\" = '%s' ] || { echo '执行期间 PID 已复用'; false; }" % (pid, row['evidence']['starttime'])]
-        for tid in sorted(row['evidence']['tids']):
-            lines.append("[ \"$(starttime %d)\" = '%s' ] || { echo '执行期间 TID 已复用'; false; }" % (tid, row['evidence']['thread_starttime'][tid]))
-        lines += ['taskset -apc %d | tee -a "$backup/after.txt"' % pid,
-                  "[ \"$(thread_ids %d)\" = '%s' ] || { echo '执行期间线程集合变化，原线程回滚后需核验新线程'; false; }" % (pid, ' '.join(str(t) for t in sorted(row['evidence']['tids']))),
-                  'for task in /proc/%d/task/*; do' % pid,
-                  "  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' \"$task/status\")",
-                  "  [ \"$actual\" = '%s' ] || { echo '线程 affinity 与目标不一致'; false; }" % target, 'done']
-    lines += ['trap - EXIT INT TERM', 'echo "如需回滚，在本宿主机运行：sudo bash $backup/rollback.sh"', 'HOST_CPU_BIND']
-    return '\n'.join(lines)
+        pid, target, ev = row['pid'], row['target'], row.get('evidence', {})
+        allowed = ev.get('allowed', {})
+        target_set = cpus(target)
+        preserve = {tid for tid, values in allowed.items() if values and values <= target_set}
+        if preserve:
+            for tid in sorted(set(allowed) - preserve):
+                lines.append('taskset -pc %s %d' % (target, tid))
+        else:
+            lines.append('taskset -apc %s %d' % (target, pid))
+    return '\n'.join(dict.fromkeys(lines))
+
+
+def _child_binding_actions(rows, m, online):
+    """Expand stable descendants; a child's own NPU mapping takes precedence."""
+    snapshot = m.get('snapshot', {})
+    batches = [process_batch(snapshot, phase) for phase in ('start', 'end')]
+    before, after = [{p['tgid']: p for p in batch.get('processes', [])} for batch in batches]
+    roots = {r['pid']: r for r in rows if r['pid']}
+    actions, evidence = [], []
+    for pid, process in sorted(after.items()):
+        if pid in roots:
+            continue
+        ancestry, current, seen = [], pid, set()
+        while current in before and current in after and current not in seen:
+            seen.add(current)
+            old, new = before[current], after[current]
+            if old.get('starttime') != new.get('starttime') or old.get('ppid') != new.get('ppid'):
+                break
+            ancestry.append(current)
+            current = new.get('ppid')
+            if current in roots:
+                parent = roots[current]
+                if parent['blockers'] or not parent['target']:
+                    break
+                ev = _pid_evidence(snapshot, pid, m)
+                target = cpus(parent['target'])
+                blockers = []
+                if ev['identity_status'] != 'VERIFIED' or not ev['complete']:
+                    blockers.append('子进程身份或全线程快照不完整')
+                if not target <= online or not target <= ev['cpuset']:
+                    blockers.append('子进程有效 cpuset 不允许父进程建议分区')
+                for tid in ev['tids']:
+                    if not ev['thread_starttime'].get(tid) or not target <= ev['thread_cpuset'].get(tid, set()):
+                        blockers.append('子进程 TID 的身份或有效 cpuset 不足')
+                row = dict(pid=pid, parent_pid=current, ancestry=ancestry,
+                           target=parent['target'], evidence=ev, blockers=blockers)
+                evidence.append({k: v for k, v in row.items() if k != 'evidence'})
+                if not blockers and not all(values and values <= target for values in ev['allowed'].values()):
+                    actions.append(row)
+                break
+    return actions, evidence

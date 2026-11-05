@@ -174,22 +174,8 @@ def render_md(m, diag):
     A(affinity_md(m.get("npu_affinity", {})))
     A("")
     A("## 3. 优化建议")
-    A(collection_actions_md(m.get('collection_integrity',{})))
-    A("")
     A(binding_md(m.get("npu_affinity", {})))
     A("")
-    pri = {"CRITICAL": "P0（立即处理）", "WARNING": "P1（尽快处理）", "INFO": "P2（择机处理）", "OK": "—"}
-    for f in diag["findings"]:
-        if f["severity"] in ("INFO", "OK"):
-            continue
-        A("**%s — %s**" % (pri[f["severity"]], f["title"]))
-        A("")
-        for i, r in enumerate(f["recommendation"], 1):
-            A("%d. %s" % (i, r))
-        A("")
-    if not [f for f in diag["findings"] if f["severity"] in ("CRITICAL", "WARNING")]:
-        A("当前无需紧急优化动作；保持对 NPU 侧性能的持续观察即可。")
-        A("")
     A("## 4. 问题详情")
     A("")
     if diag["findings"]:

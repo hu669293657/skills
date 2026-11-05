@@ -85,7 +85,10 @@ def analyze_frequency(m, events):
     for p in begin_policies + end_policies: register(p)
     finish = {aliases.get(p['id'], p['id']): p for p in end_policies}
     trace_clock = str(snap.get('hostbound/trace_clock.txt', m.get('metadata', {}).get('trace_clock', ''))).strip()
-    alignment = 'MONOTONIC' if trace_clock in ('mono', 'monotonic') else ('INCOMPATIBLE' if trace_clock else 'UNVERIFIED')
+    sample_clocks = {str(row.get('clock', 'monotonic')) for row in samples if isinstance(row, dict)}
+    clock_matches = ((trace_clock in ('mono', 'monotonic') and sample_clocks <= {'monotonic'}) or
+                     (trace_clock == 'boot' and sample_clocks == {'boottime'}))
+    alignment = 'MONOTONIC' if clock_matches else ('INCOMPATIBLE' if trace_clock else 'UNVERIFIED')
     # Older collector archives: static fields only; never invent dynamic samples.
     if not domains:
         for path, field, value in re.findall(r'(/sys/devices/system/cpu/cpu\d+/cpufreq)/(\w+):\s*(\S+)', snap.get('cpufreq.txt', '')):
@@ -181,7 +184,7 @@ def analyze_frequency(m, events):
     if invalid_trace_samples: reasons.append('%d条频率trace事件无效；原值与原因保留在raw_trace_errors，存在有效sysfs时按策略域降级。' % invalid_trace_samples)
     if malformed: reasons.append('frequency_samples含%d行无效JSON' % malformed)
     if sysfs and alignment == 'UNVERIFIED': reasons.append('旧包未记录trace_clock；sysfs单调时钟与trace对齐未经核验。')
-    if sysfs and alignment == 'INCOMPATIBLE': reasons.append('trace_clock=%s与sysfs monotonic不同域；不叠加时间线、不计算采集窗口平均；原始样本仍保留。' % trace_clock)
+    if sysfs and alignment == 'INCOMPATIBLE': reasons.append('trace_clock=%s与sysfs样本时钟%s不同域；不叠加时间线、不计算采集窗口平均；原始样本仍保留。' % (trace_clock, ','.join(sorted(map(str, sample_clocks)))))
     if event_status == 'NO_TRANSITION':
         reasons.append('事件已启用，窗口无频率转换；不代表降频或频率不可用。')
     if event_status == 'NOT_REQUESTED':

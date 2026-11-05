@@ -1,5 +1,14 @@
 # 升级最终验证
 
+## 2026-11-05 单文件采集与直接绑核命令
+
+本轮执行 `python -X utf8 -m unittest discover -s tests -v`：169 项全部通过，79.512 秒；skill-creator 格式校验、Bash 语法与 Git diff 空白检查通过。现场 scripts 目录仅保留 cpu_trace_collect.sh，LF 行尾，不需要 Python/jq/helper 文件。原 Python 采集 helper 与其专属测试已替换为单文件 Bash/awk 测试。
+
+新增验证覆盖只带一个 sh、拦截 Python/jq 调用时的完整采集/归档/离线分析、主子进程命令、保留窄掩码线程、逐线程 cpuset 阻碍、自定义 cgroup 挂载、v1/v2 继承、长 uptime 精度、失败清单与频率时钟域。报告第3节代码块只包含具体 taskset 设置命令，已同步示例 HTML/MD、模板和规则。
+
+测试平台为 Windows / Git Bash 与合成 proc/sysfs/tracefs，未完成 openEuler/Kunpeng/Ascend 实机验证。以下保留此前升级记录。
+
+
 源码位置：D:/skills/cpu-host-performance。初始Git工作区干净；保持原仓库开发，未克隆、回滚、自动commit或push。
 
 ## 实际测试

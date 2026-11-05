@@ -10,10 +10,9 @@ _EXPLANATION = ('allowed CPU 是调度许可范围；PSR 是采样时最近运�
                 '绿色表示全量现有线程的许可范围落在 NPU 亲和 CPU 内；橙色表示可跨节点或证据不足；'
                 '红色表示观测到非亲和 CPU/绑定范围偏离。CPU 绑定与内存页 NUMA 分布分别核验，'
                 '亲和性风险不等于已确认的 HostBound 根因。主进程按占卡显存最高推定，所有占卡 PID 均保留。')
-_OPERATIONS = ('以下方案仅在原物理机/宿主机执行，使用宿主机 PID；需要 sudo、taskset 和 python3。'
-               '脚本逐 TID 使用 taskset -pc，仅处理已核验且已备份的线程；新线程通常继承创建线程的 affinity，'
-               '业务可重新设置，执行后需复查。taskset 不迁移既有内存页，不提供跨重启持久化，也不独占 CPU；'
-               '同机其他业务/IRQ 的 CPU 争用仍须结合负载核验。有效 cpuset 不允许的区间需先在宿主机调整资源配置，再重新采集。')
+_OPERATIONS = ('在原宿主机以有权限的账户执行，PID/TID 与采集时身份及 cpuset 需保持一致。'
+               'taskset -apc 作用于指定进程的所有现有线程；已知子进程单独列出，taskset -pc 作用于指定线程。'
+               '新建线程/子进程通常继承创建者当时的 affinity；taskset 不迁移既有内存页。')
 
 
 def affinity_html(data, integrity=None):
@@ -40,6 +39,12 @@ def affinity_html(data, integrity=None):
             parts.append('</article>')
         parts.append('</div></section>')
     if len(rows)>12: parts.append('</details>')
+    if data.get('children'):
+        parts.append('<h4>已识别的子进程</h4><table><thead><tr><th>宿主机 PID</th><th>AI 父进程</th><th>建议 CPU</th><th>证据/阻碍</th></tr></thead><tbody>')
+        for row in data['children']:
+            parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % tuple(escape(str(v)) for v in
+                (row['pid'], row['parent_pid'], row['target'], '；'.join(row['blockers']) or '稳定父子关系、身份及逐线程 cpuset 已核验')))
+        parts.append('</tbody></table>')
     for note in data.get('notes', []):
         parts.append('<p class="note">%s</p>' % escape(note))
     parts.append('<p class="note">证据：hostbound/npu_smi_info.txt、npu_smi_topology.txt、numactl.txt/lscpu_parse.txt、pid_*_{status,threads,thread_affinity,cpuset_effective}.txt；运行观测与配置快照可能位于不同采样时点。</p>')
@@ -111,32 +116,27 @@ def affinity_md(data):
         memory=r.get('memory_locality',{})
         if memory:
             lines.append('\n- NPU %d / PID %s · Mems_allowed许可节点 %s；实际页分布 %s；来源 %s；状态 %s。'%(r['npu'],r['pid'],memory.get('allowed_nodes'),memory.get('actual_pages_by_node'),memory.get('source'),memory.get('status')))
+    if data.get('children'):
+        lines += ['', '#### 已识别的子进程', '', '| 宿主机 PID | AI 父进程 | 建议 CPU | 证据/阻碍 |', '|---:|---:|---|---|']
+        for row in data['children']:
+            lines.append('| %s | %s | %s | %s |' % (row['pid'], row['parent_pid'], row['target'], '；'.join(row['blockers']) or '稳定父子关系、身份及逐线程 cpuset 已核验'))
     lines += ['', '证据来源：hostbound/npu_smi_*.txt、numactl.txt/lscpu_parse.txt、pid_* 状态/线程/affinity/cpuset；ftrace 运行观测与配置快照可能位于不同采样时点。']
     return '\n'.join(lines)
 
 
 def binding_md(data):
-    lines = ['### NPU / NUMA 绑核方案（宿主机执行）', '', _OPERATIONS, '']
+    lines = ['### NPU / NUMA 绑核命令（宿主机执行）', '', _OPERATIONS, '']
     if data.get('commands'):
-        lines += ['脚本先核验主机/进程身份、在线 CPU 和有效 cpuset，逐 TID 保存原 affinity 后执行；输出备份目录与可运行的回滚命令。', '', '```bash', data['commands'], '```', '',
-                  '执行后以相同负载复采，比较吞吐、Device 空泡、调度延迟与跨节点运行；无收益或出现副作用时按脚本输出回滚。']
+        lines += ['```bash', data['commands'], '```']
     else:
-        lines += ['当前没有证据完整且需要变更的可执行绑核项。已有线程若全部落在建议分区内，则无需重复绑定。']
-    if not data.get('rows') or any(r['blockers'] for r in data.get('rows', [])):
-        lines += ['', collection_actions_md(data.get('collection_integrity',{}))]
+        lines += ['当前没有证据充分且需要变更的绑核项；请参阅第二部分的证据与缺项。']
     return '\n'.join(lines)
 
 
 def binding_html(data, integrity=None):
-    integrity=integrity or data.get("collection_integrity",{})
-    parts = ['<h3>NPU / NUMA 绑核方案（宿主机执行）</h3><p>%s</p>' % escape(_OPERATIONS)]
+    parts = ['<h3>NPU / NUMA 绑核命令（宿主机执行）</h3><p>%s</p>' % escape(_OPERATIONS)]
     if data.get('commands'):
-        parts += ['<p>先核验、逐 TID 备份，再绑定与验证；脚本输出备份目录及可运行的回滚命令。</p>',
-                  '<div class="code-panel"><button type="button" class="copy-code" onclick="copyBinding(this)">复制完整方案</button><pre><code>%s</code></pre></div>' % escape(data['commands']),
-                  '<p class="note">执行后同负载复采，对比吞吐、Device 空泡、调度延迟与跨节点运行；无收益或出现副作用时回滚。</p>']
+        parts.append('<div class="code-panel"><button type="button" class="copy-code" onclick="copyBinding(this)">复制绑核命令</button><pre><code>%s</code></pre></div>' % escape(data['commands']))
     else:
-        parts.append('<p>当前没有证据完整且需要变更的可执行绑核项；已符合建议分区的线程无需重复绑定。</p>')
-    blockers = [r for r in data.get('rows', []) if r['blockers']]
-    if not data.get('rows') or blockers:
-        parts.append(collection_actions_html(integrity))
+        parts.append('<p>当前没有证据充分且需要变更的绑核项；请参阅第二部分的证据与缺项。</p>')
     return ''.join(parts)

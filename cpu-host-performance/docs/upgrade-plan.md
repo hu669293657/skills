@@ -14,7 +14,7 @@
 使用 Python3.7+ 标准库；保留 shell 唯一入口，旁路 Python 采集 helper 可选，缺 Python 时明确降级。增加 JSON schema_version=2 输出。
 
 ## 顺序与文件
-1. Frequency: scripts/host_snapshot.py（只读 freq policy/进程快照 helper），analyzer/frequency_analysis.py；脚本记录 capability 与轮询。tests/test_frequency.py。
+1. Frequency: scripts/cpu_trace_collect.sh（内嵌 Bash/awk 频率、进程及证据采集），analyzer/frequency_analysis.py；脚本记录 capability 与轮询。tests/test_frequency.py。
 2. Discovery: analyzer/process_analysis.py；/proc 全机摘要与相关进程全线程，root/NPU/祖先子树/cgroup 关系及 lifecycle 身份分段。tests/test_process_discovery.py。
 3. Contention: analyzer/scheduling.py、contention_analysis.py；配对运行/等待、身份隔离、同核候选、quota 增量；修复 metrics 聚合。tests/test_contention.py、test_metric_accuracy.py。
 4. Balance: analyzer/core_balance.py + assets/core_balance.js（生成时内嵌）；全部CPU/NUMA/范围/指标/图形切换，静态 SVG 与表格后备。tests/test_reports.py。

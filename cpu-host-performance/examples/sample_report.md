@@ -1,48 +1,108 @@
 # HostBound 性能诊断报告
 
-> 演示报告：仅 NPU/PID/topo 来自所给案例；NUMA、线程许可范围、PSR、trace 与身份字段为模拟数据，不代表客户当前状态，示例命令不可直接用于客户现场。
+> 数据格式：ftrace 文本 (目录内) ｜ 采集时长：10.0 秒 ｜ 核心数：256 ｜ 分析时间：2026-11-05 10:12:59
 
-> 数据格式：ftrace 文本 (目录内) ｜ 采集时长：1.0 秒 ｜ 核心数：1 ｜ 分析时间：2026-11-02 17:34:44
-
+> 合成测试数据 / SYNTHETIC TEST DATA，非真实服务器测量。
 ## 1. Executive Summary（结论摘要）
 
 ### Host 状态：CRITICAL（严重异常）
 
 ### 核心问题
 
-**CPU 整体饱和**
+**调度延迟严重**
 
 ### 影响
 
-Host 算力不足，任务排队等待，可能拖慢 NPU 供数
+关键线程被唤醒后需等待较久才能运行，通信/数据准备节奏被打断，NPU 等待 Host；此为Host侧风险描述，NPU性能因果尚未证实。
 
 完整优化方案与可复制命令见第三部分。
 
 ## 2. 问题证据总表与根因判断
 
-### 2.1 关键指标证据
+### 2.1 关键指标证据与解释
+> 以下阈值为工具经验筛选值，不是Linux或Ascend官方标准；应与同业务基线对照。
 
-| 指标 | 当前值 | 基线/阈值 | 状态 |
-|------|-------:|-----------|------|
-| CPU 平均利用率 | 100.0% | <70% 健康 | ⚠️ 偏高 |
-| 单核最高利用率 | 100.0% | <90% 健康 | ⚠️ 饱和 |
-| 上下文切换率 | 3 次/秒 | 全机 > 2000×核数/s 偏高 | 正常 |
-| 平均 runnable 任务数 | 0.0 | 接近核心数说明排队 | 正常 |
-| 硬中断总占比 | 0.00% | 单核≥15% 关注热点 | 正常 |
-| 软中断总占比 | 0.00% | 单核≥20% 关注热点 | 正常 |
-| 调度延迟 P99 | 无法计算 | - | 数据缺失 |
+#### CPU 平均利用率：10.46%
 
-> 指标含义见第 13 节「指标与事件说明」。
+**指标是什么：** 采集窗口中有效CPU忙碌时间之和 / 有效CPU总观测时间 × 100%；busy由连续sched_switch中非idle任务区间计算，包含任务上下文内IRQ时间。
+
+**为什么需要关注：** 反映所观测CPU整体算力需求。平均利用率低，不代表不存在局部核心饱和。
+
+**当前值说明：** 所观测CPU整体仍有余量；需结合单核热点、配额与线程等待判断。
+
+**诊断结论：** 不能仅凭均值排除CPU瓶颈；未观测核心不参与分母。已出现单核≥90%的热点。
+
+**数据可信度：** 256/256 CPU 有有效观测；总观测 2560.000 CPU·秒；连续事件已核验，窗口边界保守处理
+
+#### 单核最高利用率：100.00%
+
+**指标是什么：** 逐CPU计算 busy / 该CPU有效观测时间 × 100%，再取有效CPU中的最大值。
+
+**为什么需要关注：** 关键串行线程即使只占一核，也可能限制整机性能；需要对照CPU Affinity、线程绑核和IRQ热点。
+
+**当前值说明：** 至少一个观测核心接近饱和（经验值≥90%），整机均值较低也不能忽略。
+
+**诊断结论：** 热点是直接观测事实，是否拖慢Worker需查看该核关联线程和可运行等待。
+
+**数据可信度：** 256/256 CPU 有有效观测；总观测 2560.000 CPU·秒；连续事件已核验，窗口边界保守处理
+
+#### 上下文切换率：562 次/秒
+
+**指标是什么：** CPU从一个调度任务切换到另一个任务。为共享CPU、阻塞唤醒和优先级调度而切换；当前为全机每秒观测sched_switch次数 / 采集窗口秒数，不是单核每秒。
+
+**为什么需要关注：** 过于频繁可能增加调度、缓存和TLB开销；并发线程多且等待升高时可能有竞争，I/O密集或正常并行也会频繁切换。
+
+**当前值说明：** 当前全机观测 562 次/秒；参考 2000×256 有效CPU = 512000 次/秒，仅为经验筛选线。
+
+**诊断结论：** 不能单凭切换次数高认定性能问题，必须结合等待、CPU时间线与业务基线。
+
+**数据可信度：** 256/256 CPU 有有效观测；总观测 2560.000 CPU·秒；连续事件已核验，窗口边界保守处理
+
+#### 调度延迟 P99：39.00 ms
+
+**指标是什么：** 同一任务身份的成功sched_wakeup/sched_wakeup_new到首次sched_switch(next_tid)获得CPU的时间；P99是这些已配对样本的99分位（线性插值）。不使用sched_waking起点，重复唤醒保留最早有效记录。
+
+**为什么需要关注：** 高等待可能让NPU Worker无法及时准备数据或提交任务；它不等于推理请求P99，也不等于模型计算耗时。
+
+**当前值说明：** 等待尾部偏高（经验关注≥5 ms，严重≥20 ms）；请核对对应Worker。
+
+**诊断结论：** 这是已配对唤醒样本分布；可运行态R/R+切出后的等待另列Runqueue Wait，不混入本指标。
+
+**数据可信度：** 样本量 80；未配对唤醒 0；重复唤醒 0；边界未完成等待 0；switch不连续 0；buffer丢失 0；未发现配对不连续，样本仍受采集边界约束。
+
+#### 硬中断总占比：0.09%
+
+**指标是什么：** 全机观测占比 = 所有有效CPU内可配对硬中断 handler区间的并集时间之和 / 所有有效CPU总观测时间 × 100%。单核最高占比单独计算，不用一个采集窗口作全机分母。
+
+**为什么需要关注：** 网卡、NVMe等硬件通知CPU处理完成或接收事件。集中在Worker所在核心时可能挤占其CPU时间；先对照/proc/interrupts与/proc/irq/*/smp_affinity_list，只读核验IRQ Affinity。
+
+**当前值说明：** 全机观测 0.09%；单核最高 20.00%。热点达到单核经验线≥15%。
+
+**诊断结论：** 单核热点与整机总量含义不同；同核重叠是相关性，不能据此断言NPU性能因果。handler事件不覆盖全部入口/IPI开销，SoftIRQ墙钟区间可能含嵌套IRQ。
+
+**数据可信度：** 可用；未配对事件 0；分母 2560.000 CPU·秒；配对事件完整（不代表内核全部中断开销）。
+
+#### 软中断总占比：0.14%
+
+**指标是什么：** 全机观测占比 = 所有有效CPU内可配对软中断 handler区间的并集时间之和 / 所有有效CPU总观测时间 × 100%。单核最高占比单独计算，不用一个采集窗口作全机分母。
+
+**为什么需要关注：** SoftIRQ延后处理内核工作：NET_RX网络接收、NET_TX发送完成、TIMER定时器、RCU延迟回收、BLOCK块I/O完成。网络通信和存储I/O可增加软中断，集中到Worker所在CPU时可能影响执行节奏。
+
+**当前值说明：** 全机观测 0.14%；单核最高 25.00%。热点达到单核经验线≥20%。
+
+**诊断结论：** 单核热点与整机总量含义不同；同核重叠是相关性，不能据此断言NPU性能因果。handler事件不覆盖全部入口/IPI开销，SoftIRQ墙钟区间可能含嵌套IRQ。
+
+**数据可信度：** 可用；未配对事件 0；分母 2560.000 CPU·秒；配对事件完整（不代表内核全部中断开销）。
 
 ### 2.2 根因判断与证据链
 
-**现象** → CPU 整体饱和
+**现象** → 调度延迟严重
 
-**证据** → 全机平均 CPU 利用率=100.0%（阈值 ≥90% 判定饱和）
+**证据** → 调度延迟 P99=39.00 ms（阈值 ≥5ms 警告 / ≥20ms 严重）；调度延迟平均值=39.000 ms（阈值 -）；受影响最大的任务=acl_thread (最大 39.0ms); acl_thread (最大 39.0ms); acl_thread (最大 39.0ms)（阈值 -）
 
-**推断** → 整机 CPU 计算需求超过供给
+**推断** → 待验证候选：CPU 竞争 (饱和/中断/优先级) 导致 runnable 排队
 
-**候选判断** → `CPU_SATURATION`（CPU 饱和：整体 CPU 已接近打满，算力不足）
+**候选判断** → `SCHEDULER_LATENCY`（调度延迟过大：任务被唤醒后长时间得不到 CPU）
 
 ### 2.3 NPU 任务与 NUMA 亲和性
 
@@ -50,301 +110,1602 @@ allowed CPU 是调度许可范围；PSR 是采样时最近运行核，ftrace 是
 
 | NPU/Chip | 主进程/其他进程 | 宿主机 PID | 线程数 | 亲和 NUMA / CPU | 当前 allowed CPU | 观测 NUMA | ftrace / PSR | CPU 亲和判断 | 建议分区 |
 |---|---|---:|---:|---|---|---|---|---|---|
-| 0/0 | python3（主进程（显存占用最高）） | 4115 | 2 | 3 / 144-167 | 0-191 | 0 | 30 / 30 | 观测到非亲和 CPU | 144-155 |
-| 1/0 | python3（主进程（显存占用最高）） | 4116 | 2 | 0 / 0-23 | 0-11 | 0 | 未提供 / 2 | 已绑定亲和 CPU | 0-11 |
-| 2/0 | python3（主进程（显存占用最高）） | 4117 | 2 | 3 / 144-167 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 156-167 |
-| 3/0 | python3（主进程（显存占用最高）） | 4118 | 2 | 0 / 0-23 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 12-23 |
-| 4/0 | python3（主进程（显存占用最高）） | 4119 | 2 | 2 / 96-119 | 0-191 | 2 | 未提供 / 100 | 允许跨 NUMA / 未收敛 | 96-107 |
-| 5/0 | python3（主进程（显存占用最高）） | 4120 | 2 | 1 / 48-71 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 48-59 |
-| 6/0 | python3（主进程（显存占用最高）） | 4121 | 2 | 2 / 96-119 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 108-119 |
-| 7/0 | python3（主进程（显存占用最高）） | 4122 | 2 | 1 / 48-71 | 0-191 | 0 | 未提供 / 30 | 观测到非亲和 CPU | 60-71 |
+| 0/0 | python3（主进程（显存占用最高）） | 4000 | 2 | 0 / 0-31 | 0-31 | 0 | 0 / 0 | 已绑定亲和 CPU | 0-31 |
+| 1/0 | python3（主进程（显存占用最高）） | 4001 | 2 | 1 / 32-63 | 0-255 | 1 | 32 / 32 | 允许跨 NUMA / 未收敛 | 32-63 |
+| 2/0 | python3（主进程（显存占用最高）） | 4002 | 2 | 2 / 64-95 | 0-255 | 2 | 64 / 64 | 允许跨 NUMA / 未收敛 | 64-95 |
+| 3/0 | python3（主进程（显存占用最高）） | 4003 | 2 | 3 / 96-127 | 0-255 | 3 | 96 / 96 | 允许跨 NUMA / 未收敛 | 96-127 |
+| 4/0 | python3（主进程（显存占用最高）） | 4004 | 2 | 4 / 128-159 | 0-255 | 4 | 128 / 128 | 允许跨 NUMA / 未收敛 | 128-159 |
+| 5/0 | python3（主进程（显存占用最高）） | 4005 | 2 | 5 / 160-191 | 0-255 | 5 | 160 / 160 | 允许跨 NUMA / 未收敛 | 160-191 |
+| 6/0 | python3（主进程（显存占用最高）） | 4006 | 2 | 6 / 192-223 | 0-255 | 6 | 192 / 192 | 允许跨 NUMA / 未收敛 | 192-223 |
+| 7/0 | python3（主进程（显存占用最高）） | 4007 | 2 | 7 / 224-255 | 0-255 | 7 | 224 / 224 | 允许跨 NUMA / 未收敛 | 224-255 |
 
-> NPU 1,3 共享 0-23，按 2 份分区；每份 CPU 互不重叠。
+> 不按卡数或 NUMA 节点等分 CPU；不默认预留系统核。共享范围只有完整运行/等待证据支持时才提出互斥核心组方案。
 
-> NPU 5,7 共享 48-71，按 2 份分区；每份 CPU 互不重叠。
+- NPU 0 / PID 4000 · 映射状态：AVAILABLE
 
-> NPU 4,6 共享 96-119，按 2 份分区；每份 CPU 互不重叠。
+- NPU 0 / PID 4000 · 进程身份：VERIFIED
 
-> NPU 0,2 共享 144-167，按 2 份分区；每份 CPU 互不重叠。
+- NPU 0 / PID 4000 · 建议状态：PRESERVE
+
+- NPU 0 / PID 4000 · 建议CPU：0-31
+
+- NPU 0 / PID 4000 · 建议NUMA：0
+
+- NPU 0 / PID 4000 · 原因：全 TID 当前许可范围已在实测亲和范围及各自 cpuset 内，保留各线程原掩码。
+
+- NPU 0 / PID 4000 · 风险：调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。；taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。
+
+- NPU 0 / PID 4000 · 预期改善：待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。
+
+- NPU 0 / PID 4000 · 验证方法：逐 TID taskset -pc 与有效 cpuset 核验；同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡
+
+- NPU 0 / PID 4000 · 回滚路径：原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。
+
+- NPU 0 / PID 4000 · Mems_allowed许可节点 [0, 1, 2, 3, 4, 5, 6, 7]；实际页分布 {0: 100}；来源 ['hostbound/process_end.json:numa_maps']；状态 LOCAL。
+
+- NPU 1 / PID 4001 · 映射状态：AVAILABLE
+
+- NPU 1 / PID 4001 · 进程身份：VERIFIED
+
+- NPU 1 / PID 4001 · 建议状态：PROPOSED
+
+- NPU 1 / PID 4001 · 建议CPU：32-63
+
+- NPU 1 / PID 4001 · 建议NUMA：1
+
+- NPU 1 / PID 4001 · 原因：仅使用显式 NPU CPU 映射与全 TID cpuset 交集；完整 SMT 核心组互斥。
+
+- NPU 1 / PID 4001 · 风险：调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。；taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。
+
+- NPU 1 / PID 4001 · 预期改善：待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。
+
+- NPU 1 / PID 4001 · 验证方法：逐 TID taskset -pc 与有效 cpuset 核验；同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡
+
+- NPU 1 / PID 4001 · 回滚路径：原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。
+
+- NPU 1 / PID 4001 · Mems_allowed许可节点 [0, 1, 2, 3, 4, 5, 6, 7]；实际页分布 {1: 100}；来源 ['hostbound/process_end.json:numa_maps']；状态 LOCAL。
+
+- NPU 2 / PID 4002 · 映射状态：AVAILABLE
+
+- NPU 2 / PID 4002 · 进程身份：VERIFIED
+
+- NPU 2 / PID 4002 · 建议状态：PROPOSED
+
+- NPU 2 / PID 4002 · 建议CPU：64-95
+
+- NPU 2 / PID 4002 · 建议NUMA：2
+
+- NPU 2 / PID 4002 · 原因：仅使用显式 NPU CPU 映射与全 TID cpuset 交集；完整 SMT 核心组互斥。
+
+- NPU 2 / PID 4002 · 风险：调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。；taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。
+
+- NPU 2 / PID 4002 · 预期改善：待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。
+
+- NPU 2 / PID 4002 · 验证方法：逐 TID taskset -pc 与有效 cpuset 核验；同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡
+
+- NPU 2 / PID 4002 · 回滚路径：原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。
+
+- NPU 2 / PID 4002 · Mems_allowed许可节点 [0, 1, 2, 3, 4, 5, 6, 7]；实际页分布 {2: 100}；来源 ['hostbound/process_end.json:numa_maps']；状态 LOCAL。
+
+- NPU 3 / PID 4003 · 映射状态：AVAILABLE
+
+- NPU 3 / PID 4003 · 进程身份：VERIFIED
+
+- NPU 3 / PID 4003 · 建议状态：PROPOSED
+
+- NPU 3 / PID 4003 · 建议CPU：96-127
+
+- NPU 3 / PID 4003 · 建议NUMA：3
+
+- NPU 3 / PID 4003 · 原因：仅使用显式 NPU CPU 映射与全 TID cpuset 交集；完整 SMT 核心组互斥。
+
+- NPU 3 / PID 4003 · 风险：调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。；taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。
+
+- NPU 3 / PID 4003 · 预期改善：待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。
+
+- NPU 3 / PID 4003 · 验证方法：逐 TID taskset -pc 与有效 cpuset 核验；同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡
+
+- NPU 3 / PID 4003 · 回滚路径：原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。
+
+- NPU 3 / PID 4003 · Mems_allowed许可节点 [0, 1, 2, 3, 4, 5, 6, 7]；实际页分布 {3: 100}；来源 ['hostbound/process_end.json:numa_maps']；状态 LOCAL。
+
+- NPU 4 / PID 4004 · 映射状态：AVAILABLE
+
+- NPU 4 / PID 4004 · 进程身份：VERIFIED
+
+- NPU 4 / PID 4004 · 建议状态：PROPOSED
+
+- NPU 4 / PID 4004 · 建议CPU：128-159
+
+- NPU 4 / PID 4004 · 建议NUMA：4
+
+- NPU 4 / PID 4004 · 原因：仅使用显式 NPU CPU 映射与全 TID cpuset 交集；完整 SMT 核心组互斥。
+
+- NPU 4 / PID 4004 · 风险：调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。；taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。
+
+- NPU 4 / PID 4004 · 预期改善：待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。
+
+- NPU 4 / PID 4004 · 验证方法：逐 TID taskset -pc 与有效 cpuset 核验；同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡
+
+- NPU 4 / PID 4004 · 回滚路径：原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。
+
+- NPU 4 / PID 4004 · Mems_allowed许可节点 [0, 1, 2, 3, 4, 5, 6, 7]；实际页分布 {4: 100}；来源 ['hostbound/process_end.json:numa_maps']；状态 LOCAL。
+
+- NPU 5 / PID 4005 · 映射状态：AVAILABLE
+
+- NPU 5 / PID 4005 · 进程身份：VERIFIED
+
+- NPU 5 / PID 4005 · 建议状态：PROPOSED
+
+- NPU 5 / PID 4005 · 建议CPU：160-191
+
+- NPU 5 / PID 4005 · 建议NUMA：5
+
+- NPU 5 / PID 4005 · 原因：仅使用显式 NPU CPU 映射与全 TID cpuset 交集；完整 SMT 核心组互斥。
+
+- NPU 5 / PID 4005 · 风险：调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。；taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。
+
+- NPU 5 / PID 4005 · 预期改善：待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。
+
+- NPU 5 / PID 4005 · 验证方法：逐 TID taskset -pc 与有效 cpuset 核验；同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡
+
+- NPU 5 / PID 4005 · 回滚路径：原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。
+
+- NPU 5 / PID 4005 · Mems_allowed许可节点 [0, 1, 2, 3, 4, 5, 6, 7]；实际页分布 {5: 100}；来源 ['hostbound/process_end.json:numa_maps']；状态 LOCAL。
+
+- NPU 6 / PID 4006 · 映射状态：AVAILABLE
+
+- NPU 6 / PID 4006 · 进程身份：VERIFIED
+
+- NPU 6 / PID 4006 · 建议状态：PROPOSED
+
+- NPU 6 / PID 4006 · 建议CPU：192-223
+
+- NPU 6 / PID 4006 · 建议NUMA：6
+
+- NPU 6 / PID 4006 · 原因：仅使用显式 NPU CPU 映射与全 TID cpuset 交集；完整 SMT 核心组互斥。
+
+- NPU 6 / PID 4006 · 风险：调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。；taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。
+
+- NPU 6 / PID 4006 · 预期改善：待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。
+
+- NPU 6 / PID 4006 · 验证方法：逐 TID taskset -pc 与有效 cpuset 核验；同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡
+
+- NPU 6 / PID 4006 · 回滚路径：原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。
+
+- NPU 6 / PID 4006 · Mems_allowed许可节点 [0, 1, 2, 3, 4, 5, 6, 7]；实际页分布 {6: 100}；来源 ['hostbound/process_end.json:numa_maps']；状态 LOCAL。
+
+- NPU 7 / PID 4007 · 映射状态：AVAILABLE
+
+- NPU 7 / PID 4007 · 进程身份：VERIFIED
+
+- NPU 7 / PID 4007 · 建议状态：PROPOSED
+
+- NPU 7 / PID 4007 · 建议CPU：224-255
+
+- NPU 7 / PID 4007 · 建议NUMA：7
+
+- NPU 7 / PID 4007 · 原因：仅使用显式 NPU CPU 映射与全 TID cpuset 交集；完整 SMT 核心组互斥。
+
+- NPU 7 / PID 4007 · 风险：调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。；taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。
+
+- NPU 7 / PID 4007 · 预期改善：待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。
+
+- NPU 7 / PID 4007 · 验证方法：逐 TID taskset -pc 与有效 cpuset 核验；同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡
+
+- NPU 7 / PID 4007 · 回滚路径：原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。
+
+- NPU 7 / PID 4007 · Mems_allowed许可节点 [0, 1, 2, 3, 4, 5, 6, 7]；实际页分布 {7: 100}；来源 ['hostbound/process_end.json:numa_maps']；状态 LOCAL。
+
+#### 已识别的子进程
+
+| 宿主机 PID | AI 父进程 | 建议 CPU | 证据/阻碍 |
+|---:|---:|---|---|
+| 6000 | 4000 | 0-31 | 子进程有效 cpuset 不允许父进程建议分区 |
 
 证据来源：hostbound/npu_smi_*.txt、numactl.txt/lscpu_parse.txt、pid_* 状态/线程/affinity/cpuset；ftrace 运行观测与配置快照可能位于不同采样时点。
 
 ## 3. 优化建议
+### NPU / NUMA 绑核命令（宿主机执行）
 
-### NPU / NUMA 绑核方案（宿主机执行）
-
-以下方案仅在原物理机/宿主机执行，使用宿主机 PID；需要 sudo、taskset 和 python3。taskset -acp 覆盖指定 PID 的现有线程，已有子进程应逐 PID 处理；新线程通常继承创建线程的 affinity，业务可重新设置，执行后需复查。taskset 不迁移既有内存页，不提供跨重启持久化，也不独占 CPU；同机其他业务/IRQ 的 CPU 争用仍须结合负载核验。有效 cpuset 不允许的区间需先在宿主机调整资源配置，再重新采集。
-
-脚本先核验主机/进程身份、在线 CPU 和有效 cpuset，逐 TID 保存原 affinity 后执行；输出备份目录与可运行的回滚命令。
+在原宿主机以有权限的账户执行，PID/TID 与采集时身份及 cpuset 需保持一致。taskset -apc 作用于指定进程的所有现有线程；已知子进程单独列出，taskset -pc 作用于指定线程。新建线程/子进程通常继承创建者当时的 affinity；taskset 不迁移既有内存页。
 
 ```bash
-# 仅在原物理机/宿主机执行；不要进入容器。先阅读报告，再运行。
-sudo bash <<'HOST_CPU_BIND'
-set -euo pipefail
-[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || { echo "请回到宿主机"; exit 1; }
-if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; then echo "请回到宿主机"; exit 1; fi
-[ "$(cat /proc/sys/kernel/random/boot_id)" = 'test-boot' ] || { echo '主机/启动周期已变化，请重新采集'; exit 1; }
-backup=$(mktemp -d /var/tmp/npu-affinity.XXXXXX)
-echo "备份和回滚脚本：$backup"
-cat > "$backup/rollback.sh" <<'ROLLBACK_HEADER'
-#!/usr/bin/env bash
-set -euo pipefail
-[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || exit 1
-if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; then exit 1; fi
-[ "$(cat /proc/sys/kernel/random/boot_id)" = 'test-boot' ] || { echo '回滚主机/启动周期不一致'; exit 1; }
-failed=0
-restore_tid() {
-  local tid=$1 expected=$2 previous=$3 s
-  if [ ! -r "/proc/$tid/stat" ]; then echo "跳过已退出 TID $tid"; return; fi
-  s=$(cat "/proc/$tid/stat") || { echo "跳过已退出 TID $tid"; return; }
-  s=${s##*) }; set -- $s
-  if [ "${20}" != "$expected" ]; then echo "跳过已复用 TID $tid"; return; fi
-  if ! taskset -pc "$previous" "$tid"; then failed=1; fi
-}
-ROLLBACK_HEADER
-starttime() { local s; s=$(cat "/proc/$1/stat"); s=${s##*) }; set -- $s; printf '%s' "${20}"; }
-check_cpu_list() { local want=$1 have=$2; python3 - "$want" "$have" <<'CPU_CHECK'
-import sys
-def cpus(s):
-    out=set()
-    for part in s.strip().split(','):
-        a,_,b=part.partition('-')
-        if a: out.update(range(int(a),int(b or a)+1))
-    return out
-raise SystemExit(0 if cpus(sys.argv[1]) and cpus(sys.argv[1]) <= cpus(sys.argv[2]) else 1)
-CPU_CHECK
-}
-effective_cpuset() { local p=$1 cg value; cg=$(awk -F: '$1==0 {print $3}' /proc/"$p"/cgroup);
-if [ -n "$cg" ] && [ -r "/sys/fs/cgroup${cg}/cpuset.cpus.effective" ]; then cat "/sys/fs/cgroup${cg}/cpuset.cpus.effective"; return; fi
-cg=$(awk -F: '$2 ~ /(^|,)cpuset(,|$)/ {print $3}' /proc/"$p"/cgroup)
-[ -n "$cg" ] || return 1
-for f in "/sys/fs/cgroup/cpuset${cg}/cpuset.effective_cpus" "/sys/fs/cgroup/cpuset${cg}/cpuset.cpus"; do if [ -r "$f" ]; then value=$(cat "$f"); if [ -n "$value" ]; then printf "%s\n" "$value"; return; fi; fi; done
-return 1; }
-# 全部预检、逐 TID 保存成功之后才执行绑核。
-[ "$(starttime 4115)" = '411500' ] || { echo 'PID 4115 已变化，请重新采集'; exit 1; }
-check_cpu_list '144-155' "$(cat /sys/devices/system/cpu/online)"
-check_cpu_list '144-155' "$(effective_cpuset 4115)" || { echo 'PID 4115 的 cpuset 不允许目标 CPU'; exit 1; }
-for task in /proc/4115/task/*; do
-  tid=${task##*/}
-  check_cpu_list '144-155' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
-  taskset -pc "$tid" >> "$backup/before.txt"
-  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  stamp=$(starttime "$tid")
-  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
-done
-[ "$(starttime 4117)" = '411700' ] || { echo 'PID 4117 已变化，请重新采集'; exit 1; }
-check_cpu_list '156-167' "$(cat /sys/devices/system/cpu/online)"
-check_cpu_list '156-167' "$(effective_cpuset 4117)" || { echo 'PID 4117 的 cpuset 不允许目标 CPU'; exit 1; }
-for task in /proc/4117/task/*; do
-  tid=${task##*/}
-  check_cpu_list '156-167' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
-  taskset -pc "$tid" >> "$backup/before.txt"
-  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  stamp=$(starttime "$tid")
-  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
-done
-[ "$(starttime 4118)" = '411800' ] || { echo 'PID 4118 已变化，请重新采集'; exit 1; }
-check_cpu_list '12-23' "$(cat /sys/devices/system/cpu/online)"
-check_cpu_list '12-23' "$(effective_cpuset 4118)" || { echo 'PID 4118 的 cpuset 不允许目标 CPU'; exit 1; }
-for task in /proc/4118/task/*; do
-  tid=${task##*/}
-  check_cpu_list '12-23' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
-  taskset -pc "$tid" >> "$backup/before.txt"
-  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  stamp=$(starttime "$tid")
-  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
-done
-[ "$(starttime 4119)" = '411900' ] || { echo 'PID 4119 已变化，请重新采集'; exit 1; }
-check_cpu_list '96-107' "$(cat /sys/devices/system/cpu/online)"
-check_cpu_list '96-107' "$(effective_cpuset 4119)" || { echo 'PID 4119 的 cpuset 不允许目标 CPU'; exit 1; }
-for task in /proc/4119/task/*; do
-  tid=${task##*/}
-  check_cpu_list '96-107' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
-  taskset -pc "$tid" >> "$backup/before.txt"
-  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  stamp=$(starttime "$tid")
-  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
-done
-[ "$(starttime 4120)" = '412000' ] || { echo 'PID 4120 已变化，请重新采集'; exit 1; }
-check_cpu_list '48-59' "$(cat /sys/devices/system/cpu/online)"
-check_cpu_list '48-59' "$(effective_cpuset 4120)" || { echo 'PID 4120 的 cpuset 不允许目标 CPU'; exit 1; }
-for task in /proc/4120/task/*; do
-  tid=${task##*/}
-  check_cpu_list '48-59' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
-  taskset -pc "$tid" >> "$backup/before.txt"
-  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  stamp=$(starttime "$tid")
-  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
-done
-[ "$(starttime 4121)" = '412100' ] || { echo 'PID 4121 已变化，请重新采集'; exit 1; }
-check_cpu_list '108-119' "$(cat /sys/devices/system/cpu/online)"
-check_cpu_list '108-119' "$(effective_cpuset 4121)" || { echo 'PID 4121 的 cpuset 不允许目标 CPU'; exit 1; }
-for task in /proc/4121/task/*; do
-  tid=${task##*/}
-  check_cpu_list '108-119' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
-  taskset -pc "$tid" >> "$backup/before.txt"
-  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  stamp=$(starttime "$tid")
-  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
-done
-[ "$(starttime 4122)" = '412200' ] || { echo 'PID 4122 已变化，请重新采集'; exit 1; }
-check_cpu_list '60-71' "$(cat /sys/devices/system/cpu/online)"
-check_cpu_list '60-71' "$(effective_cpuset 4122)" || { echo 'PID 4122 的 cpuset 不允许目标 CPU'; exit 1; }
-for task in /proc/4122/task/*; do
-  tid=${task##*/}
-  check_cpu_list '60-71' "$(effective_cpuset "$tid")" || { echo "TID $tid 的 cpuset 不允许目标 CPU"; exit 1; }
-  taskset -pc "$tid" >> "$backup/before.txt"
-  old=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  stamp=$(starttime "$tid")
-  printf 'restore_tid %s %s %s\n' "$tid" "$stamp" "$old" >> "$backup/rollback.sh"
-done
-printf '%s\n' 'exit "$failed"' >> "$backup/rollback.sh"
-# -a 覆盖该 PID 的现有线程；已有子进程需要各自的宿主机 PID。
-[ "$(starttime 4115)" = '411500' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
-taskset -acp 144-155 4115
-[ "$(starttime 4117)" = '411700' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
-taskset -acp 156-167 4117
-[ "$(starttime 4118)" = '411800' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
-taskset -acp 12-23 4118
-[ "$(starttime 4119)" = '411900' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
-taskset -acp 96-107 4119
-[ "$(starttime 4120)" = '412000' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
-taskset -acp 48-59 4120
-[ "$(starttime 4121)" = '412100' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
-taskset -acp 108-119 4121
-[ "$(starttime 4122)" = '412200' ] || { echo 'PID 已变化，请检查并按需回滚'; exit 1; }
-taskset -acp 60-71 4122
-# 验证所有线程的 allowed CPU，保存执行后快照。
-taskset -apc 4115 | tee -a "$backup/after.txt"
-for task in /proc/4115/task/*; do
-  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  [ "$actual" = '144-155' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
-done
-taskset -apc 4117 | tee -a "$backup/after.txt"
-for task in /proc/4117/task/*; do
-  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  [ "$actual" = '156-167' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
-done
-taskset -apc 4118 | tee -a "$backup/after.txt"
-for task in /proc/4118/task/*; do
-  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  [ "$actual" = '12-23' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
-done
-taskset -apc 4119 | tee -a "$backup/after.txt"
-for task in /proc/4119/task/*; do
-  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  [ "$actual" = '96-107' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
-done
-taskset -apc 4120 | tee -a "$backup/after.txt"
-for task in /proc/4120/task/*; do
-  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  [ "$actual" = '48-59' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
-done
-taskset -apc 4121 | tee -a "$backup/after.txt"
-for task in /proc/4121/task/*; do
-  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  [ "$actual" = '108-119' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
-done
-taskset -apc 4122 | tee -a "$backup/after.txt"
-for task in /proc/4122/task/*; do
-  actual=$(awk '/^Cpus_allowed_list:/ {print $2}' "$task/status")
-  [ "$actual" = '60-71' ] || { echo '线程 affinity 与目标不一致，请检查或回滚'; exit 1; }
-done
-echo "如需回滚，在本宿主机运行：sudo bash $backup/rollback.sh"
-HOST_CPU_BIND
+taskset -apc 32-63 4001
+taskset -apc 64-95 4002
+taskset -apc 96-127 4003
+taskset -apc 128-159 4004
+taskset -apc 160-191 4005
+taskset -apc 192-223 4006
+taskset -apc 224-255 4007
 ```
-
-执行后以相同负载复采，比较吞吐、Device 空泡、调度延迟与跨节点运行；无收益或出现副作用时按脚本输出回滚。
-
-**P0（立即处理） — CPU 整体饱和**
-
-1. 识别并优化 Top CPU 任务 (见 Task 分析)
-2. 提高 Host 并行度配置或升级 CPU
-3. 排查业务是否存在无意义忙等/自旋
-
-**P1（尽快处理） — NPU 任务 CPU 亲和性存在风险（待性能验证）**
-
-1. 按第二部分的 NPU/PID 对照核验，第三部分给出宿主机预检、逐 TID 备份、互斥分区、taskset 命令及回滚
-2. 同负载复采验证吞吐与延迟；taskset 不迁移内存页，不越过有效 cpuset
 
 ## 4. 问题详情
 
-### 问题 1：CPU 整体饱和（严重 / 置信度 HIGH）
+### 问题 1：调度延迟严重（严重 / 置信度 MEDIUM）
 
-- **类别**：`CPU_SATURATION` — CPU 饱和：整体 CPU 已接近打满，算力不足
+- **类别**：`SCHEDULER_LATENCY` — 调度延迟过大：任务被唤醒后长时间得不到 CPU
 - **证据**：
-  - 全机平均 CPU 利用率 = **100.0%**（判定阈值：≥90% 判定饱和；来源：ftrace / 对应系统快照；时间窗：本次采集窗口；累计快照除外）
-- **影响**：Host 算力不足，任务排队等待，可能拖慢 NPU 供数
-- **可能根因**：整机 CPU 计算需求超过供给
+  - 调度延迟 P99 = **39.00 ms**（判定阈值：≥5ms 警告 / ≥20ms 严重；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 调度延迟平均值 = **39.000 ms**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 受影响最大的任务 = **acl_thread (最大 39.0ms); acl_thread (最大 39.0ms); acl_thread (最大 39.0ms)**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+- **影响**：关键线程被唤醒后需等待较久才能运行，通信/数据准备节奏被打断，NPU 等待 Host；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：CPU 竞争 (饱和/中断/优先级) 导致 runnable 排队
 - **优化动作**：见第三部分。
 
-### 问题 2：NPU 任务 CPU 亲和性存在风险（待性能验证）（警告 / 置信度 MEDIUM）
+### 问题 2：CPU 负载严重不均衡（警告 / 置信度 HIGH）
+
+- **类别**：`CPU_IMBALANCE` — CPU 负载不均衡：少数核心打满而大量核心空闲，常见于绑核不当或中断亲和性集中
+- **证据**：
+  - 最高核利用率 (CPU 128) = **100.0%**（判定阈值：≥90%；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 核心利用率中位数 = **9.5%**（判定阈值：差值≥40% 判定不均衡；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 空闲核数量 (利用率≤30%) = **254 个**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+- **影响**：部分核心打满成为瓶颈，同时大量算力闲置，吞吐受限；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：任务绑核过于集中、负载均衡失效或中断亲和性固定于个别核
+- **优化动作**：见第三部分。
+
+### 问题 3：硬中断集中于 CPU 129（警告 / 置信度 MEDIUM）
+
+- **类别**：`IRQ_HOTSPOT` — 硬中断热点：硬件中断集中消耗个别核心 CPU
+- **证据**：
+  - CPU 129 硬中断 CPU 占比 = **20.0%**（判定阈值：≥15% 且≥中位数 2.0 倍；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - Top 中断源 = **nvme0q1(10 次), hns3-rxtx(80 次)**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+- **影响**：中断处理与计算线程争抢 CPU，增加调度延迟，可能造成 NPU 供数不稳；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：该核承载了大量设备中断 (存储/网络/IPI)，未做中断亲和性分散
+- **优化动作**：见第三部分。
+
+### 问题 4：软中断集中于 CPU 129（警告 / 置信度 MEDIUM）
+
+- **类别**：`SOFTIRQ_HOTSPOT` — 软中断热点：软中断（如 NET_RX 网络收包）集中消耗个别核心 CPU
+- **证据**：
+  - CPU 129 软中断 CPU 占比 = **25.0%**（判定阈值：≥20% 且≥中位数 2.0 倍；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - Top 软中断类型 = **BLOCK(2500ms), NET_RX(1200ms)**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+- **影响**：软中断处理挤占计算线程运行时间，调度延迟上升，训练/推理吞吐下降；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：该核集中处理了软中断
+- **优化动作**：见第三部分。
+
+### 问题 5：高负载策略域的报告频率低于硬件最大参考（待验证）（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_FREQUENCY_LOW` — CPU 频率异常：高负载下 CPU 长期低频运行
+- **证据**：
+  - CPU 128 平均频率 = **1341 MHz (最高 2600 MHz)**（判定阈值：低频(≤cpuinfo_max_freq 50%)时间占比≥50%；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 涉及核心数 = **2 个**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - governor = **ondemand**（判定阈值：建议 performance；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+- **影响**：同负载需要更多周期，实际算力下降，任务变慢；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：驱动报告频率偏低；需结合负载、平台温度与功耗证据验证，不等同于已证实降频根因
+- **优化动作**：见第三部分。
+
+### 问题 6：任务绑核风险: service-129 只在 1 个核心上运行（警告 / 置信度 MEDIUM）
+
+- **类别**：`TASK_AFFINITY_PROBLEM` — 任务绑核问题：任务集中在少数核心运行
+- **证据**：
+  - 任务 (pid) = **service-129 (pid 10129), 观测内运行 9.5 秒**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 运行过的核心 = **129**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 这些核心的利用率 = **cpu129=95%**（判定阈值：≥90% 视为饱和；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 空闲核心 = **254 个 (cpu 0,1,2,3,4,5,6,7)**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+- **影响**：任务被限制在饱和核心上运行而其他核心空闲, 算力未被充分利用；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：taskset/cgroup cpuset 限制或调度配置导致任务无法迁移到空闲核
+- **优化动作**：见第三部分。
+
+### 问题 7：多数核心空闲但存在热点核（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_IDLE_EXCESSIVE` — CPU 过度空闲：核心大量闲置，负载未被合理分布
+- **证据**：
+  - 全机平均利用率 = **10.5%**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+  - 热点核 = **见上方不均衡/中断结论**（判定阈值：-；来源：ftrace sched/irq/power + 对应只读快照；详见原始数据；时间窗：1000.000000~1010.000000 s）
+- **影响**：整体算力富余但热点核成为局部瓶颈；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：负载/中断分布不均
+- **优化动作**：见第三部分。
+
+### 问题 8：NPU Worker TID5000 存在同核竞争候选 TID9000（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_CONTENTION_CANDIDATE` —
+- **证据**：
+  - 等待窗口内同核运行重叠 = **690.000 ms；CPU [0]；NPU [0]**（判定阈值：仅作候选；重叠>=5ms为经验筛选；来源：sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi；时间窗：[{'start': 1000.021, 'end': 1000.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 0, 'wait_kind': 'wakeup'}]（完整已观测窗口见第10节/JSON））
+- **影响**：Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：可运行等待与其他任务执行相关，因果关系尚未证实
+- **优化动作**：见第三部分。
+
+### 问题 9：NPU Worker TID5001 存在同核竞争候选 TID9001（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_CONTENTION_CANDIDATE` —
+- **证据**：
+  - 等待窗口内同核运行重叠 = **690.000 ms；CPU [32]；NPU [1]**（判定阈值：仅作候选；重叠>=5ms为经验筛选；来源：sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi；时间窗：[{'start': 1000.021, 'end': 1000.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 32, 'wait_kind': 'wakeup'}]（完整已观测窗口见第10节/JSON））
+- **影响**：Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：可运行等待与其他任务执行相关，因果关系尚未证实
+- **优化动作**：见第三部分。
+
+### 问题 10：NPU Worker TID5002 存在同核竞争候选 TID9002（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_CONTENTION_CANDIDATE` —
+- **证据**：
+  - 等待窗口内同核运行重叠 = **690.000 ms；CPU [64]；NPU [2]**（判定阈值：仅作候选；重叠>=5ms为经验筛选；来源：sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi；时间窗：[{'start': 1000.021, 'end': 1000.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 64, 'wait_kind': 'wakeup'}]（完整已观测窗口见第10节/JSON））
+- **影响**：Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：可运行等待与其他任务执行相关，因果关系尚未证实
+- **优化动作**：见第三部分。
+
+### 问题 11：NPU Worker TID5003 存在同核竞争候选 TID9003（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_CONTENTION_CANDIDATE` —
+- **证据**：
+  - 等待窗口内同核运行重叠 = **690.000 ms；CPU [96]；NPU [3]**（判定阈值：仅作候选；重叠>=5ms为经验筛选；来源：sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi；时间窗：[{'start': 1000.021, 'end': 1000.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 96, 'wait_kind': 'wakeup'}]（完整已观测窗口见第10节/JSON））
+- **影响**：Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：可运行等待与其他任务执行相关，因果关系尚未证实
+- **优化动作**：见第三部分。
+
+### 问题 12：NPU Worker TID5004 存在同核竞争候选 TID9004（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_CONTENTION_CANDIDATE` —
+- **证据**：
+  - 等待窗口内同核运行重叠 = **690.000 ms；CPU [128]；NPU [4]**（判定阈值：仅作候选；重叠>=5ms为经验筛选；来源：sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi；时间窗：[{'start': 1000.021, 'end': 1000.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 128, 'wait_kind': 'wakeup'}]（完整已观测窗口见第10节/JSON））
+- **影响**：Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：可运行等待与其他任务执行相关，因果关系尚未证实
+- **优化动作**：见第三部分。
+
+### 问题 13：NPU Worker TID5005 存在同核竞争候选 TID9005（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_CONTENTION_CANDIDATE` —
+- **证据**：
+  - 等待窗口内同核运行重叠 = **690.000 ms；CPU [160]；NPU [5]**（判定阈值：仅作候选；重叠>=5ms为经验筛选；来源：sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi；时间窗：[{'start': 1000.021, 'end': 1000.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 160, 'wait_kind': 'wakeup'}]（完整已观测窗口见第10节/JSON））
+- **影响**：Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：可运行等待与其他任务执行相关，因果关系尚未证实
+- **优化动作**：见第三部分。
+
+### 问题 14：NPU Worker TID5006 存在同核竞争候选 TID9006（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_CONTENTION_CANDIDATE` —
+- **证据**：
+  - 等待窗口内同核运行重叠 = **690.000 ms；CPU [192]；NPU [6]**（判定阈值：仅作候选；重叠>=5ms为经验筛选；来源：sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi；时间窗：[{'start': 1000.021, 'end': 1000.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 192, 'wait_kind': 'wakeup'}]（完整已观测窗口见第10节/JSON））
+- **影响**：Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：可运行等待与其他任务执行相关，因果关系尚未证实
+- **优化动作**：见第三部分。
+
+### 问题 15：NPU Worker TID5007 存在同核竞争候选 TID9007（警告 / 置信度 MEDIUM）
+
+- **类别**：`CPU_CONTENTION_CANDIDATE` —
+- **证据**：
+  - 等待窗口内同核运行重叠 = **690.000 ms；CPU [224]；NPU [7]**（判定阈值：仅作候选；重叠>=5ms为经验筛选；来源：sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi；时间窗：[{'start': 1000.021, 'end': 1000.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 224, 'wait_kind': 'wakeup'}]（完整已观测窗口见第10节/JSON））
+- **影响**：Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：可运行等待与其他任务执行相关，因果关系尚未证实
+- **优化动作**：见第三部分。
+
+### 问题 16：cgroup观测到CPU节流（非整机饱和结论）（警告 / 置信度 MEDIUM）
+
+- **类别**：`CGROUP_CPU_THROTTLING` —
+- **证据**：
+  - cgroup /sys/fs/cgroup/ascend/job = **{'path': '/sys/fs/cgroup/ascend/job', 'version': 2, 'tgids': [3000, 3100, 4000, 4001, 4002, 4003, 4004, 4005, 4006, 4007, 6000, 6500], 'quota_cpus': 4.0, 'quota_status': 'LIMITED', 'nr_throttled_delta': 4, 'throttled_usec_delta': 80000, 'evidence': 'process_start/end.json cgroup ancestor cpu.max/cpu.stat deltas', 'confidence': 'MEDIUM', 'note': '前后快照包围trace窗口；计数为整个cgroup而非单线程；throttled时间不能视为整机饱和。'}**（判定阈值：nr_throttled增量>0；来源：process_start/end.json cgroup ancestor cpu.max/cpu.stat deltas；时间窗：1000.000000~1010.000000 s）
+- **影响**：所属任务可能被CPU配额限制，整机空闲仍可能排队；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：cgroup自身或祖先限额；累计增量覆盖整个cgroup，尚未证明单个Worker受限
+- **优化动作**：见第三部分。
+
+### 问题 17：NPU 任务 CPU 亲和性潜在风险（待性能验证）（提示 / 置信度 MEDIUM）
 
 - **类别**：`NUMA_RISK` — NUMA 风险：存在跨 NUMA 节点访问的可能性
 - **证据**：
-  - NPU/PID 与 CPU 亲和性 = **NPU0/PID4115: allowed=0-191, observed=30, local=144-167；NPU2/PID4117: allowed=0-191, observed=30, local=144-167；NPU3/PID4118: allowed=0-191, observed=30, local=0-23；NPU4/PID4119: allowed=0-191, observed=100, local=96-119；NPU5/PID4120: allowed=0-191, observed=30, local=48-71；NPU6/PID4121: allowed=0-191, observed=30, local=96-119；NPU7/PID4122: allowed=0-191, observed=30, local=48-71**（判定阈值：全量线程 allowed CPU 收敛到 NPU 亲和 CPU；观测核应位于亲和范围；来源：hostbound/npu_smi_topology.txt + npu_smi_info.txt + pid_*_thread_affinity.txt/threads.txt + ftrace；时间窗：ftrace 100.000~101.000s；配置/PSR 为采集结束快照）
-- **影响**：配置可能引入跨节点运行或共享 CPU 争用；未关联 Device 空泡/性能差异，不能确认 HostBound 根因
-- **可能根因**：已识别 NPU 对应进程的调度许可范围未收敛，或观测到非亲和 CPU；内存页位置仍待核验
-- **优化动作**：见第三部分。
-
-### 问题 3：本次采集数据维度有限（提示 / 置信度 HIGH）
-
-- **类别**：`INSUFFICIENT_EVIDENCE` — 证据不足：当前数据无法支持可靠结论
-- **证据**：
-  - 缺失维度 = **缺少 cpu_idle 事件，利用率基于 swapper 切换近似估算；缺少 wakeup 事件，无法计算调度延迟；缺少 IRQ 事件，无法分析硬中断；缺少 SoftIRQ 事件，无法分析软中断；缺少 cpu_frequency 事件，无法分析频率**（判定阈值：-；来源：ftrace / 对应系统快照；时间窗：本次采集窗口；累计快照除外）
-  - 采集模式 = **精简模式(仅 sched_switch)**（判定阈值：-；来源：ftrace / 对应系统快照；时间窗：本次采集窗口；累计快照除外）
-- **影响**：相关维度结论缺失，无法覆盖该类问题
-- **可能根因**：采集脚本精简模式或内核不支持部分事件
+  - NPU/PID 与 CPU 亲和性 = **NPU1/PID4001: allowed=0-255, observed=32, local=32-63；NPU2/PID4002: allowed=0-255, observed=64, local=64-95；NPU3/PID4003: allowed=0-255, observed=96, local=96-127；NPU4/PID4004: allowed=0-255, observed=128, local=128-159；NPU5/PID4005: allowed=0-255, observed=160, local=160-191；NPU6/PID4006: allowed=0-255, observed=192, local=192-223；NPU7/PID4007: allowed=0-255, observed=224, local=224-255**（判定阈值：全量线程 allowed CPU 收敛到 NPU 亲和 CPU；观测核应位于亲和范围；来源：hostbound/npu_smi_topology.txt + npu_smi_info.txt + pid_*_thread_affinity.txt/threads.txt + ftrace；时间窗：ftrace 1000.000~1010.000s；配置/PSR 为采集结束快照）
+- **影响**：配置可能引入跨节点运行或共享 CPU 争用；未关联 Device 空泡/性能差异，不能确认 HostBound 根因；此为Host侧风险描述，NPU性能因果尚未证实。
+- **可能根因**：待验证候选：已识别 NPU 对应进程的调度许可范围未收敛，或观测到非亲和 CPU；内存页位置仍待核验
 - **优化动作**：见第三部分。
 
 ## 5. CPU 总体状态
 
-无 /proc/stat 快照，总体占用以 trace 计算为准。
+/proc/stat 快照（开机以来累计）：user 10.0%、system 10.0%、iowait 0.0%、irq 0.0%、softirq 0.0%、idle 80.0%、steal 0.0%。
+
+> 注意：trace 只能区分 busy/idle；user/system/iowait 为开机累计值，仅供参考。
 
 ## 6. CPU Core Balance（各核心负载）
 
-| 核心 | 利用率 | 空闲比 | 上下文切换/s | 硬中断占比 | 软中断占比 |
-|-----|-------:|-------:|------------:|----------:|----------:|
-| CPU 30 | 100.0% | 0.0% | 3 | 0.0% | 0.0% |
+| CPU | NUMA | 观测秒 | 利用率 | 空闲率 | 切换/秒 | 唤醒/秒 | R切出/秒 | 迁移/秒 | 硬中断 | 软中断 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 0 | 10.00 s | 20.00% | 80.00% | 5.10 | 1.00 | 1.00 | 缺失 / 不可用 | 0.50% | 1.50% |
+| 1 | 0 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 2 | 0 | 10.00 s | 8.30% | 91.70% | 2.30 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 3 | 0 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 4 | 0 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 5 | 0 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 6 | 0 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 7 | 0 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 8 | 0 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 9 | 0 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 10 | 0 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 11 | 0 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 12 | 0 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 13 | 0 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 14 | 0 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 15 | 0 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 16 | 0 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 17 | 0 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 18 | 0 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 19 | 0 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 20 | 0 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 21 | 0 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 22 | 0 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 23 | 0 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 24 | 0 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 25 | 0 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 26 | 0 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 27 | 0 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 28 | 0 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 29 | 0 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 30 | 0 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 31 | 0 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 32 | 1 | 10.00 s | 20.00% | 80.00% | 5.10 | 1.00 | 1.00 | 缺失 / 不可用 | 0.50% | 1.50% |
+| 33 | 1 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 34 | 1 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 35 | 1 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 36 | 1 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 37 | 1 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 38 | 1 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 39 | 1 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 40 | 1 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 41 | 1 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 42 | 1 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 43 | 1 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 44 | 1 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 45 | 1 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 46 | 1 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 47 | 1 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 48 | 1 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 49 | 1 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 50 | 1 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 51 | 1 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 52 | 1 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 53 | 1 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 54 | 1 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 55 | 1 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 56 | 1 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 57 | 1 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 58 | 1 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 59 | 1 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 60 | 1 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 61 | 1 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 62 | 1 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 63 | 1 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 64 | 2 | 10.00 s | 20.00% | 80.00% | 5.10 | 1.00 | 1.00 | 缺失 / 不可用 | 0.50% | 1.50% |
+| 65 | 2 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 66 | 2 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 67 | 2 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 68 | 2 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 69 | 2 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 70 | 2 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 71 | 2 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 72 | 2 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 73 | 2 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 74 | 2 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 75 | 2 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 76 | 2 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 77 | 2 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 78 | 2 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 79 | 2 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 80 | 2 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 81 | 2 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 82 | 2 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 83 | 2 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 84 | 2 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 85 | 2 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 86 | 2 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 87 | 2 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 88 | 2 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 89 | 2 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 90 | 2 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 91 | 2 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 92 | 2 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 93 | 2 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 94 | 2 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 95 | 2 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 96 | 3 | 10.00 s | 20.00% | 80.00% | 5.10 | 1.00 | 1.00 | 缺失 / 不可用 | 0.50% | 1.50% |
+| 97 | 3 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 98 | 3 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 99 | 3 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 100 | 3 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 101 | 3 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 102 | 3 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 103 | 3 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 104 | 3 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 105 | 3 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 106 | 3 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 107 | 3 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 108 | 3 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 109 | 3 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 110 | 3 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 111 | 3 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 112 | 3 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 113 | 3 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 114 | 3 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 115 | 3 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 116 | 3 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 117 | 3 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 118 | 3 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 119 | 3 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 120 | 3 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 121 | 3 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 122 | 3 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 123 | 3 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 124 | 3 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 125 | 3 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 126 | 3 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 127 | 3 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 128 | 4 | 10.00 s | 100.00% | 0.00% | 5.10 | 1.00 | 1.00 | 缺失 / 不可用 | 0.50% | 1.50% |
+| 129 | 4 | 10.00 s | 95.00% | 5.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 20.00% | 25.00% |
+| 130 | 4 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 131 | 4 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 132 | 4 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 133 | 4 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 134 | 4 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 135 | 4 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 136 | 4 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 137 | 4 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 138 | 4 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 139 | 4 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 140 | 4 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 141 | 4 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 142 | 4 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 143 | 4 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 144 | 4 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 145 | 4 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 146 | 4 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 147 | 4 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 148 | 4 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 149 | 4 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 150 | 4 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 151 | 4 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 152 | 4 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 153 | 4 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 154 | 4 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 155 | 4 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 156 | 4 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 157 | 4 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 158 | 4 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 159 | 4 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 160 | 5 | 10.00 s | 20.00% | 80.00% | 5.10 | 1.00 | 1.00 | 缺失 / 不可用 | 0.50% | 1.50% |
+| 161 | 5 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 162 | 5 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 163 | 5 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 164 | 5 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 165 | 5 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 166 | 5 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 167 | 5 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 168 | 5 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 169 | 5 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 170 | 5 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 171 | 5 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 172 | 5 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 173 | 5 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 174 | 5 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 175 | 5 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 176 | 5 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 177 | 5 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 178 | 5 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 179 | 5 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 180 | 5 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 181 | 5 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 182 | 5 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 183 | 5 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 184 | 5 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 185 | 5 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 186 | 5 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 187 | 5 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 188 | 5 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 189 | 5 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 190 | 5 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 191 | 5 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 192 | 6 | 10.00 s | 20.00% | 80.00% | 5.10 | 1.00 | 1.00 | 缺失 / 不可用 | 0.50% | 1.50% |
+| 193 | 6 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 194 | 6 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 195 | 6 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 196 | 6 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 197 | 6 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 198 | 6 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 199 | 6 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 200 | 6 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 201 | 6 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 202 | 6 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 203 | 6 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 204 | 6 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 205 | 6 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 206 | 6 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 207 | 6 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 208 | 6 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 209 | 6 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 210 | 6 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 211 | 6 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 212 | 6 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 213 | 6 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 214 | 6 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 215 | 6 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 216 | 6 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 217 | 6 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 218 | 6 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 219 | 6 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 220 | 6 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 221 | 6 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 222 | 6 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 223 | 6 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 224 | 7 | 10.00 s | 20.00% | 80.00% | 5.10 | 1.00 | 1.00 | 缺失 / 不可用 | 0.50% | 1.50% |
+| 225 | 7 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 226 | 7 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 227 | 7 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 228 | 7 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 229 | 7 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 230 | 7 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 231 | 7 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 232 | 7 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 233 | 7 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 234 | 7 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 235 | 7 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 236 | 7 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 237 | 7 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 238 | 7 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 239 | 7 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 240 | 7 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 241 | 7 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 242 | 7 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 243 | 7 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 244 | 7 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 245 | 7 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 246 | 7 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 247 | 7 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 248 | 7 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 249 | 7 | 10.00 s | 11.00% | 89.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 250 | 7 | 10.00 s | 12.50% | 87.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 251 | 7 | 10.00 s | 14.00% | 86.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 252 | 7 | 10.00 s | 5.00% | 95.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 253 | 7 | 10.00 s | 6.50% | 93.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 254 | 7 | 10.00 s | 8.00% | 92.00% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
+| 255 | 7 | 10.00 s | 9.50% | 90.50% | 2.10 | 0.00 | 0.00 | 缺失 / 不可用 | 0.00% | 0.00% |
 
-最高负载：30（100.0%），最低：30（100.0%）。负载分布尚可。
+完整折线/柱状图、单位分组与NUMA筛选见离线HTML第6节。
 
 ## 7. Scheduler 调度分析
 
-- 上下文切换总计 **3** 次（3 次/秒）
-- 唤醒总计 **0** 次（0 次/秒）— 唤醒率反映任务碎片化程度。
-- 调度延迟：trace 中缺少 wakeup 与 switch 可配对事件，无法计算调度延迟
-- 平均可运行任务数 0.0 — 平均可运行任务数 (runnable)：任意时刻处于等待 CPU 状态的平均任务数，>核心数说明调度拥挤。
+- 上下文切换总计 **5618** 次（562 次/秒）
+- 唤醒总计 **80** 次（8 次/秒）— 唤醒率反映任务碎片化程度。
+- 调度延迟：平均 39.000 ms，P50 39.000 ms，P95 39.00 ms，P99 39.00 ms，最大 39.00 ms（共 80 次可配对样本）。
+  - 调度延迟含义：调度延迟 (scheduling latency)：任务从被唤醒 (sched_wakeup) 到真正获得 CPU (sched_switch) 的等待时间，直接体现 runnable 队列拥堵程度。
+- 平均可运行任务数 0.6 — 平均可运行任务数 (runnable)：已完成成功唤醒和R/R+切出等待区间的时间加权下界，不是全系统精确runqueue长度。
+
+| 任务 | 最大延迟 ms | 平均 ms | 次数 |
+|------|----------:|--------:|-----:|
+| acl_thread (TID 5000) | 39.00 | 39.000 | 10 |
+| acl_thread (TID 5001) | 39.00 | 39.000 | 10 |
+| acl_thread (TID 5002) | 39.00 | 39.000 | 10 |
+| acl_thread (TID 5003) | 39.00 | 39.000 | 10 |
+| acl_thread (TID 5004) | 39.00 | 39.000 | 10 |
+| acl_thread (TID 5005) | 39.00 | 39.000 | 10 |
+| acl_thread (TID 5006) | 39.00 | 39.000 | 10 |
+| acl_thread (TID 5007) | 39.00 | 39.000 | 10 |
 
 ## 8. IRQ / SoftIRQ 分析
 
 ### 8.1 硬中断
 
-硬中断总 CPU 占比 **0.00%**（0 次）。
+硬中断全机观测占比 **0.09%**；单核最高 20.00%；配对次数 90。
+
+| 中断源 | 次数 | 累计耗时 ms | 说明 |
+|--------|-----:|-----------:|------|
+| nvme0q1 | 10 | 2000.0 | NVMe 存储队列中断（nvme0q*），数据加载/日志写入时产生。 |
+| hns3-rxtx | 80 | 400.0 | 华为鲲鹏网卡中断（hns*），昇腾服务器常见。 |
 
 ### 8.2 软中断
 
-软中断总 CPU 占比 **0.00%**（0 次）。
+软中断全机观测占比 **0.14%**；单核最高 25.00%；配对次数 90。
+
+| 软中断类型 | 次数 | 累计耗时 ms | 说明 |
+|-----------|-----:|-----------:|------|
+| BLOCK | 10 | 2500.0 | 块设备软中断：块 I/O 完成处理，存储密集场景明显。 |
+| NET_RX | 80 | 1200.0 | 网络接收软中断：网卡收到数据包后，协议栈处理（IP/TCP 解析、socket 分发）在软中断中延迟执行。NET_RX集中单核是需结合Worker时间线验证的Host侧风险。 |
 
 各核中断分布见第 6 节表格与 HTML 图表。
 
 ## 9. CPU Frequency / Idle 分析
 
-trace 中无 cpu_frequency 事件，频率分析不可用（Available: Unavailable）。
+### CPU Frequency Analysis
 
-trace 中无 cpu_idle 事件，空闲比基于 swapper 任务近似。
+
+频率状态：TRACE_AVAILABLE；事件状态：TRACE_AVAILABLE；动态样本数：24。
+
+
+| 策略域 | 相关CPU | 当前 | 时间加权平均 | 窗口最低 | 窗口最高 | 硬件最大参考 | 低频时间占比 | Governor | 来源 / 可靠性 | 样本数 | 接口读取限制 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| policy0 | 0-31 | 2600.00 MHz | 2501.01 MHz | 2400.00 MHz | 2600.00 MHz | 2600.00 MHz | 0.00% | ondemand | ftrace:power/cpu_frequency / REQUESTED_OR_DRIVER_REPORTED | 3 | {} |
+| policy128 | 128-159 | 2600.00 MHz | 1341.41 MHz | 1200.00 MHz | 2600.00 MHz | 2600.00 MHz | 89.90% | ondemand | ftrace:power/cpu_frequency / REQUESTED_OR_DRIVER_REPORTED | 3 | {} |
+| policy160 | 160-191 | 2600.00 MHz | 2501.01 MHz | 2400.00 MHz | 2600.00 MHz | 2600.00 MHz | 0.00% | ondemand | ftrace:power/cpu_frequency / REQUESTED_OR_DRIVER_REPORTED | 3 | {} |
+| policy192 | 192-223 | 2600.00 MHz | 2501.01 MHz | 2400.00 MHz | 2600.00 MHz | 2600.00 MHz | 0.00% | ondemand | ftrace:power/cpu_frequency / REQUESTED_OR_DRIVER_REPORTED | 3 | {} |
+| policy224 | 224-255 | 2600.00 MHz | 2501.01 MHz | 2400.00 MHz | 2600.00 MHz | 2600.00 MHz | 0.00% | ondemand | ftrace:power/cpu_frequency / REQUESTED_OR_DRIVER_REPORTED | 3 | {} |
+| policy32 | 32-63 | 2600.00 MHz | 2501.01 MHz | 2400.00 MHz | 2600.00 MHz | 2600.00 MHz | 0.00% | ondemand | ftrace:power/cpu_frequency / REQUESTED_OR_DRIVER_REPORTED | 3 | {} |
+| policy64 | 64-95 | 2600.00 MHz | 2501.01 MHz | 2400.00 MHz | 2600.00 MHz | 2600.00 MHz | 0.00% | ondemand | ftrace:power/cpu_frequency / REQUESTED_OR_DRIVER_REPORTED | 3 | {} |
+| policy96 | 96-127 | 2600.00 MHz | 2501.01 MHz | 2400.00 MHz | 2600.00 MHz | 2600.00 MHz | 0.00% | ondemand | ftrace:power/cpu_frequency / REQUESTED_OR_DRIVER_REPORTED | 3 | {} |
+
+ftrace/scaling_cur_freq 表示驱动报告或请求频率；cpuinfo_cur_freq 为硬件反馈（如实现）。均不等同于已验证的PMU实测频率。
+
+
+低频占比仅在cpuinfo_max_freq可靠参考存在时计算（≤其50%，经验筛选）；首个样本前不外推。窗口无频率转换不表示降频。当前值来自结束快照，平均值仅覆盖已观测样本持续区间。
+
+
+### CPU Idle Residency
+
+
+Idle状态：TRACE_AVAILABLE；来源：ftrace:power/cpu_idle；可靠性：BOUNDED_TRACE_INTERVALS。
+
+
+Idle Residency = 已配对/边界限定 idle 持续时间 / 对应时间窗 × 100%；C-state编号不是比例。初始状态未知；最后状态仅延续至采集边界。整窗有未知区间则整窗比例为N/A，另列已知idle时间下界。
+
+
+| CPU | 整窗Idle Residency | 已知Idle秒 | 有效覆盖 | 整窗Idle下界 | 各C-state持续秒 |
+|---|---|---|---|---|---|
+| 0 | 80.00% | 8.00 s | 100.00% | 80.00% | state1: 8.000000 s |
+| 1 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 2 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 3 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 4 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 5 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 6 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 7 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 8 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 9 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 10 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 11 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 12 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 13 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 14 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 15 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 16 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 17 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 18 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 19 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 20 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 21 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 22 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 23 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 24 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 25 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 26 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 27 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 28 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 29 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 30 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 31 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 32 | 80.00% | 8.00 s | 100.00% | 80.00% | state1: 8.000000 s |
+| 33 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 34 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 35 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 36 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 37 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 38 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 39 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 40 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 41 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 42 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 43 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 44 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 45 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 46 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 47 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 48 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 49 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 50 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 51 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 52 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 53 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 54 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 55 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 56 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 57 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 58 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 59 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 60 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 61 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 62 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 63 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 64 | 80.00% | 8.00 s | 100.00% | 80.00% | state1: 8.000000 s |
+| 65 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 66 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 67 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 68 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 69 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 70 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 71 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 72 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 73 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 74 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 75 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 76 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 77 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 78 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 79 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 80 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 81 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 82 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 83 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 84 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 85 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 86 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 87 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 88 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 89 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 90 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 91 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 92 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 93 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 94 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 95 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 96 | 80.00% | 8.00 s | 100.00% | 80.00% | state1: 8.000000 s |
+| 97 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 98 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 99 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 100 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 101 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 102 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 103 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 104 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 105 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 106 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 107 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 108 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 109 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 110 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 111 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 112 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 113 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 114 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 115 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 116 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 117 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 118 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 119 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 120 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 121 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 122 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 123 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 124 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 125 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 126 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 127 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 128 | 缺失 / 不可用 | 0.00 s | 0.00% | 缺失 / 不可用 | N/A |
+| 129 | 5.00% | 0.50 s | 100.00% | 5.00% | state1: 0.500000 s |
+| 130 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 131 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 132 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 133 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 134 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 135 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 136 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 137 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 138 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 139 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 140 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 141 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 142 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 143 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 144 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 145 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 146 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 147 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 148 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 149 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 150 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 151 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 152 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 153 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 154 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 155 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 156 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 157 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 158 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 159 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 160 | 80.00% | 8.00 s | 100.00% | 80.00% | state1: 8.000000 s |
+| 161 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 162 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 163 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 164 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 165 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 166 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 167 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 168 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 169 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 170 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 171 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 172 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 173 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 174 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 175 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 176 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 177 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 178 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 179 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 180 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 181 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 182 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 183 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 184 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 185 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 186 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 187 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 188 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 189 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 190 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 191 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 192 | 80.00% | 8.00 s | 100.00% | 80.00% | state1: 8.000000 s |
+| 193 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 194 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 195 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 196 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 197 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 198 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 199 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 200 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 201 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 202 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 203 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 204 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 205 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 206 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 207 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 208 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 209 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 210 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 211 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 212 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 213 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 214 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 215 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 216 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 217 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 218 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 219 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 220 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 221 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 222 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 223 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 224 | 80.00% | 8.00 s | 100.00% | 80.00% | state1: 8.000000 s |
+| 225 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 226 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 227 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 228 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 229 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 230 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 231 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 232 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 233 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 234 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 235 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 236 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 237 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 238 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 239 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 240 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 241 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 242 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 243 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 244 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 245 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 246 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 247 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 248 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+| 249 | 89.00% | 8.90 s | 100.00% | 89.00% | state1: 8.900000 s |
+| 250 | 87.50% | 8.75 s | 100.00% | 87.50% | state1: 8.750000 s |
+| 251 | 86.00% | 8.60 s | 100.00% | 86.00% | state1: 8.600000 s |
+| 252 | 95.00% | 9.50 s | 100.00% | 95.00% | state1: 9.500000 s |
+| 253 | 93.50% | 9.35 s | 100.00% | 93.50% | state1: 9.350000 s |
+| 254 | 92.00% | 9.20 s | 100.00% | 92.00% | state1: 9.200000 s |
+| 255 | 90.50% | 9.05 s | 100.00% | 90.50% | state1: 9.050000 s |
+
+PMU：NOT_VALIDATED；未运行 perf；cycles/ref-cycles 需验证事件语义、参考频率、同域权限和 multiplexing，ARM64 不保证存在 ref-cycles。
+
+
+各核空闲占比：平均 89.9%，最高 95.0%（7），最低 5.0%（129）。多数核心大量空闲，负载分布问题见问题详情。
 
 ## 10. Task / Thread 分析
 
+### Process / Thread Discovery
+
+
+已发现进程 268，任务身份 277，关联TGID [3000, 3100, 4000, 4001, 4002, 4003, 4004, 4005, 4006, 4007, 6000]。短生命周期任务无 /proc 或 clone_flags 证据时 TGID 保持未知；名称只用于角色提示。
+
+
+系统进程 268 / 线程 277；AI线程 19；同核竞争线程 8；非关联 0；未知 250；角色置信度 {'HIGH': 9, 'MEDIUM': 11, 'LOW': 257}。
+
+
+### AI Worker Top 10
+
+
+| 进程 | TGID | TID | 类别 | 角色/置信度 | NPU | Runtime | Runqueue Wait | Wait P99 | CPU | 关系证据 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| python3 | 4002 | 5002 | AI_WORKLOAD | ACL_THREAD / MEDIUM | 2 | 1.10 s | 0.69 s | 39.00 ms | 64 | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 4006 | 5006 | AI_WORKLOAD | ACL_THREAD / MEDIUM | 6 | 1.10 s | 0.69 s | 39.00 ms | 192 | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 4005 | 5005 | AI_WORKLOAD | ACL_THREAD / MEDIUM | 5 | 1.10 s | 0.69 s | 39.00 ms | 160 | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 4000 | 5000 | AI_WORKLOAD | ACL_THREAD / MEDIUM | 0 | 1.10 s | 0.69 s | 39.00 ms | 0 | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 4004 | 5004 | AI_WORKLOAD | ACL_THREAD / MEDIUM | 4 | 1.10 s | 0.69 s | 39.00 ms | 128 | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 4007 | 5007 | AI_WORKLOAD | ACL_THREAD / MEDIUM | 7 | 1.10 s | 0.69 s | 39.00 ms | 224 | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 4001 | 5001 | AI_WORKLOAD | ACL_THREAD / MEDIUM | 1 | 1.10 s | 0.69 s | 39.00 ms | 32 | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 4003 | 5003 | AI_WORKLOAD | ACL_THREAD / MEDIUM | 3 | 1.10 s | 0.69 s | 39.00 ms | 96 | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 3000 | 3000 | AI_WORKLOAD | API_SERVER / MEDIUM | — | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence |
+| python3 | 4007 | 4007 | AI_WORKLOAD | NPU_WORKER / HIGH | 7 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+
+### AI竞争线程 Top 10
+
+
+| 进程 | TGID | TID | 类别 | 角色/置信度 | NPU | Runtime | Runqueue Wait | Wait P99 | CPU | 关系证据 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| kworker | 8004 | 9004 | COMPETITOR | SYSTEM_PROCESS / HIGH | — | 8.90 s | 0.00 s | 缺失 / 不可用 | 128 |  |
+| backup-agent | 8000 | 9000 | COMPETITOR | UNKNOWN / LOW | — | 0.90 s | 0.00 s | 缺失 / 不可用 | 0 | no verified workload relationship |
+| backup-agent | 8005 | 9005 | COMPETITOR | UNKNOWN / LOW | — | 0.90 s | 0.00 s | 缺失 / 不可用 | 160 | no verified workload relationship |
+| backup-agent | 8006 | 9006 | COMPETITOR | UNKNOWN / LOW | — | 0.90 s | 0.00 s | 缺失 / 不可用 | 192 | no verified workload relationship |
+| backup-agent | 8001 | 9001 | COMPETITOR | UNKNOWN / LOW | — | 0.90 s | 0.00 s | 缺失 / 不可用 | 32 | no verified workload relationship |
+| backup-agent | 8003 | 9003 | COMPETITOR | UNKNOWN / LOW | — | 0.90 s | 0.00 s | 缺失 / 不可用 | 96 | no verified workload relationship |
+| backup-agent | 8007 | 9007 | COMPETITOR | UNKNOWN / LOW | — | 0.90 s | 0.00 s | 缺失 / 不可用 | 224 | no verified workload relationship |
+| backup-agent | 8002 | 9002 | COMPETITOR | UNKNOWN / LOW | — | 0.90 s | 0.00 s | 缺失 / 不可用 | 64 | no verified workload relationship |
+
+### 系统线程 CPU Runtime Top 10
+
+
+| 进程 | TGID | TID | 类别 | 角色/置信度 | NPU | Runtime | Runqueue Wait | Wait P99 | CPU | 关系证据 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| service-129 | 10129 | 10129 | UNKNOWN | UNKNOWN / LOW | — | 9.50 s | 0.00 s | 缺失 / 不可用 | 129 | no verified workload relationship |
+| kworker | 8004 | 9004 | COMPETITOR | SYSTEM_PROCESS / HIGH | — | 8.90 s | 0.00 s | 缺失 / 不可用 | 128 |  |
+| service-6 | 10006 | 10006 | UNKNOWN | UNKNOWN / LOW | — | 1.40 s | 0.00 s | 缺失 / 不可用 | 6 | no verified workload relationship |
+| service-13 | 10013 | 10013 | UNKNOWN | UNKNOWN / LOW | — | 1.40 s | 0.00 s | 缺失 / 不可用 | 13 | no verified workload relationship |
+| service-20 | 10020 | 10020 | UNKNOWN | UNKNOWN / LOW | — | 1.40 s | 0.00 s | 缺失 / 不可用 | 20 | no verified workload relationship |
+| service-27 | 10027 | 10027 | UNKNOWN | UNKNOWN / LOW | — | 1.40 s | 0.00 s | 缺失 / 不可用 | 27 | no verified workload relationship |
+| service-34 | 10034 | 10034 | UNKNOWN | UNKNOWN / LOW | — | 1.40 s | 0.00 s | 缺失 / 不可用 | 34 | no verified workload relationship |
+| service-41 | 10041 | 10041 | UNKNOWN | UNKNOWN / LOW | — | 1.40 s | 0.00 s | 缺失 / 不可用 | 41 | no verified workload relationship |
+| service-48 | 10048 | 10048 | UNKNOWN | UNKNOWN / LOW | — | 1.40 s | 0.00 s | 缺失 / 不可用 | 48 | no verified workload relationship |
+| service-55 | 10055 | 10055 | UNKNOWN | UNKNOWN / LOW | — | 1.40 s | 0.00 s | 缺失 / 不可用 | 55 | no verified workload relationship |
+
+AI Worker需要NPU PID/TGID、后代关系或运行证据支持；竞争线程需同核可运行等待时间重叠。仅线程名称/相同Affinity不足以确认角色或竞争因果。
+
+
+| 进程 | TGID | TID | PPID | 任务身份/starttime | 类别 | 角色 | NPU关联 | Affinity快照 | PSR快照 | Mems_allowed | Task Group | 角色置信度 | CPU Runtime | Runtime份额 | 线程利用率 | Runqueue Wait | Wait P50 | Wait P95 | Wait P99 | 唤醒样本 | 上下文切换 | 成功唤醒 | Runnable切出 | Migration | 观测CPU | 数据质量 | 关系证据 | 采样证据 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| backup-agent | 8000 | 9000 | 1 | 9000:900000:800000 | COMPETITOR | UNKNOWN | — | 0-15 | 0 | 0-7 | UNASSIGNED | LOW | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 0 | OBSERVED | no verified workload relationship | proc/8000/task/9000/stat+status:start; no verified workload relationship; Runnable AI wait overlaps this task running on the same CPU; causality unproven |
+| service-1 | 10001 | 10001 | 1 | 10001:1000100:1000100 | UNKNOWN | UNKNOWN | — | 1 | 1 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 1 | OBSERVED | no verified workload relationship | proc/10001/task/10001/stat+status:start; no verified workload relationship |
+| service-2 | 10002 | 10002 | 1 | 10002:1000200:1000200 | UNKNOWN | UNKNOWN | — | 2 | 2 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 2 | OBSERVED | no verified workload relationship | proc/10002/task/10002/stat+status:start; no verified workload relationship |
+| service-3 | 10003 | 10003 | 1 | 10003:1000300:1000300 | UNKNOWN | UNKNOWN | — | 3 | 3 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 3 | OBSERVED | no verified workload relationship | proc/10003/task/10003/stat+status:start; no verified workload relationship |
+| service-4 | 10004 | 10004 | 1 | 10004:1000400:1000400 | UNKNOWN | UNKNOWN | — | 4 | 4 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 4 | OBSERVED | no verified workload relationship | proc/10004/task/10004/stat+status:start; no verified workload relationship |
+| service-5 | 10005 | 10005 | 1 | 10005:1000500:1000500 | UNKNOWN | UNKNOWN | — | 5 | 5 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 5 | OBSERVED | no verified workload relationship | proc/10005/task/10005/stat+status:start; no verified workload relationship |
+| service-6 | 10006 | 10006 | 1 | 10006:1000600:1000600 | UNKNOWN | UNKNOWN | — | 6 | 6 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 6 | OBSERVED | no verified workload relationship | proc/10006/task/10006/stat+status:start; no verified workload relationship |
+| service-7 | 10007 | 10007 | 1 | 10007:1000700:1000700 | UNKNOWN | UNKNOWN | — | 7 | 7 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 7 | OBSERVED | no verified workload relationship | proc/10007/task/10007/stat+status:start; no verified workload relationship |
+| service-8 | 10008 | 10008 | 1 | 10008:1000800:1000800 | UNKNOWN | UNKNOWN | — | 8 | 8 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 8 | OBSERVED | no verified workload relationship | proc/10008/task/10008/stat+status:start; no verified workload relationship |
+| service-9 | 10009 | 10009 | 1 | 10009:1000900:1000900 | UNKNOWN | UNKNOWN | — | 9 | 9 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 9 | OBSERVED | no verified workload relationship | proc/10009/task/10009/stat+status:start; no verified workload relationship |
+| service-10 | 10010 | 10010 | 1 | 10010:1001000:1001000 | UNKNOWN | UNKNOWN | — | 10 | 10 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 10 | OBSERVED | no verified workload relationship | proc/10010/task/10010/stat+status:start; no verified workload relationship |
+| service-11 | 10011 | 10011 | 1 | 10011:1001100:1001100 | UNKNOWN | UNKNOWN | — | 11 | 11 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 11 | OBSERVED | no verified workload relationship | proc/10011/task/10011/stat+status:start; no verified workload relationship |
+| service-12 | 10012 | 10012 | 1 | 10012:1001200:1001200 | UNKNOWN | UNKNOWN | — | 12 | 12 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 12 | OBSERVED | no verified workload relationship | proc/10012/task/10012/stat+status:start; no verified workload relationship |
+| service-13 | 10013 | 10013 | 1 | 10013:1001300:1001300 | UNKNOWN | UNKNOWN | — | 13 | 13 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 13 | OBSERVED | no verified workload relationship | proc/10013/task/10013/stat+status:start; no verified workload relationship |
+| service-14 | 10014 | 10014 | 1 | 10014:1001400:1001400 | UNKNOWN | UNKNOWN | — | 14 | 14 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 14 | OBSERVED | no verified workload relationship | proc/10014/task/10014/stat+status:start; no verified workload relationship |
+| service-15 | 10015 | 10015 | 1 | 10015:1001500:1001500 | UNKNOWN | UNKNOWN | — | 15 | 15 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 15 | OBSERVED | no verified workload relationship | proc/10015/task/10015/stat+status:start; no verified workload relationship |
+| service-16 | 10016 | 10016 | 1 | 10016:1001600:1001600 | UNKNOWN | UNKNOWN | — | 16 | 16 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 16 | OBSERVED | no verified workload relationship | proc/10016/task/10016/stat+status:start; no verified workload relationship |
+| service-17 | 10017 | 10017 | 1 | 10017:1001700:1001700 | UNKNOWN | UNKNOWN | — | 17 | 17 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 17 | OBSERVED | no verified workload relationship | proc/10017/task/10017/stat+status:start; no verified workload relationship |
+| service-18 | 10018 | 10018 | 1 | 10018:1001800:1001800 | UNKNOWN | UNKNOWN | — | 18 | 18 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 18 | OBSERVED | no verified workload relationship | proc/10018/task/10018/stat+status:start; no verified workload relationship |
+| service-19 | 10019 | 10019 | 1 | 10019:1001900:1001900 | UNKNOWN | UNKNOWN | — | 19 | 19 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 19 | OBSERVED | no verified workload relationship | proc/10019/task/10019/stat+status:start; no verified workload relationship |
+| service-20 | 10020 | 10020 | 1 | 10020:1002000:1002000 | UNKNOWN | UNKNOWN | — | 20 | 20 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 20 | OBSERVED | no verified workload relationship | proc/10020/task/10020/stat+status:start; no verified workload relationship |
+| service-21 | 10021 | 10021 | 1 | 10021:1002100:1002100 | UNKNOWN | UNKNOWN | — | 21 | 21 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 21 | OBSERVED | no verified workload relationship | proc/10021/task/10021/stat+status:start; no verified workload relationship |
+| service-22 | 10022 | 10022 | 1 | 10022:1002200:1002200 | UNKNOWN | UNKNOWN | — | 22 | 22 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 22 | OBSERVED | no verified workload relationship | proc/10022/task/10022/stat+status:start; no verified workload relationship |
+| service-23 | 10023 | 10023 | 1 | 10023:1002300:1002300 | UNKNOWN | UNKNOWN | — | 23 | 23 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 23 | OBSERVED | no verified workload relationship | proc/10023/task/10023/stat+status:start; no verified workload relationship |
+| service-24 | 10024 | 10024 | 1 | 10024:1002400:1002400 | UNKNOWN | UNKNOWN | — | 24 | 24 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 24 | OBSERVED | no verified workload relationship | proc/10024/task/10024/stat+status:start; no verified workload relationship |
+| service-25 | 10025 | 10025 | 1 | 10025:1002500:1002500 | UNKNOWN | UNKNOWN | — | 25 | 25 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 25 | OBSERVED | no verified workload relationship | proc/10025/task/10025/stat+status:start; no verified workload relationship |
+| service-26 | 10026 | 10026 | 1 | 10026:1002600:1002600 | UNKNOWN | UNKNOWN | — | 26 | 26 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 26 | OBSERVED | no verified workload relationship | proc/10026/task/10026/stat+status:start; no verified workload relationship |
+| service-27 | 10027 | 10027 | 1 | 10027:1002700:1002700 | UNKNOWN | UNKNOWN | — | 27 | 27 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 27 | OBSERVED | no verified workload relationship | proc/10027/task/10027/stat+status:start; no verified workload relationship |
+| service-28 | 10028 | 10028 | 1 | 10028:1002800:1002800 | UNKNOWN | UNKNOWN | — | 28 | 28 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 28 | OBSERVED | no verified workload relationship | proc/10028/task/10028/stat+status:start; no verified workload relationship |
+| service-29 | 10029 | 10029 | 1 | 10029:1002900:1002900 | UNKNOWN | UNKNOWN | — | 29 | 29 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 29 | OBSERVED | no verified workload relationship | proc/10029/task/10029/stat+status:start; no verified workload relationship |
+| service-30 | 10030 | 10030 | 1 | 10030:1003000:1003000 | UNKNOWN | UNKNOWN | — | 30 | 30 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 30 | OBSERVED | no verified workload relationship | proc/10030/task/10030/stat+status:start; no verified workload relationship |
+| service-31 | 10031 | 10031 | 1 | 10031:1003100:1003100 | UNKNOWN | UNKNOWN | — | 31 | 31 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 31 | OBSERVED | no verified workload relationship | proc/10031/task/10031/stat+status:start; no verified workload relationship |
+| backup-agent | 8001 | 9001 | 1 | 9001:900100:800100 | COMPETITOR | UNKNOWN | — | 32-47 | 32 | 0-7 | UNASSIGNED | LOW | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 32 | OBSERVED | no verified workload relationship | proc/8001/task/9001/stat+status:start; no verified workload relationship; Runnable AI wait overlaps this task running on the same CPU; causality unproven |
+| service-33 | 10033 | 10033 | 1 | 10033:1003300:1003300 | UNKNOWN | UNKNOWN | — | 33 | 33 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 33 | OBSERVED | no verified workload relationship | proc/10033/task/10033/stat+status:start; no verified workload relationship |
+| service-34 | 10034 | 10034 | 1 | 10034:1003400:1003400 | UNKNOWN | UNKNOWN | — | 34 | 34 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 34 | OBSERVED | no verified workload relationship | proc/10034/task/10034/stat+status:start; no verified workload relationship |
+| service-35 | 10035 | 10035 | 1 | 10035:1003500:1003500 | UNKNOWN | UNKNOWN | — | 35 | 35 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 35 | OBSERVED | no verified workload relationship | proc/10035/task/10035/stat+status:start; no verified workload relationship |
+| service-36 | 10036 | 10036 | 1 | 10036:1003600:1003600 | UNKNOWN | UNKNOWN | — | 36 | 36 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 36 | OBSERVED | no verified workload relationship | proc/10036/task/10036/stat+status:start; no verified workload relationship |
+| service-37 | 10037 | 10037 | 1 | 10037:1003700:1003700 | UNKNOWN | UNKNOWN | — | 37 | 37 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 37 | OBSERVED | no verified workload relationship | proc/10037/task/10037/stat+status:start; no verified workload relationship |
+| service-38 | 10038 | 10038 | 1 | 10038:1003800:1003800 | UNKNOWN | UNKNOWN | — | 38 | 38 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 38 | OBSERVED | no verified workload relationship | proc/10038/task/10038/stat+status:start; no verified workload relationship |
+| service-39 | 10039 | 10039 | 1 | 10039:1003900:1003900 | UNKNOWN | UNKNOWN | — | 39 | 39 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 39 | OBSERVED | no verified workload relationship | proc/10039/task/10039/stat+status:start; no verified workload relationship |
+| service-40 | 10040 | 10040 | 1 | 10040:1004000:1004000 | UNKNOWN | UNKNOWN | — | 40 | 40 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 40 | OBSERVED | no verified workload relationship | proc/10040/task/10040/stat+status:start; no verified workload relationship |
+| service-41 | 10041 | 10041 | 1 | 10041:1004100:1004100 | UNKNOWN | UNKNOWN | — | 41 | 41 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 41 | OBSERVED | no verified workload relationship | proc/10041/task/10041/stat+status:start; no verified workload relationship |
+| service-42 | 10042 | 10042 | 1 | 10042:1004200:1004200 | UNKNOWN | UNKNOWN | — | 42 | 42 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 42 | OBSERVED | no verified workload relationship | proc/10042/task/10042/stat+status:start; no verified workload relationship |
+| service-43 | 10043 | 10043 | 1 | 10043:1004300:1004300 | UNKNOWN | UNKNOWN | — | 43 | 43 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 43 | OBSERVED | no verified workload relationship | proc/10043/task/10043/stat+status:start; no verified workload relationship |
+| service-44 | 10044 | 10044 | 1 | 10044:1004400:1004400 | UNKNOWN | UNKNOWN | — | 44 | 44 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 44 | OBSERVED | no verified workload relationship | proc/10044/task/10044/stat+status:start; no verified workload relationship |
+| service-45 | 10045 | 10045 | 1 | 10045:1004500:1004500 | UNKNOWN | UNKNOWN | — | 45 | 45 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 45 | OBSERVED | no verified workload relationship | proc/10045/task/10045/stat+status:start; no verified workload relationship |
+| service-46 | 10046 | 10046 | 1 | 10046:1004600:1004600 | UNKNOWN | UNKNOWN | — | 46 | 46 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 46 | OBSERVED | no verified workload relationship | proc/10046/task/10046/stat+status:start; no verified workload relationship |
+| service-47 | 10047 | 10047 | 1 | 10047:1004700:1004700 | UNKNOWN | UNKNOWN | — | 47 | 47 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 47 | OBSERVED | no verified workload relationship | proc/10047/task/10047/stat+status:start; no verified workload relationship |
+| service-48 | 10048 | 10048 | 1 | 10048:1004800:1004800 | UNKNOWN | UNKNOWN | — | 48 | 48 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 48 | OBSERVED | no verified workload relationship | proc/10048/task/10048/stat+status:start; no verified workload relationship |
+| service-49 | 10049 | 10049 | 1 | 10049:1004900:1004900 | UNKNOWN | UNKNOWN | — | 49 | 49 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 49 | OBSERVED | no verified workload relationship | proc/10049/task/10049/stat+status:start; no verified workload relationship |
+| service-50 | 10050 | 10050 | 1 | 10050:1005000:1005000 | UNKNOWN | UNKNOWN | — | 50 | 50 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 50 | OBSERVED | no verified workload relationship | proc/10050/task/10050/stat+status:start; no verified workload relationship |
+| service-51 | 10051 | 10051 | 1 | 10051:1005100:1005100 | UNKNOWN | UNKNOWN | — | 51 | 51 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 51 | OBSERVED | no verified workload relationship | proc/10051/task/10051/stat+status:start; no verified workload relationship |
+| service-52 | 10052 | 10052 | 1 | 10052:1005200:1005200 | UNKNOWN | UNKNOWN | — | 52 | 52 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 52 | OBSERVED | no verified workload relationship | proc/10052/task/10052/stat+status:start; no verified workload relationship |
+| service-53 | 10053 | 10053 | 1 | 10053:1005300:1005300 | UNKNOWN | UNKNOWN | — | 53 | 53 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 53 | OBSERVED | no verified workload relationship | proc/10053/task/10053/stat+status:start; no verified workload relationship |
+| service-54 | 10054 | 10054 | 1 | 10054:1005400:1005400 | UNKNOWN | UNKNOWN | — | 54 | 54 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 54 | OBSERVED | no verified workload relationship | proc/10054/task/10054/stat+status:start; no verified workload relationship |
+| service-55 | 10055 | 10055 | 1 | 10055:1005500:1005500 | UNKNOWN | UNKNOWN | — | 55 | 55 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 55 | OBSERVED | no verified workload relationship | proc/10055/task/10055/stat+status:start; no verified workload relationship |
+| service-56 | 10056 | 10056 | 1 | 10056:1005600:1005600 | UNKNOWN | UNKNOWN | — | 56 | 56 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 56 | OBSERVED | no verified workload relationship | proc/10056/task/10056/stat+status:start; no verified workload relationship |
+| service-57 | 10057 | 10057 | 1 | 10057:1005700:1005700 | UNKNOWN | UNKNOWN | — | 57 | 57 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 57 | OBSERVED | no verified workload relationship | proc/10057/task/10057/stat+status:start; no verified workload relationship |
+| service-58 | 10058 | 10058 | 1 | 10058:1005800:1005800 | UNKNOWN | UNKNOWN | — | 58 | 58 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 58 | OBSERVED | no verified workload relationship | proc/10058/task/10058/stat+status:start; no verified workload relationship |
+| service-59 | 10059 | 10059 | 1 | 10059:1005900:1005900 | UNKNOWN | UNKNOWN | — | 59 | 59 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 59 | OBSERVED | no verified workload relationship | proc/10059/task/10059/stat+status:start; no verified workload relationship |
+| service-60 | 10060 | 10060 | 1 | 10060:1006000:1006000 | UNKNOWN | UNKNOWN | — | 60 | 60 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 60 | OBSERVED | no verified workload relationship | proc/10060/task/10060/stat+status:start; no verified workload relationship |
+| service-61 | 10061 | 10061 | 1 | 10061:1006100:1006100 | UNKNOWN | UNKNOWN | — | 61 | 61 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 61 | OBSERVED | no verified workload relationship | proc/10061/task/10061/stat+status:start; no verified workload relationship |
+| service-62 | 10062 | 10062 | 1 | 10062:1006200:1006200 | UNKNOWN | UNKNOWN | — | 62 | 62 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 62 | OBSERVED | no verified workload relationship | proc/10062/task/10062/stat+status:start; no verified workload relationship |
+| service-63 | 10063 | 10063 | 1 | 10063:1006300:1006300 | UNKNOWN | UNKNOWN | — | 63 | 63 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 63 | OBSERVED | no verified workload relationship | proc/10063/task/10063/stat+status:start; no verified workload relationship |
+| backup-agent | 8002 | 9002 | 1 | 9002:900200:800200 | COMPETITOR | UNKNOWN | — | 64-79 | 64 | 0-7 | UNASSIGNED | LOW | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 64 | OBSERVED | no verified workload relationship | proc/8002/task/9002/stat+status:start; no verified workload relationship; Runnable AI wait overlaps this task running on the same CPU; causality unproven |
+| service-65 | 10065 | 10065 | 1 | 10065:1006500:1006500 | UNKNOWN | UNKNOWN | — | 65 | 65 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 65 | OBSERVED | no verified workload relationship | proc/10065/task/10065/stat+status:start; no verified workload relationship |
+| service-66 | 10066 | 10066 | 1 | 10066:1006600:1006600 | UNKNOWN | UNKNOWN | — | 66 | 66 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 66 | OBSERVED | no verified workload relationship | proc/10066/task/10066/stat+status:start; no verified workload relationship |
+| service-67 | 10067 | 10067 | 1 | 10067:1006700:1006700 | UNKNOWN | UNKNOWN | — | 67 | 67 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 67 | OBSERVED | no verified workload relationship | proc/10067/task/10067/stat+status:start; no verified workload relationship |
+| service-68 | 10068 | 10068 | 1 | 10068:1006800:1006800 | UNKNOWN | UNKNOWN | — | 68 | 68 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 68 | OBSERVED | no verified workload relationship | proc/10068/task/10068/stat+status:start; no verified workload relationship |
+| service-69 | 10069 | 10069 | 1 | 10069:1006900:1006900 | UNKNOWN | UNKNOWN | — | 69 | 69 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 69 | OBSERVED | no verified workload relationship | proc/10069/task/10069/stat+status:start; no verified workload relationship |
+| service-70 | 10070 | 10070 | 1 | 10070:1007000:1007000 | UNKNOWN | UNKNOWN | — | 70 | 70 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 70 | OBSERVED | no verified workload relationship | proc/10070/task/10070/stat+status:start; no verified workload relationship |
+| service-71 | 10071 | 10071 | 1 | 10071:1007100:1007100 | UNKNOWN | UNKNOWN | — | 71 | 71 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 71 | OBSERVED | no verified workload relationship | proc/10071/task/10071/stat+status:start; no verified workload relationship |
+| service-72 | 10072 | 10072 | 1 | 10072:1007200:1007200 | UNKNOWN | UNKNOWN | — | 72 | 72 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 72 | OBSERVED | no verified workload relationship | proc/10072/task/10072/stat+status:start; no verified workload relationship |
+| service-73 | 10073 | 10073 | 1 | 10073:1007300:1007300 | UNKNOWN | UNKNOWN | — | 73 | 73 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 73 | OBSERVED | no verified workload relationship | proc/10073/task/10073/stat+status:start; no verified workload relationship |
+| service-74 | 10074 | 10074 | 1 | 10074:1007400:1007400 | UNKNOWN | UNKNOWN | — | 74 | 74 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 74 | OBSERVED | no verified workload relationship | proc/10074/task/10074/stat+status:start; no verified workload relationship |
+| service-75 | 10075 | 10075 | 1 | 10075:1007500:1007500 | UNKNOWN | UNKNOWN | — | 75 | 75 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 75 | OBSERVED | no verified workload relationship | proc/10075/task/10075/stat+status:start; no verified workload relationship |
+| service-76 | 10076 | 10076 | 1 | 10076:1007600:1007600 | UNKNOWN | UNKNOWN | — | 76 | 76 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 76 | OBSERVED | no verified workload relationship | proc/10076/task/10076/stat+status:start; no verified workload relationship |
+| service-77 | 10077 | 10077 | 1 | 10077:1007700:1007700 | UNKNOWN | UNKNOWN | — | 77 | 77 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 77 | OBSERVED | no verified workload relationship | proc/10077/task/10077/stat+status:start; no verified workload relationship |
+| service-78 | 10078 | 10078 | 1 | 10078:1007800:1007800 | UNKNOWN | UNKNOWN | — | 78 | 78 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 78 | OBSERVED | no verified workload relationship | proc/10078/task/10078/stat+status:start; no verified workload relationship |
+| service-79 | 10079 | 10079 | 1 | 10079:1007900:1007900 | UNKNOWN | UNKNOWN | — | 79 | 79 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 79 | OBSERVED | no verified workload relationship | proc/10079/task/10079/stat+status:start; no verified workload relationship |
+| service-80 | 10080 | 10080 | 1 | 10080:1008000:1008000 | UNKNOWN | UNKNOWN | — | 80 | 80 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 80 | OBSERVED | no verified workload relationship | proc/10080/task/10080/stat+status:start; no verified workload relationship |
+| service-81 | 10081 | 10081 | 1 | 10081:1008100:1008100 | UNKNOWN | UNKNOWN | — | 81 | 81 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 81 | OBSERVED | no verified workload relationship | proc/10081/task/10081/stat+status:start; no verified workload relationship |
+| service-82 | 10082 | 10082 | 1 | 10082:1008200:1008200 | UNKNOWN | UNKNOWN | — | 82 | 82 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 82 | OBSERVED | no verified workload relationship | proc/10082/task/10082/stat+status:start; no verified workload relationship |
+| service-83 | 10083 | 10083 | 1 | 10083:1008300:1008300 | UNKNOWN | UNKNOWN | — | 83 | 83 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 83 | OBSERVED | no verified workload relationship | proc/10083/task/10083/stat+status:start; no verified workload relationship |
+| service-84 | 10084 | 10084 | 1 | 10084:1008400:1008400 | UNKNOWN | UNKNOWN | — | 84 | 84 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 84 | OBSERVED | no verified workload relationship | proc/10084/task/10084/stat+status:start; no verified workload relationship |
+| service-85 | 10085 | 10085 | 1 | 10085:1008500:1008500 | UNKNOWN | UNKNOWN | — | 85 | 85 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 85 | OBSERVED | no verified workload relationship | proc/10085/task/10085/stat+status:start; no verified workload relationship |
+| service-86 | 10086 | 10086 | 1 | 10086:1008600:1008600 | UNKNOWN | UNKNOWN | — | 86 | 86 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 86 | OBSERVED | no verified workload relationship | proc/10086/task/10086/stat+status:start; no verified workload relationship |
+| service-87 | 10087 | 10087 | 1 | 10087:1008700:1008700 | UNKNOWN | UNKNOWN | — | 87 | 87 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 87 | OBSERVED | no verified workload relationship | proc/10087/task/10087/stat+status:start; no verified workload relationship |
+| service-88 | 10088 | 10088 | 1 | 10088:1008800:1008800 | UNKNOWN | UNKNOWN | — | 88 | 88 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 88 | OBSERVED | no verified workload relationship | proc/10088/task/10088/stat+status:start; no verified workload relationship |
+| service-89 | 10089 | 10089 | 1 | 10089:1008900:1008900 | UNKNOWN | UNKNOWN | — | 89 | 89 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 89 | OBSERVED | no verified workload relationship | proc/10089/task/10089/stat+status:start; no verified workload relationship |
+| service-90 | 10090 | 10090 | 1 | 10090:1009000:1009000 | UNKNOWN | UNKNOWN | — | 90 | 90 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 90 | OBSERVED | no verified workload relationship | proc/10090/task/10090/stat+status:start; no verified workload relationship |
+| service-91 | 10091 | 10091 | 1 | 10091:1009100:1009100 | UNKNOWN | UNKNOWN | — | 91 | 91 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 91 | OBSERVED | no verified workload relationship | proc/10091/task/10091/stat+status:start; no verified workload relationship |
+| service-92 | 10092 | 10092 | 1 | 10092:1009200:1009200 | UNKNOWN | UNKNOWN | — | 92 | 92 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 92 | OBSERVED | no verified workload relationship | proc/10092/task/10092/stat+status:start; no verified workload relationship |
+| service-93 | 10093 | 10093 | 1 | 10093:1009300:1009300 | UNKNOWN | UNKNOWN | — | 93 | 93 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 93 | OBSERVED | no verified workload relationship | proc/10093/task/10093/stat+status:start; no verified workload relationship |
+| service-94 | 10094 | 10094 | 1 | 10094:1009400:1009400 | UNKNOWN | UNKNOWN | — | 94 | 94 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 94 | OBSERVED | no verified workload relationship | proc/10094/task/10094/stat+status:start; no verified workload relationship |
+| service-95 | 10095 | 10095 | 1 | 10095:1009500:1009500 | UNKNOWN | UNKNOWN | — | 95 | 95 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 95 | OBSERVED | no verified workload relationship | proc/10095/task/10095/stat+status:start; no verified workload relationship |
+| backup-agent | 8003 | 9003 | 1 | 9003:900300:800300 | COMPETITOR | UNKNOWN | — | 96-111 | 96 | 0-7 | UNASSIGNED | LOW | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 96 | OBSERVED | no verified workload relationship | proc/8003/task/9003/stat+status:start; no verified workload relationship; Runnable AI wait overlaps this task running on the same CPU; causality unproven |
+| service-97 | 10097 | 10097 | 1 | 10097:1009700:1009700 | UNKNOWN | UNKNOWN | — | 97 | 97 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 97 | OBSERVED | no verified workload relationship | proc/10097/task/10097/stat+status:start; no verified workload relationship |
+| service-98 | 10098 | 10098 | 1 | 10098:1009800:1009800 | UNKNOWN | UNKNOWN | — | 98 | 98 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 98 | OBSERVED | no verified workload relationship | proc/10098/task/10098/stat+status:start; no verified workload relationship |
+| service-99 | 10099 | 10099 | 1 | 10099:1009900:1009900 | UNKNOWN | UNKNOWN | — | 99 | 99 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 99 | OBSERVED | no verified workload relationship | proc/10099/task/10099/stat+status:start; no verified workload relationship |
+| service-100 | 10100 | 10100 | 1 | 10100:1010000:1010000 | UNKNOWN | UNKNOWN | — | 100 | 100 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 100 | OBSERVED | no verified workload relationship | proc/10100/task/10100/stat+status:start; no verified workload relationship |
+| service-101 | 10101 | 10101 | 1 | 10101:1010100:1010100 | UNKNOWN | UNKNOWN | — | 101 | 101 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 101 | OBSERVED | no verified workload relationship | proc/10101/task/10101/stat+status:start; no verified workload relationship |
+| service-102 | 10102 | 10102 | 1 | 10102:1010200:1010200 | UNKNOWN | UNKNOWN | — | 102 | 102 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 102 | OBSERVED | no verified workload relationship | proc/10102/task/10102/stat+status:start; no verified workload relationship |
+| service-103 | 10103 | 10103 | 1 | 10103:1010300:1010300 | UNKNOWN | UNKNOWN | — | 103 | 103 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 103 | OBSERVED | no verified workload relationship | proc/10103/task/10103/stat+status:start; no verified workload relationship |
+| service-104 | 10104 | 10104 | 1 | 10104:1010400:1010400 | UNKNOWN | UNKNOWN | — | 104 | 104 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 104 | OBSERVED | no verified workload relationship | proc/10104/task/10104/stat+status:start; no verified workload relationship |
+| service-105 | 10105 | 10105 | 1 | 10105:1010500:1010500 | UNKNOWN | UNKNOWN | — | 105 | 105 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 105 | OBSERVED | no verified workload relationship | proc/10105/task/10105/stat+status:start; no verified workload relationship |
+| service-106 | 10106 | 10106 | 1 | 10106:1010600:1010600 | UNKNOWN | UNKNOWN | — | 106 | 106 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 106 | OBSERVED | no verified workload relationship | proc/10106/task/10106/stat+status:start; no verified workload relationship |
+| service-107 | 10107 | 10107 | 1 | 10107:1010700:1010700 | UNKNOWN | UNKNOWN | — | 107 | 107 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 107 | OBSERVED | no verified workload relationship | proc/10107/task/10107/stat+status:start; no verified workload relationship |
+| service-108 | 10108 | 10108 | 1 | 10108:1010800:1010800 | UNKNOWN | UNKNOWN | — | 108 | 108 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 108 | OBSERVED | no verified workload relationship | proc/10108/task/10108/stat+status:start; no verified workload relationship |
+| service-109 | 10109 | 10109 | 1 | 10109:1010900:1010900 | UNKNOWN | UNKNOWN | — | 109 | 109 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 109 | OBSERVED | no verified workload relationship | proc/10109/task/10109/stat+status:start; no verified workload relationship |
+| service-110 | 10110 | 10110 | 1 | 10110:1011000:1011000 | UNKNOWN | UNKNOWN | — | 110 | 110 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 110 | OBSERVED | no verified workload relationship | proc/10110/task/10110/stat+status:start; no verified workload relationship |
+| service-111 | 10111 | 10111 | 1 | 10111:1011100:1011100 | UNKNOWN | UNKNOWN | — | 111 | 111 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 111 | OBSERVED | no verified workload relationship | proc/10111/task/10111/stat+status:start; no verified workload relationship |
+| service-112 | 10112 | 10112 | 1 | 10112:1011200:1011200 | UNKNOWN | UNKNOWN | — | 112 | 112 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 112 | OBSERVED | no verified workload relationship | proc/10112/task/10112/stat+status:start; no verified workload relationship |
+| service-113 | 10113 | 10113 | 1 | 10113:1011300:1011300 | UNKNOWN | UNKNOWN | — | 113 | 113 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 113 | OBSERVED | no verified workload relationship | proc/10113/task/10113/stat+status:start; no verified workload relationship |
+| service-114 | 10114 | 10114 | 1 | 10114:1011400:1011400 | UNKNOWN | UNKNOWN | — | 114 | 114 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 114 | OBSERVED | no verified workload relationship | proc/10114/task/10114/stat+status:start; no verified workload relationship |
+| service-115 | 10115 | 10115 | 1 | 10115:1011500:1011500 | UNKNOWN | UNKNOWN | — | 115 | 115 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 115 | OBSERVED | no verified workload relationship | proc/10115/task/10115/stat+status:start; no verified workload relationship |
+| service-116 | 10116 | 10116 | 1 | 10116:1011600:1011600 | UNKNOWN | UNKNOWN | — | 116 | 116 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 116 | OBSERVED | no verified workload relationship | proc/10116/task/10116/stat+status:start; no verified workload relationship |
+| service-117 | 10117 | 10117 | 1 | 10117:1011700:1011700 | UNKNOWN | UNKNOWN | — | 117 | 117 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 117 | OBSERVED | no verified workload relationship | proc/10117/task/10117/stat+status:start; no verified workload relationship |
+| service-118 | 10118 | 10118 | 1 | 10118:1011800:1011800 | UNKNOWN | UNKNOWN | — | 118 | 118 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 118 | OBSERVED | no verified workload relationship | proc/10118/task/10118/stat+status:start; no verified workload relationship |
+| service-119 | 10119 | 10119 | 1 | 10119:1011900:1011900 | UNKNOWN | UNKNOWN | — | 119 | 119 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 119 | OBSERVED | no verified workload relationship | proc/10119/task/10119/stat+status:start; no verified workload relationship |
+| service-120 | 10120 | 10120 | 1 | 10120:1012000:1012000 | UNKNOWN | UNKNOWN | — | 120 | 120 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 120 | OBSERVED | no verified workload relationship | proc/10120/task/10120/stat+status:start; no verified workload relationship |
+| service-121 | 10121 | 10121 | 1 | 10121:1012100:1012100 | UNKNOWN | UNKNOWN | — | 121 | 121 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 121 | OBSERVED | no verified workload relationship | proc/10121/task/10121/stat+status:start; no verified workload relationship |
+| service-122 | 10122 | 10122 | 1 | 10122:1012200:1012200 | UNKNOWN | UNKNOWN | — | 122 | 122 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 122 | OBSERVED | no verified workload relationship | proc/10122/task/10122/stat+status:start; no verified workload relationship |
+| service-123 | 10123 | 10123 | 1 | 10123:1012300:1012300 | UNKNOWN | UNKNOWN | — | 123 | 123 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 123 | OBSERVED | no verified workload relationship | proc/10123/task/10123/stat+status:start; no verified workload relationship |
+| service-124 | 10124 | 10124 | 1 | 10124:1012400:1012400 | UNKNOWN | UNKNOWN | — | 124 | 124 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 124 | OBSERVED | no verified workload relationship | proc/10124/task/10124/stat+status:start; no verified workload relationship |
+| service-125 | 10125 | 10125 | 1 | 10125:1012500:1012500 | UNKNOWN | UNKNOWN | — | 125 | 125 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 125 | OBSERVED | no verified workload relationship | proc/10125/task/10125/stat+status:start; no verified workload relationship |
+| service-126 | 10126 | 10126 | 1 | 10126:1012600:1012600 | UNKNOWN | UNKNOWN | — | 126 | 126 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 126 | OBSERVED | no verified workload relationship | proc/10126/task/10126/stat+status:start; no verified workload relationship |
+| service-127 | 10127 | 10127 | 1 | 10127:1012700:1012700 | UNKNOWN | UNKNOWN | — | 127 | 127 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 127 | OBSERVED | no verified workload relationship | proc/10127/task/10127/stat+status:start; no verified workload relationship |
+| kworker | 8004 | 9004 | 1 | 9004:900400:800400 | COMPETITOR | SYSTEM_PROCESS | — | 128-143 | 128 | 0-7 | UNASSIGNED | HIGH | 8.90 s | 3.32% | 89.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 60 | 0 | 0 | 0 | 128 | OBSERVED |  | proc/8004/task/9004/stat+status:start; proc/stat: PF_KTHREAD; Runnable AI wait overlaps this task running on the same CPU; causality unproven |
+| service-129 | 10129 | 10129 | 1 | 10129:1012900:1012900 | UNKNOWN | UNKNOWN | — | 129 | 129 | 0-7 | UNASSIGNED | LOW | 9.50 s | 3.55% | 95.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 129 | OBSERVED | no verified workload relationship | proc/10129/task/10129/stat+status:start; no verified workload relationship |
+| service-130 | 10130 | 10130 | 1 | 10130:1013000:1013000 | UNKNOWN | UNKNOWN | — | 130 | 130 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 130 | OBSERVED | no verified workload relationship | proc/10130/task/10130/stat+status:start; no verified workload relationship |
+| service-131 | 10131 | 10131 | 1 | 10131:1013100:1013100 | UNKNOWN | UNKNOWN | — | 131 | 131 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 131 | OBSERVED | no verified workload relationship | proc/10131/task/10131/stat+status:start; no verified workload relationship |
+| service-132 | 10132 | 10132 | 1 | 10132:1013200:1013200 | UNKNOWN | UNKNOWN | — | 132 | 132 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 132 | OBSERVED | no verified workload relationship | proc/10132/task/10132/stat+status:start; no verified workload relationship |
+| service-133 | 10133 | 10133 | 1 | 10133:1013300:1013300 | UNKNOWN | UNKNOWN | — | 133 | 133 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 133 | OBSERVED | no verified workload relationship | proc/10133/task/10133/stat+status:start; no verified workload relationship |
+| service-134 | 10134 | 10134 | 1 | 10134:1013400:1013400 | UNKNOWN | UNKNOWN | — | 134 | 134 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 134 | OBSERVED | no verified workload relationship | proc/10134/task/10134/stat+status:start; no verified workload relationship |
+| service-135 | 10135 | 10135 | 1 | 10135:1013500:1013500 | UNKNOWN | UNKNOWN | — | 135 | 135 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 135 | OBSERVED | no verified workload relationship | proc/10135/task/10135/stat+status:start; no verified workload relationship |
+| service-136 | 10136 | 10136 | 1 | 10136:1013600:1013600 | UNKNOWN | UNKNOWN | — | 136 | 136 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 136 | OBSERVED | no verified workload relationship | proc/10136/task/10136/stat+status:start; no verified workload relationship |
+| service-137 | 10137 | 10137 | 1 | 10137:1013700:1013700 | UNKNOWN | UNKNOWN | — | 137 | 137 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 137 | OBSERVED | no verified workload relationship | proc/10137/task/10137/stat+status:start; no verified workload relationship |
+| service-138 | 10138 | 10138 | 1 | 10138:1013800:1013800 | UNKNOWN | UNKNOWN | — | 138 | 138 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 138 | OBSERVED | no verified workload relationship | proc/10138/task/10138/stat+status:start; no verified workload relationship |
+| service-139 | 10139 | 10139 | 1 | 10139:1013900:1013900 | UNKNOWN | UNKNOWN | — | 139 | 139 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 139 | OBSERVED | no verified workload relationship | proc/10139/task/10139/stat+status:start; no verified workload relationship |
+| service-140 | 10140 | 10140 | 1 | 10140:1014000:1014000 | UNKNOWN | UNKNOWN | — | 140 | 140 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 140 | OBSERVED | no verified workload relationship | proc/10140/task/10140/stat+status:start; no verified workload relationship |
+| service-141 | 10141 | 10141 | 1 | 10141:1014100:1014100 | UNKNOWN | UNKNOWN | — | 141 | 141 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 141 | OBSERVED | no verified workload relationship | proc/10141/task/10141/stat+status:start; no verified workload relationship |
+| service-142 | 10142 | 10142 | 1 | 10142:1014200:1014200 | UNKNOWN | UNKNOWN | — | 142 | 142 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 142 | OBSERVED | no verified workload relationship | proc/10142/task/10142/stat+status:start; no verified workload relationship |
+| service-143 | 10143 | 10143 | 1 | 10143:1014300:1014300 | UNKNOWN | UNKNOWN | — | 143 | 143 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 143 | OBSERVED | no verified workload relationship | proc/10143/task/10143/stat+status:start; no verified workload relationship |
+| service-144 | 10144 | 10144 | 1 | 10144:1014400:1014400 | UNKNOWN | UNKNOWN | — | 144 | 144 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 144 | OBSERVED | no verified workload relationship | proc/10144/task/10144/stat+status:start; no verified workload relationship |
+| service-145 | 10145 | 10145 | 1 | 10145:1014500:1014500 | UNKNOWN | UNKNOWN | — | 145 | 145 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 145 | OBSERVED | no verified workload relationship | proc/10145/task/10145/stat+status:start; no verified workload relationship |
+| service-146 | 10146 | 10146 | 1 | 10146:1014600:1014600 | UNKNOWN | UNKNOWN | — | 146 | 146 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 146 | OBSERVED | no verified workload relationship | proc/10146/task/10146/stat+status:start; no verified workload relationship |
+| service-147 | 10147 | 10147 | 1 | 10147:1014700:1014700 | UNKNOWN | UNKNOWN | — | 147 | 147 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 147 | OBSERVED | no verified workload relationship | proc/10147/task/10147/stat+status:start; no verified workload relationship |
+| service-148 | 10148 | 10148 | 1 | 10148:1014800:1014800 | UNKNOWN | UNKNOWN | — | 148 | 148 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 148 | OBSERVED | no verified workload relationship | proc/10148/task/10148/stat+status:start; no verified workload relationship |
+| service-149 | 10149 | 10149 | 1 | 10149:1014900:1014900 | UNKNOWN | UNKNOWN | — | 149 | 149 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 149 | OBSERVED | no verified workload relationship | proc/10149/task/10149/stat+status:start; no verified workload relationship |
+| service-150 | 10150 | 10150 | 1 | 10150:1015000:1015000 | UNKNOWN | UNKNOWN | — | 150 | 150 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 150 | OBSERVED | no verified workload relationship | proc/10150/task/10150/stat+status:start; no verified workload relationship |
+| service-151 | 10151 | 10151 | 1 | 10151:1015100:1015100 | UNKNOWN | UNKNOWN | — | 151 | 151 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 151 | OBSERVED | no verified workload relationship | proc/10151/task/10151/stat+status:start; no verified workload relationship |
+| service-152 | 10152 | 10152 | 1 | 10152:1015200:1015200 | UNKNOWN | UNKNOWN | — | 152 | 152 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 152 | OBSERVED | no verified workload relationship | proc/10152/task/10152/stat+status:start; no verified workload relationship |
+| service-153 | 10153 | 10153 | 1 | 10153:1015300:1015300 | UNKNOWN | UNKNOWN | — | 153 | 153 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 153 | OBSERVED | no verified workload relationship | proc/10153/task/10153/stat+status:start; no verified workload relationship |
+| service-154 | 10154 | 10154 | 1 | 10154:1015400:1015400 | UNKNOWN | UNKNOWN | — | 154 | 154 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 154 | OBSERVED | no verified workload relationship | proc/10154/task/10154/stat+status:start; no verified workload relationship |
+| service-155 | 10155 | 10155 | 1 | 10155:1015500:1015500 | UNKNOWN | UNKNOWN | — | 155 | 155 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 155 | OBSERVED | no verified workload relationship | proc/10155/task/10155/stat+status:start; no verified workload relationship |
+| service-156 | 10156 | 10156 | 1 | 10156:1015600:1015600 | UNKNOWN | UNKNOWN | — | 156 | 156 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 156 | OBSERVED | no verified workload relationship | proc/10156/task/10156/stat+status:start; no verified workload relationship |
+| service-157 | 10157 | 10157 | 1 | 10157:1015700:1015700 | UNKNOWN | UNKNOWN | — | 157 | 157 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 157 | OBSERVED | no verified workload relationship | proc/10157/task/10157/stat+status:start; no verified workload relationship |
+| service-158 | 10158 | 10158 | 1 | 10158:1015800:1015800 | UNKNOWN | UNKNOWN | — | 158 | 158 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 158 | OBSERVED | no verified workload relationship | proc/10158/task/10158/stat+status:start; no verified workload relationship |
+| service-159 | 10159 | 10159 | 1 | 10159:1015900:1015900 | UNKNOWN | UNKNOWN | — | 159 | 159 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 159 | OBSERVED | no verified workload relationship | proc/10159/task/10159/stat+status:start; no verified workload relationship |
+| backup-agent | 8005 | 9005 | 1 | 9005:900500:800500 | COMPETITOR | UNKNOWN | — | 160-175 | 160 | 0-7 | UNASSIGNED | LOW | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 160 | OBSERVED | no verified workload relationship | proc/8005/task/9005/stat+status:start; no verified workload relationship; Runnable AI wait overlaps this task running on the same CPU; causality unproven |
+| service-161 | 10161 | 10161 | 1 | 10161:1016100:1016100 | UNKNOWN | UNKNOWN | — | 161 | 161 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 161 | OBSERVED | no verified workload relationship | proc/10161/task/10161/stat+status:start; no verified workload relationship |
+| service-162 | 10162 | 10162 | 1 | 10162:1016200:1016200 | UNKNOWN | UNKNOWN | — | 162 | 162 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 162 | OBSERVED | no verified workload relationship | proc/10162/task/10162/stat+status:start; no verified workload relationship |
+| service-163 | 10163 | 10163 | 1 | 10163:1016300:1016300 | UNKNOWN | UNKNOWN | — | 163 | 163 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 163 | OBSERVED | no verified workload relationship | proc/10163/task/10163/stat+status:start; no verified workload relationship |
+| service-164 | 10164 | 10164 | 1 | 10164:1016400:1016400 | UNKNOWN | UNKNOWN | — | 164 | 164 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 164 | OBSERVED | no verified workload relationship | proc/10164/task/10164/stat+status:start; no verified workload relationship |
+| service-165 | 10165 | 10165 | 1 | 10165:1016500:1016500 | UNKNOWN | UNKNOWN | — | 165 | 165 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 165 | OBSERVED | no verified workload relationship | proc/10165/task/10165/stat+status:start; no verified workload relationship |
+| service-166 | 10166 | 10166 | 1 | 10166:1016600:1016600 | UNKNOWN | UNKNOWN | — | 166 | 166 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 166 | OBSERVED | no verified workload relationship | proc/10166/task/10166/stat+status:start; no verified workload relationship |
+| service-167 | 10167 | 10167 | 1 | 10167:1016700:1016700 | UNKNOWN | UNKNOWN | — | 167 | 167 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 167 | OBSERVED | no verified workload relationship | proc/10167/task/10167/stat+status:start; no verified workload relationship |
+| service-168 | 10168 | 10168 | 1 | 10168:1016800:1016800 | UNKNOWN | UNKNOWN | — | 168 | 168 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 168 | OBSERVED | no verified workload relationship | proc/10168/task/10168/stat+status:start; no verified workload relationship |
+| service-169 | 10169 | 10169 | 1 | 10169:1016900:1016900 | UNKNOWN | UNKNOWN | — | 169 | 169 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 169 | OBSERVED | no verified workload relationship | proc/10169/task/10169/stat+status:start; no verified workload relationship |
+| service-170 | 10170 | 10170 | 1 | 10170:1017000:1017000 | UNKNOWN | UNKNOWN | — | 170 | 170 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 170 | OBSERVED | no verified workload relationship | proc/10170/task/10170/stat+status:start; no verified workload relationship |
+| service-171 | 10171 | 10171 | 1 | 10171:1017100:1017100 | UNKNOWN | UNKNOWN | — | 171 | 171 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 171 | OBSERVED | no verified workload relationship | proc/10171/task/10171/stat+status:start; no verified workload relationship |
+| service-172 | 10172 | 10172 | 1 | 10172:1017200:1017200 | UNKNOWN | UNKNOWN | — | 172 | 172 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 172 | OBSERVED | no verified workload relationship | proc/10172/task/10172/stat+status:start; no verified workload relationship |
+| service-173 | 10173 | 10173 | 1 | 10173:1017300:1017300 | UNKNOWN | UNKNOWN | — | 173 | 173 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 173 | OBSERVED | no verified workload relationship | proc/10173/task/10173/stat+status:start; no verified workload relationship |
+| service-174 | 10174 | 10174 | 1 | 10174:1017400:1017400 | UNKNOWN | UNKNOWN | — | 174 | 174 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 174 | OBSERVED | no verified workload relationship | proc/10174/task/10174/stat+status:start; no verified workload relationship |
+| service-175 | 10175 | 10175 | 1 | 10175:1017500:1017500 | UNKNOWN | UNKNOWN | — | 175 | 175 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 175 | OBSERVED | no verified workload relationship | proc/10175/task/10175/stat+status:start; no verified workload relationship |
+| service-176 | 10176 | 10176 | 1 | 10176:1017600:1017600 | UNKNOWN | UNKNOWN | — | 176 | 176 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 176 | OBSERVED | no verified workload relationship | proc/10176/task/10176/stat+status:start; no verified workload relationship |
+| service-177 | 10177 | 10177 | 1 | 10177:1017700:1017700 | UNKNOWN | UNKNOWN | — | 177 | 177 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 177 | OBSERVED | no verified workload relationship | proc/10177/task/10177/stat+status:start; no verified workload relationship |
+| service-178 | 10178 | 10178 | 1 | 10178:1017800:1017800 | UNKNOWN | UNKNOWN | — | 178 | 178 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 178 | OBSERVED | no verified workload relationship | proc/10178/task/10178/stat+status:start; no verified workload relationship |
+| service-179 | 10179 | 10179 | 1 | 10179:1017900:1017900 | UNKNOWN | UNKNOWN | — | 179 | 179 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 179 | OBSERVED | no verified workload relationship | proc/10179/task/10179/stat+status:start; no verified workload relationship |
+| service-180 | 10180 | 10180 | 1 | 10180:1018000:1018000 | UNKNOWN | UNKNOWN | — | 180 | 180 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 180 | OBSERVED | no verified workload relationship | proc/10180/task/10180/stat+status:start; no verified workload relationship |
+| service-181 | 10181 | 10181 | 1 | 10181:1018100:1018100 | UNKNOWN | UNKNOWN | — | 181 | 181 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 181 | OBSERVED | no verified workload relationship | proc/10181/task/10181/stat+status:start; no verified workload relationship |
+| service-182 | 10182 | 10182 | 1 | 10182:1018200:1018200 | UNKNOWN | UNKNOWN | — | 182 | 182 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 182 | OBSERVED | no verified workload relationship | proc/10182/task/10182/stat+status:start; no verified workload relationship |
+| service-183 | 10183 | 10183 | 1 | 10183:1018300:1018300 | UNKNOWN | UNKNOWN | — | 183 | 183 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 183 | OBSERVED | no verified workload relationship | proc/10183/task/10183/stat+status:start; no verified workload relationship |
+| service-184 | 10184 | 10184 | 1 | 10184:1018400:1018400 | UNKNOWN | UNKNOWN | — | 184 | 184 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 184 | OBSERVED | no verified workload relationship | proc/10184/task/10184/stat+status:start; no verified workload relationship |
+| service-185 | 10185 | 10185 | 1 | 10185:1018500:1018500 | UNKNOWN | UNKNOWN | — | 185 | 185 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 185 | OBSERVED | no verified workload relationship | proc/10185/task/10185/stat+status:start; no verified workload relationship |
+| service-186 | 10186 | 10186 | 1 | 10186:1018600:1018600 | UNKNOWN | UNKNOWN | — | 186 | 186 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 186 | OBSERVED | no verified workload relationship | proc/10186/task/10186/stat+status:start; no verified workload relationship |
+| service-187 | 10187 | 10187 | 1 | 10187:1018700:1018700 | UNKNOWN | UNKNOWN | — | 187 | 187 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 187 | OBSERVED | no verified workload relationship | proc/10187/task/10187/stat+status:start; no verified workload relationship |
+| service-188 | 10188 | 10188 | 1 | 10188:1018800:1018800 | UNKNOWN | UNKNOWN | — | 188 | 188 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 188 | OBSERVED | no verified workload relationship | proc/10188/task/10188/stat+status:start; no verified workload relationship |
+| service-189 | 10189 | 10189 | 1 | 10189:1018900:1018900 | UNKNOWN | UNKNOWN | — | 189 | 189 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 189 | OBSERVED | no verified workload relationship | proc/10189/task/10189/stat+status:start; no verified workload relationship |
+| service-190 | 10190 | 10190 | 1 | 10190:1019000:1019000 | UNKNOWN | UNKNOWN | — | 190 | 190 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 190 | OBSERVED | no verified workload relationship | proc/10190/task/10190/stat+status:start; no verified workload relationship |
+| service-191 | 10191 | 10191 | 1 | 10191:1019100:1019100 | UNKNOWN | UNKNOWN | — | 191 | 191 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 191 | OBSERVED | no verified workload relationship | proc/10191/task/10191/stat+status:start; no verified workload relationship |
+| backup-agent | 8006 | 9006 | 1 | 9006:900600:800600 | COMPETITOR | UNKNOWN | — | 192-207 | 192 | 0-7 | UNASSIGNED | LOW | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 192 | OBSERVED | no verified workload relationship | proc/8006/task/9006/stat+status:start; no verified workload relationship; Runnable AI wait overlaps this task running on the same CPU; causality unproven |
+| service-193 | 10193 | 10193 | 1 | 10193:1019300:1019300 | UNKNOWN | UNKNOWN | — | 193 | 193 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 193 | OBSERVED | no verified workload relationship | proc/10193/task/10193/stat+status:start; no verified workload relationship |
+| service-194 | 10194 | 10194 | 1 | 10194:1019400:1019400 | UNKNOWN | UNKNOWN | — | 194 | 194 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 194 | OBSERVED | no verified workload relationship | proc/10194/task/10194/stat+status:start; no verified workload relationship |
+| service-195 | 10195 | 10195 | 1 | 10195:1019500:1019500 | UNKNOWN | UNKNOWN | — | 195 | 195 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 195 | OBSERVED | no verified workload relationship | proc/10195/task/10195/stat+status:start; no verified workload relationship |
+| service-196 | 10196 | 10196 | 1 | 10196:1019600:1019600 | UNKNOWN | UNKNOWN | — | 196 | 196 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 196 | OBSERVED | no verified workload relationship | proc/10196/task/10196/stat+status:start; no verified workload relationship |
+| service-197 | 10197 | 10197 | 1 | 10197:1019700:1019700 | UNKNOWN | UNKNOWN | — | 197 | 197 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 197 | OBSERVED | no verified workload relationship | proc/10197/task/10197/stat+status:start; no verified workload relationship |
+| service-198 | 10198 | 10198 | 1 | 10198:1019800:1019800 | UNKNOWN | UNKNOWN | — | 198 | 198 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 198 | OBSERVED | no verified workload relationship | proc/10198/task/10198/stat+status:start; no verified workload relationship |
+| service-199 | 10199 | 10199 | 1 | 10199:1019900:1019900 | UNKNOWN | UNKNOWN | — | 199 | 199 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 199 | OBSERVED | no verified workload relationship | proc/10199/task/10199/stat+status:start; no verified workload relationship |
+| service-200 | 10200 | 10200 | 1 | 10200:1020000:1020000 | UNKNOWN | UNKNOWN | — | 200 | 200 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 200 | OBSERVED | no verified workload relationship | proc/10200/task/10200/stat+status:start; no verified workload relationship |
+| service-201 | 10201 | 10201 | 1 | 10201:1020100:1020100 | UNKNOWN | UNKNOWN | — | 201 | 201 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 201 | OBSERVED | no verified workload relationship | proc/10201/task/10201/stat+status:start; no verified workload relationship |
+| service-202 | 10202 | 10202 | 1 | 10202:1020200:1020200 | UNKNOWN | UNKNOWN | — | 202 | 202 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 202 | OBSERVED | no verified workload relationship | proc/10202/task/10202/stat+status:start; no verified workload relationship |
+| service-203 | 10203 | 10203 | 1 | 10203:1020300:1020300 | UNKNOWN | UNKNOWN | — | 203 | 203 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 203 | OBSERVED | no verified workload relationship | proc/10203/task/10203/stat+status:start; no verified workload relationship |
+| service-204 | 10204 | 10204 | 1 | 10204:1020400:1020400 | UNKNOWN | UNKNOWN | — | 204 | 204 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 204 | OBSERVED | no verified workload relationship | proc/10204/task/10204/stat+status:start; no verified workload relationship |
+| service-205 | 10205 | 10205 | 1 | 10205:1020500:1020500 | UNKNOWN | UNKNOWN | — | 205 | 205 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 205 | OBSERVED | no verified workload relationship | proc/10205/task/10205/stat+status:start; no verified workload relationship |
+| service-206 | 10206 | 10206 | 1 | 10206:1020600:1020600 | UNKNOWN | UNKNOWN | — | 206 | 206 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 206 | OBSERVED | no verified workload relationship | proc/10206/task/10206/stat+status:start; no verified workload relationship |
+| service-207 | 10207 | 10207 | 1 | 10207:1020700:1020700 | UNKNOWN | UNKNOWN | — | 207 | 207 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 207 | OBSERVED | no verified workload relationship | proc/10207/task/10207/stat+status:start; no verified workload relationship |
+| service-208 | 10208 | 10208 | 1 | 10208:1020800:1020800 | UNKNOWN | UNKNOWN | — | 208 | 208 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 208 | OBSERVED | no verified workload relationship | proc/10208/task/10208/stat+status:start; no verified workload relationship |
+| service-209 | 10209 | 10209 | 1 | 10209:1020900:1020900 | UNKNOWN | UNKNOWN | — | 209 | 209 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 209 | OBSERVED | no verified workload relationship | proc/10209/task/10209/stat+status:start; no verified workload relationship |
+| service-210 | 10210 | 10210 | 1 | 10210:1021000:1021000 | UNKNOWN | UNKNOWN | — | 210 | 210 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 210 | OBSERVED | no verified workload relationship | proc/10210/task/10210/stat+status:start; no verified workload relationship |
+| service-211 | 10211 | 10211 | 1 | 10211:1021100:1021100 | UNKNOWN | UNKNOWN | — | 211 | 211 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 211 | OBSERVED | no verified workload relationship | proc/10211/task/10211/stat+status:start; no verified workload relationship |
+| service-212 | 10212 | 10212 | 1 | 10212:1021200:1021200 | UNKNOWN | UNKNOWN | — | 212 | 212 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 212 | OBSERVED | no verified workload relationship | proc/10212/task/10212/stat+status:start; no verified workload relationship |
+| service-213 | 10213 | 10213 | 1 | 10213:1021300:1021300 | UNKNOWN | UNKNOWN | — | 213 | 213 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 213 | OBSERVED | no verified workload relationship | proc/10213/task/10213/stat+status:start; no verified workload relationship |
+| service-214 | 10214 | 10214 | 1 | 10214:1021400:1021400 | UNKNOWN | UNKNOWN | — | 214 | 214 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 214 | OBSERVED | no verified workload relationship | proc/10214/task/10214/stat+status:start; no verified workload relationship |
+| service-215 | 10215 | 10215 | 1 | 10215:1021500:1021500 | UNKNOWN | UNKNOWN | — | 215 | 215 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 215 | OBSERVED | no verified workload relationship | proc/10215/task/10215/stat+status:start; no verified workload relationship |
+| service-216 | 10216 | 10216 | 1 | 10216:1021600:1021600 | UNKNOWN | UNKNOWN | — | 216 | 216 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 216 | OBSERVED | no verified workload relationship | proc/10216/task/10216/stat+status:start; no verified workload relationship |
+| service-217 | 10217 | 10217 | 1 | 10217:1021700:1021700 | UNKNOWN | UNKNOWN | — | 217 | 217 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 217 | OBSERVED | no verified workload relationship | proc/10217/task/10217/stat+status:start; no verified workload relationship |
+| service-218 | 10218 | 10218 | 1 | 10218:1021800:1021800 | UNKNOWN | UNKNOWN | — | 218 | 218 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 218 | OBSERVED | no verified workload relationship | proc/10218/task/10218/stat+status:start; no verified workload relationship |
+| service-219 | 10219 | 10219 | 1 | 10219:1021900:1021900 | UNKNOWN | UNKNOWN | — | 219 | 219 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 219 | OBSERVED | no verified workload relationship | proc/10219/task/10219/stat+status:start; no verified workload relationship |
+| service-220 | 10220 | 10220 | 1 | 10220:1022000:1022000 | UNKNOWN | UNKNOWN | — | 220 | 220 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 220 | OBSERVED | no verified workload relationship | proc/10220/task/10220/stat+status:start; no verified workload relationship |
+| service-221 | 10221 | 10221 | 1 | 10221:1022100:1022100 | UNKNOWN | UNKNOWN | — | 221 | 221 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 221 | OBSERVED | no verified workload relationship | proc/10221/task/10221/stat+status:start; no verified workload relationship |
+| service-222 | 10222 | 10222 | 1 | 10222:1022200:1022200 | UNKNOWN | UNKNOWN | — | 222 | 222 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 222 | OBSERVED | no verified workload relationship | proc/10222/task/10222/stat+status:start; no verified workload relationship |
+| service-223 | 10223 | 10223 | 1 | 10223:1022300:1022300 | UNKNOWN | UNKNOWN | — | 223 | 223 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 223 | OBSERVED | no verified workload relationship | proc/10223/task/10223/stat+status:start; no verified workload relationship |
+| backup-agent | 8007 | 9007 | 1 | 9007:900700:800700 | COMPETITOR | UNKNOWN | — | 224-239 | 224 | 0-7 | UNASSIGNED | LOW | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 224 | OBSERVED | no verified workload relationship | proc/8007/task/9007/stat+status:start; no verified workload relationship; Runnable AI wait overlaps this task running on the same CPU; causality unproven |
+| service-225 | 10225 | 10225 | 1 | 10225:1022500:1022500 | UNKNOWN | UNKNOWN | — | 225 | 225 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 225 | OBSERVED | no verified workload relationship | proc/10225/task/10225/stat+status:start; no verified workload relationship |
+| service-226 | 10226 | 10226 | 1 | 10226:1022600:1022600 | UNKNOWN | UNKNOWN | — | 226 | 226 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 226 | OBSERVED | no verified workload relationship | proc/10226/task/10226/stat+status:start; no verified workload relationship |
+| service-227 | 10227 | 10227 | 1 | 10227:1022700:1022700 | UNKNOWN | UNKNOWN | — | 227 | 227 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 227 | OBSERVED | no verified workload relationship | proc/10227/task/10227/stat+status:start; no verified workload relationship |
+| service-228 | 10228 | 10228 | 1 | 10228:1022800:1022800 | UNKNOWN | UNKNOWN | — | 228 | 228 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 228 | OBSERVED | no verified workload relationship | proc/10228/task/10228/stat+status:start; no verified workload relationship |
+| service-229 | 10229 | 10229 | 1 | 10229:1022900:1022900 | UNKNOWN | UNKNOWN | — | 229 | 229 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 229 | OBSERVED | no verified workload relationship | proc/10229/task/10229/stat+status:start; no verified workload relationship |
+| service-230 | 10230 | 10230 | 1 | 10230:1023000:1023000 | UNKNOWN | UNKNOWN | — | 230 | 230 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 230 | OBSERVED | no verified workload relationship | proc/10230/task/10230/stat+status:start; no verified workload relationship |
+| service-231 | 10231 | 10231 | 1 | 10231:1023100:1023100 | UNKNOWN | UNKNOWN | — | 231 | 231 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 231 | OBSERVED | no verified workload relationship | proc/10231/task/10231/stat+status:start; no verified workload relationship |
+| service-232 | 10232 | 10232 | 1 | 10232:1023200:1023200 | UNKNOWN | UNKNOWN | — | 232 | 232 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 232 | OBSERVED | no verified workload relationship | proc/10232/task/10232/stat+status:start; no verified workload relationship |
+| service-233 | 10233 | 10233 | 1 | 10233:1023300:1023300 | UNKNOWN | UNKNOWN | — | 233 | 233 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 233 | OBSERVED | no verified workload relationship | proc/10233/task/10233/stat+status:start; no verified workload relationship |
+| service-234 | 10234 | 10234 | 1 | 10234:1023400:1023400 | UNKNOWN | UNKNOWN | — | 234 | 234 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 234 | OBSERVED | no verified workload relationship | proc/10234/task/10234/stat+status:start; no verified workload relationship |
+| service-235 | 10235 | 10235 | 1 | 10235:1023500:1023500 | UNKNOWN | UNKNOWN | — | 235 | 235 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 235 | OBSERVED | no verified workload relationship | proc/10235/task/10235/stat+status:start; no verified workload relationship |
+| service-236 | 10236 | 10236 | 1 | 10236:1023600:1023600 | UNKNOWN | UNKNOWN | — | 236 | 236 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 236 | OBSERVED | no verified workload relationship | proc/10236/task/10236/stat+status:start; no verified workload relationship |
+| service-237 | 10237 | 10237 | 1 | 10237:1023700:1023700 | UNKNOWN | UNKNOWN | — | 237 | 237 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 237 | OBSERVED | no verified workload relationship | proc/10237/task/10237/stat+status:start; no verified workload relationship |
+| service-238 | 10238 | 10238 | 1 | 10238:1023800:1023800 | UNKNOWN | UNKNOWN | — | 238 | 238 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 238 | OBSERVED | no verified workload relationship | proc/10238/task/10238/stat+status:start; no verified workload relationship |
+| service-239 | 10239 | 10239 | 1 | 10239:1023900:1023900 | UNKNOWN | UNKNOWN | — | 239 | 239 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 239 | OBSERVED | no verified workload relationship | proc/10239/task/10239/stat+status:start; no verified workload relationship |
+| service-240 | 10240 | 10240 | 1 | 10240:1024000:1024000 | UNKNOWN | UNKNOWN | — | 240 | 240 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 240 | OBSERVED | no verified workload relationship | proc/10240/task/10240/stat+status:start; no verified workload relationship |
+| service-241 | 10241 | 10241 | 1 | 10241:1024100:1024100 | UNKNOWN | UNKNOWN | — | 241 | 241 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 241 | OBSERVED | no verified workload relationship | proc/10241/task/10241/stat+status:start; no verified workload relationship |
+| service-242 | 10242 | 10242 | 1 | 10242:1024200:1024200 | UNKNOWN | UNKNOWN | — | 242 | 242 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 242 | OBSERVED | no verified workload relationship | proc/10242/task/10242/stat+status:start; no verified workload relationship |
+| service-243 | 10243 | 10243 | 1 | 10243:1024300:1024300 | UNKNOWN | UNKNOWN | — | 243 | 243 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 243 | OBSERVED | no verified workload relationship | proc/10243/task/10243/stat+status:start; no verified workload relationship |
+| service-244 | 10244 | 10244 | 1 | 10244:1024400:1024400 | UNKNOWN | UNKNOWN | — | 244 | 244 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 244 | OBSERVED | no verified workload relationship | proc/10244/task/10244/stat+status:start; no verified workload relationship |
+| service-245 | 10245 | 10245 | 1 | 10245:1024500:1024500 | UNKNOWN | UNKNOWN | — | 245 | 245 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 245 | OBSERVED | no verified workload relationship | proc/10245/task/10245/stat+status:start; no verified workload relationship |
+| service-246 | 10246 | 10246 | 1 | 10246:1024600:1024600 | UNKNOWN | UNKNOWN | — | 246 | 246 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 246 | OBSERVED | no verified workload relationship | proc/10246/task/10246/stat+status:start; no verified workload relationship |
+| service-247 | 10247 | 10247 | 1 | 10247:1024700:1024700 | UNKNOWN | UNKNOWN | — | 247 | 247 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 247 | OBSERVED | no verified workload relationship | proc/10247/task/10247/stat+status:start; no verified workload relationship |
+| service-248 | 10248 | 10248 | 1 | 10248:1024800:1024800 | UNKNOWN | UNKNOWN | — | 248 | 248 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 248 | OBSERVED | no verified workload relationship | proc/10248/task/10248/stat+status:start; no verified workload relationship |
+| service-249 | 10249 | 10249 | 1 | 10249:1024900:1024900 | UNKNOWN | UNKNOWN | — | 249 | 249 | 0-7 | UNASSIGNED | LOW | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 249 | OBSERVED | no verified workload relationship | proc/10249/task/10249/stat+status:start; no verified workload relationship |
+| service-250 | 10250 | 10250 | 1 | 10250:1025000:1025000 | UNKNOWN | UNKNOWN | — | 250 | 250 | 0-7 | UNASSIGNED | LOW | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 250 | OBSERVED | no verified workload relationship | proc/10250/task/10250/stat+status:start; no verified workload relationship |
+| service-251 | 10251 | 10251 | 1 | 10251:1025100:1025100 | UNKNOWN | UNKNOWN | — | 251 | 251 | 0-7 | UNASSIGNED | LOW | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 251 | OBSERVED | no verified workload relationship | proc/10251/task/10251/stat+status:start; no verified workload relationship |
+| service-252 | 10252 | 10252 | 1 | 10252:1025200:1025200 | UNKNOWN | UNKNOWN | — | 252 | 252 | 0-7 | UNASSIGNED | LOW | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 252 | OBSERVED | no verified workload relationship | proc/10252/task/10252/stat+status:start; no verified workload relationship |
+| service-253 | 10253 | 10253 | 1 | 10253:1025300:1025300 | UNKNOWN | UNKNOWN | — | 253 | 253 | 0-7 | UNASSIGNED | LOW | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 253 | OBSERVED | no verified workload relationship | proc/10253/task/10253/stat+status:start; no verified workload relationship |
+| service-254 | 10254 | 10254 | 1 | 10254:1025400:1025400 | UNKNOWN | UNKNOWN | — | 254 | 254 | 0-7 | UNASSIGNED | LOW | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 254 | OBSERVED | no verified workload relationship | proc/10254/task/10254/stat+status:start; no verified workload relationship |
+| service-255 | 10255 | 10255 | 1 | 10255:1025500:1025500 | UNKNOWN | UNKNOWN | — | 255 | 255 | 0-7 | UNASSIGNED | LOW | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 255 | OBSERVED | no verified workload relationship | proc/10255/task/10255/stat+status:start; no verified workload relationship |
+| python3 | 4000 | 5000 | 3100 | 5000:500000:400000 | AI_WORKLOAD | ACL_THREAD | 0 | 0-15 | 0 | 0-7 | WORKLOAD | MEDIUM | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 0 | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/4000/task/5000/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| python3 | 4001 | 5001 | 3100 | 5001:500100:400100 | AI_WORKLOAD | ACL_THREAD | 1 | 0-255 | 32 | 0-7 | WORKLOAD | MEDIUM | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 32 | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/4001/task/5001/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| python3 | 4002 | 5002 | 3100 | 5002:500200:400200 | AI_WORKLOAD | ACL_THREAD | 2 | 0-255 | 64 | 0-7 | WORKLOAD | MEDIUM | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 64 | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/4002/task/5002/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| python3 | 4003 | 5003 | 3100 | 5003:500300:400300 | AI_WORKLOAD | ACL_THREAD | 3 | 0-255 | 96 | 0-7 | WORKLOAD | MEDIUM | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 96 | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/4003/task/5003/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| python3 | 4004 | 5004 | 3100 | 5004:500400:400400 | AI_WORKLOAD | ACL_THREAD | 4 | 0-255 | 128 | 0-7 | WORKLOAD | MEDIUM | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 128 | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/4004/task/5004/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| python3 | 4005 | 5005 | 3100 | 5005:500500:400500 | AI_WORKLOAD | ACL_THREAD | 5 | 0-255 | 160 | 0-7 | WORKLOAD | MEDIUM | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 160 | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/4005/task/5005/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| python3 | 4006 | 5006 | 3100 | 5006:500600:400600 | AI_WORKLOAD | ACL_THREAD | 6 | 0-255 | 192 | 0-7 | WORKLOAD | MEDIUM | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 192 | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/4006/task/5006/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| python3 | 4007 | 5007 | 3100 | 5007:500700:400700 | AI_WORKLOAD | ACL_THREAD | 7 | 0-255 | 224 | 0-7 | WORKLOAD | MEDIUM | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 224 | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/4007/task/5007/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| 缺失 / 不可用 | 缺失 / 不可用 | 7000 | 缺失 / 不可用 | 7000:trace:1002.200000000 | UNKNOWN | UNKNOWN | — | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | UNASSIGNED | LOW | 0.03 s | 0.01% | 0.30% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 2 | 0 | 0 | 0 | 2 | OBSERVED | no verified workload relationship | sched_process_fork; sched_process_fork; sched_process_exit; no verified workload relationship |
+| python3 | 3000 | 3000 | 1 | 3000:300000:300000 | AI_WORKLOAD | API_SERVER | — | 2-3 | 2 | 0-7 | WORKLOAD | MEDIUM | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/3000/task/3000/stat+status:start; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| EngineCore | 3100 | 3100 | 3000 | 3100:310000:310000 | AI_WORKLOAD | ENGINE_CORE | — | 4-5 | 4 | 0-7 | WORKLOAD | MEDIUM | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence | proc/3100/task/3100/stat+status:start; root/ancestor/descendant/cgroup relation; framework cmdline + thread/process role evidence; role hint from comm/cmdline (not causal proof) |
+| python3 | 4000 | 4000 | 3100 | 4000:400000:400000 | AI_WORKLOAD | NPU_WORKER | 0 | 0-31 | 0 | 0-7 | WORKLOAD | HIGH | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation | proc/4000/task/4000/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+| python3 | 4001 | 4001 | 3100 | 4001:400100:400100 | AI_WORKLOAD | NPU_WORKER | 1 | 0-255 | 32 | 0-7 | WORKLOAD | HIGH | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation | proc/4001/task/4001/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+| python3 | 4002 | 4002 | 3100 | 4002:400200:400200 | AI_WORKLOAD | NPU_WORKER | 2 | 0-255 | 64 | 0-7 | WORKLOAD | HIGH | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation | proc/4002/task/4002/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+| python3 | 4003 | 4003 | 3100 | 4003:400300:400300 | AI_WORKLOAD | NPU_WORKER | 3 | 0-255 | 96 | 0-7 | WORKLOAD | HIGH | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation | proc/4003/task/4003/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+| python3 | 4004 | 4004 | 3100 | 4004:400400:400400 | AI_WORKLOAD | NPU_WORKER | 4 | 0-255 | 128 | 0-7 | WORKLOAD | HIGH | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation | proc/4004/task/4004/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+| python3 | 4005 | 4005 | 3100 | 4005:400500:400500 | AI_WORKLOAD | NPU_WORKER | 5 | 0-255 | 160 | 0-7 | WORKLOAD | HIGH | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation | proc/4005/task/4005/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+| python3 | 4006 | 4006 | 3100 | 4006:400600:400600 | AI_WORKLOAD | NPU_WORKER | 6 | 0-255 | 192 | 0-7 | WORKLOAD | HIGH | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation | proc/4006/task/4006/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+| python3 | 4007 | 4007 | 3100 | 4007:400700:400700 | AI_WORKLOAD | NPU_WORKER | 7 | 0-255 | 224 | 0-7 | WORKLOAD | HIGH | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation | proc/4007/task/4007/stat+status:start; npu-smi PID→TGID direct relation; root/ancestor/descendant/cgroup relation |
+| python3 | 6000 | 6000 | 4000 | 6000:600000:600000 | AI_WORKLOAD | DATA_LOADER | 0 | 6-7 | 6 | 0-7 | WORKLOAD | MEDIUM | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | root/ancestor/descendant/cgroup relation | proc/6000/task/6000/stat+status:start; root/ancestor/descendant/cgroup relation; role hint from comm/cmdline (not causal proof) |
+| tokenizer | 6500 | 6500 | 1 | 6500:650000:650000 | UNKNOWN | UNKNOWN | — | 8-9 | 8 | 0-7 | UNASSIGNED | LOW | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | — | OBSERVED | no verified workload relationship | proc/6500/task/6500/stat+status:start; no verified workload relationship |
+
+### CPU Contention Analysis
+
+
+高CPU占用、共享Affinity或R/R+切出均不单独构成竞争根因；候选是相关性，NPU性能因果需同域Device时间线与受控复测。
+
+
+### Top CPU Runtime Threads
+
+
+| Process | TGID | TID | NPU | CPU Runtime | Runtime份额 | 线程利用率 | Runqueue Wait | Wait P50 | Wait P95 | Wait P99 | 唤醒样本 | 上下文切换 | 成功唤醒 | Runnable切出 | Migration | 观测CPU | 数据质量 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| service-129 | 10129 | 10129 | — | 9.50 s | 3.55% | 95.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 129 | OBSERVED |
+| kworker | 8004 | 9004 | — | 8.90 s | 3.32% | 89.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 60 | 0 | 0 | 0 | 128 | OBSERVED |
+| service-6 | 10006 | 10006 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 6 | OBSERVED |
+| service-13 | 10013 | 10013 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 13 | OBSERVED |
+| service-20 | 10020 | 10020 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 20 | OBSERVED |
+| service-27 | 10027 | 10027 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 27 | OBSERVED |
+| service-34 | 10034 | 10034 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 34 | OBSERVED |
+| service-41 | 10041 | 10041 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 41 | OBSERVED |
+| service-48 | 10048 | 10048 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 48 | OBSERVED |
+| service-55 | 10055 | 10055 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 55 | OBSERVED |
+| service-62 | 10062 | 10062 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 62 | OBSERVED |
+| service-69 | 10069 | 10069 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 69 | OBSERVED |
+| service-76 | 10076 | 10076 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 76 | OBSERVED |
+| service-83 | 10083 | 10083 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 83 | OBSERVED |
+| service-90 | 10090 | 10090 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 90 | OBSERVED |
+| service-97 | 10097 | 10097 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 97 | OBSERVED |
+| service-104 | 10104 | 10104 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 104 | OBSERVED |
+| service-111 | 10111 | 10111 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 111 | OBSERVED |
+| service-118 | 10118 | 10118 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 118 | OBSERVED |
+| service-125 | 10125 | 10125 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 125 | OBSERVED |
+
+### Top Runqueue Wait Threads
+
+
+| Process | TGID | TID | NPU | CPU Runtime | Runtime份额 | 线程利用率 | Runqueue Wait | Wait P50 | Wait P95 | Wait P99 | 唤醒样本 | 上下文切换 | 成功唤醒 | Runnable切出 | Migration | 观测CPU | 数据质量 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| python3 | 4000 | 5000 | 0 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 0 | OBSERVED |
+| python3 | 4001 | 5001 | 1 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 32 | OBSERVED |
+| python3 | 4002 | 5002 | 2 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 64 | OBSERVED |
+| python3 | 4003 | 5003 | 3 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 96 | OBSERVED |
+| python3 | 4004 | 5004 | 4 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 128 | OBSERVED |
+| python3 | 4005 | 5005 | 5 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 160 | OBSERVED |
+| python3 | 4006 | 5006 | 6 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 192 | OBSERVED |
+| python3 | 4007 | 5007 | 7 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 224 | OBSERVED |
+| backup-agent | 8000 | 9000 | — | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 0 | OBSERVED |
+| service-1 | 10001 | 10001 | — | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 1 | OBSERVED |
+| service-2 | 10002 | 10002 | — | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 2 | OBSERVED |
+| service-3 | 10003 | 10003 | — | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 3 | OBSERVED |
+| service-4 | 10004 | 10004 | — | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 4 | OBSERVED |
+| service-5 | 10005 | 10005 | — | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 5 | OBSERVED |
+| service-6 | 10006 | 10006 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 6 | OBSERVED |
+| service-7 | 10007 | 10007 | — | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 7 | OBSERVED |
+| service-8 | 10008 | 10008 | — | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 8 | OBSERVED |
+| service-9 | 10009 | 10009 | — | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 9 | OBSERVED |
+| service-10 | 10010 | 10010 | — | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 10 | OBSERVED |
+| service-11 | 10011 | 10011 | — | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 11 | OBSERVED |
+
+### Top Runnable Switch-out Threads
+
+
+| Process | TGID | TID | NPU | CPU Runtime | Runtime份额 | 线程利用率 | Runqueue Wait | Wait P50 | Wait P95 | Wait P99 | 唤醒样本 | 上下文切换 | 成功唤醒 | Runnable切出 | Migration | 观测CPU | 数据质量 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| python3 | 4000 | 5000 | 0 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 0 | OBSERVED |
+| python3 | 4001 | 5001 | 1 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 32 | OBSERVED |
+| python3 | 4002 | 5002 | 2 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 64 | OBSERVED |
+| python3 | 4003 | 5003 | 3 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 96 | OBSERVED |
+| python3 | 4004 | 5004 | 4 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 128 | OBSERVED |
+| python3 | 4005 | 5005 | 5 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 160 | OBSERVED |
+| python3 | 4006 | 5006 | 6 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 192 | OBSERVED |
+| python3 | 4007 | 5007 | 7 | 1.10 s | 0.41% | 11.00% | 0.69 s | 39.00 ms | 39.00 ms | 39.00 ms | 10 | 40 | 10 | 10 | 0 | 224 | OBSERVED |
+| backup-agent | 8000 | 9000 | — | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 0 | OBSERVED |
+| service-1 | 10001 | 10001 | — | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 1 | OBSERVED |
+| service-2 | 10002 | 10002 | — | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 2 | OBSERVED |
+| service-3 | 10003 | 10003 | — | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 3 | OBSERVED |
+| service-4 | 10004 | 10004 | — | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 4 | OBSERVED |
+| service-5 | 10005 | 10005 | — | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 5 | OBSERVED |
+| service-6 | 10006 | 10006 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 6 | OBSERVED |
+| service-7 | 10007 | 10007 | — | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 7 | OBSERVED |
+| service-8 | 10008 | 10008 | — | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 8 | OBSERVED |
+| service-9 | 10009 | 10009 | — | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 9 | OBSERVED |
+| service-10 | 10010 | 10010 | — | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 10 | OBSERVED |
+| service-11 | 10011 | 10011 | — | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 11 | OBSERVED |
+
+### Top CPU Migration Threads
+
+
+| Process | TGID | TID | NPU | CPU Runtime | Runtime份额 | 线程利用率 | Runqueue Wait | Wait P50 | Wait P95 | Wait P99 | 唤醒样本 | 上下文切换 | 成功唤醒 | Runnable切出 | Migration | 观测CPU | 数据质量 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| backup-agent | 8000 | 9000 | — | 0.90 s | 0.34% | 9.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 40 | 0 | 0 | 0 | 0 | OBSERVED |
+| service-1 | 10001 | 10001 | — | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 1 | OBSERVED |
+| service-2 | 10002 | 10002 | — | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 2 | OBSERVED |
+| service-3 | 10003 | 10003 | — | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 3 | OBSERVED |
+| service-4 | 10004 | 10004 | — | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 4 | OBSERVED |
+| service-5 | 10005 | 10005 | — | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 5 | OBSERVED |
+| service-6 | 10006 | 10006 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 6 | OBSERVED |
+| service-7 | 10007 | 10007 | — | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 7 | OBSERVED |
+| service-8 | 10008 | 10008 | — | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 8 | OBSERVED |
+| service-9 | 10009 | 10009 | — | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 9 | OBSERVED |
+| service-10 | 10010 | 10010 | — | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 10 | OBSERVED |
+| service-11 | 10011 | 10011 | — | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 11 | OBSERVED |
+| service-12 | 10012 | 10012 | — | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 12 | OBSERVED |
+| service-13 | 10013 | 10013 | — | 1.40 s | 0.52% | 14.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 13 | OBSERVED |
+| service-14 | 10014 | 10014 | — | 0.50 s | 0.19% | 5.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 14 | OBSERVED |
+| service-15 | 10015 | 10015 | — | 0.65 s | 0.24% | 6.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 15 | OBSERVED |
+| service-16 | 10016 | 10016 | — | 0.80 s | 0.30% | 8.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 16 | OBSERVED |
+| service-17 | 10017 | 10017 | — | 0.95 s | 0.35% | 9.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 17 | OBSERVED |
+| service-18 | 10018 | 10018 | — | 1.10 s | 0.41% | 11.00% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 18 | OBSERVED |
+| service-19 | 10019 | 10019 | — | 1.25 s | 0.47% | 12.50% | 0.00 s | 缺失 / 不可用 | 缺失 / 不可用 | 缺失 / 不可用 | 0 | 20 | 0 | 0 | 0 | 19 | OBSERVED |
+
+Runtime份额以全体任务已观测runtime为分母，线程利用率以采集窗口为分母；Runtime含任务上下文内IRQ，不等同纯用户态CPU。Runqueue Wait为已完成成功唤醒+R/R+切出的等待区间下界，Wait P99仅含成功唤醒；未配对等待不填零。
+
+
+### NPU Worker CPU 竞争情况与证据链
+
+
+| NPU | Worker/关联TGID | TID | 角色 | 观测CPU | NUMA | Wait P99 | 候选与重叠 |
+|---|---|---|---|---|---|---|---|
+| 0 | 4000 | 5000 | ACL_THREAD | 0 | 0 | 39.00 ms | TID9000 690.000ms CPU[0] |
+| 1 | 4001 | 5001 | ACL_THREAD | 32 | 1 | 39.00 ms | TID9001 690.000ms CPU[32] |
+| 2 | 4002 | 5002 | ACL_THREAD | 64 | 2 | 39.00 ms | TID9002 690.000ms CPU[64] |
+| 3 | 4003 | 5003 | ACL_THREAD | 96 | 3 | 39.00 ms | TID9003 690.000ms CPU[96] |
+| 4 | 4004 | 5004 | ACL_THREAD | 128 | 4 | 39.00 ms | TID9004 690.000ms CPU[128] |
+| 5 | 4005 | 5005 | ACL_THREAD | 160 | 5 | 39.00 ms | TID9005 690.000ms CPU[160] |
+| 6 | 4006 | 5006 | ACL_THREAD | 192 | 6 | 39.00 ms | TID9006 690.000ms CPU[192] |
+| 7 | 4007 | 5007 | ACL_THREAD | 224 | 7 | 39.00 ms | TID9007 690.000ms CPU[224] |
+| 0 | 4000 | 4000 | NPU_WORKER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+| 1 | 4001 | 4001 | NPU_WORKER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+| 2 | 4002 | 4002 | NPU_WORKER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+| 3 | 4003 | 4003 | NPU_WORKER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+| 4 | 4004 | 4004 | NPU_WORKER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+| 5 | 4005 | 4005 | NPU_WORKER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+| 6 | 4006 | 4006 | NPU_WORKER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+| 7 | 4007 | 4007 | NPU_WORKER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+| 0 | 6000 | 6000 | DATA_LOADER |  | — | 缺失 / 不可用 | 未观测到候选；不代表绝无竞争 |
+
+| 目标TID/TGID | 候选TID/TGID | CPU | NUMA | 重叠ms | 时间窗证据 | 置信度 | 因果 |
+|---|---|---|---|---|---|---|---|
+| 5000/4000 | 9000/8000 | 0 | 0 | 690.00 | [{'start': 1000.021, 'end': 1000.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1001.11, 'end': 1001.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1002.021, 'end': 1002.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1002.11, 'end': 1002.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1003.021, 'end': 1003.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1003.11, 'end': 1003.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1004.021, 'end': 1004.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1004.11, 'end': 1004.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1005.021, 'end': 1005.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1005.11, 'end': 1005.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1006.021, 'end': 1006.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1006.11, 'end': 1006.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1007.021, 'end': 1007.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1007.11, 'end': 1007.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1008.021, 'end': 1008.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1008.11, 'end': 1008.14, 'cpu': 0, 'wait_kind': 'runnable'}, {'start': 1009.021, 'end': 1009.06, 'cpu': 0, 'wait_kind': 'wakeup'}, {'start': 1009.11, 'end': 1009.14, 'cpu': 0, 'wait_kind': 'runnable'}]； runnable wait + same CPU running interval; affinity snapshot corroborates scope | MEDIUM | UNPROVEN |
+| 5001/4001 | 9001/8001 | 32 | 1 | 690.00 | [{'start': 1000.021, 'end': 1000.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1001.11, 'end': 1001.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1002.021, 'end': 1002.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1002.11, 'end': 1002.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1003.021, 'end': 1003.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1003.11, 'end': 1003.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1004.021, 'end': 1004.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1004.11, 'end': 1004.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1005.021, 'end': 1005.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1005.11, 'end': 1005.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1006.021, 'end': 1006.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1006.11, 'end': 1006.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1007.021, 'end': 1007.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1007.11, 'end': 1007.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1008.021, 'end': 1008.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1008.11, 'end': 1008.14, 'cpu': 32, 'wait_kind': 'runnable'}, {'start': 1009.021, 'end': 1009.06, 'cpu': 32, 'wait_kind': 'wakeup'}, {'start': 1009.11, 'end': 1009.14, 'cpu': 32, 'wait_kind': 'runnable'}]； runnable wait + same CPU running interval; affinity snapshot corroborates scope | MEDIUM | UNPROVEN |
+| 5002/4002 | 9002/8002 | 64 | 2 | 690.00 | [{'start': 1000.021, 'end': 1000.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1001.11, 'end': 1001.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1002.021, 'end': 1002.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1002.11, 'end': 1002.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1003.021, 'end': 1003.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1003.11, 'end': 1003.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1004.021, 'end': 1004.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1004.11, 'end': 1004.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1005.021, 'end': 1005.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1005.11, 'end': 1005.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1006.021, 'end': 1006.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1006.11, 'end': 1006.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1007.021, 'end': 1007.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1007.11, 'end': 1007.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1008.021, 'end': 1008.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1008.11, 'end': 1008.14, 'cpu': 64, 'wait_kind': 'runnable'}, {'start': 1009.021, 'end': 1009.06, 'cpu': 64, 'wait_kind': 'wakeup'}, {'start': 1009.11, 'end': 1009.14, 'cpu': 64, 'wait_kind': 'runnable'}]； runnable wait + same CPU running interval; affinity snapshot corroborates scope | MEDIUM | UNPROVEN |
+| 5003/4003 | 9003/8003 | 96 | 3 | 690.00 | [{'start': 1000.021, 'end': 1000.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1001.11, 'end': 1001.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1002.021, 'end': 1002.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1002.11, 'end': 1002.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1003.021, 'end': 1003.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1003.11, 'end': 1003.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1004.021, 'end': 1004.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1004.11, 'end': 1004.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1005.021, 'end': 1005.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1005.11, 'end': 1005.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1006.021, 'end': 1006.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1006.11, 'end': 1006.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1007.021, 'end': 1007.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1007.11, 'end': 1007.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1008.021, 'end': 1008.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1008.11, 'end': 1008.14, 'cpu': 96, 'wait_kind': 'runnable'}, {'start': 1009.021, 'end': 1009.06, 'cpu': 96, 'wait_kind': 'wakeup'}, {'start': 1009.11, 'end': 1009.14, 'cpu': 96, 'wait_kind': 'runnable'}]； runnable wait + same CPU running interval; affinity snapshot corroborates scope | MEDIUM | UNPROVEN |
+| 5004/4004 | 9004/8004 | 128 | 4 | 690.00 | [{'start': 1000.021, 'end': 1000.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1001.11, 'end': 1001.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1002.021, 'end': 1002.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1002.11, 'end': 1002.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1003.021, 'end': 1003.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1003.11, 'end': 1003.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1004.021, 'end': 1004.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1004.11, 'end': 1004.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1005.021, 'end': 1005.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1005.11, 'end': 1005.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1006.021, 'end': 1006.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1006.11, 'end': 1006.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1007.021, 'end': 1007.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1007.11, 'end': 1007.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1008.021, 'end': 1008.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1008.11, 'end': 1008.14, 'cpu': 128, 'wait_kind': 'runnable'}, {'start': 1009.021, 'end': 1009.06, 'cpu': 128, 'wait_kind': 'wakeup'}, {'start': 1009.11, 'end': 1009.14, 'cpu': 128, 'wait_kind': 'runnable'}]； runnable wait + same CPU running interval; affinity snapshot corroborates scope | MEDIUM | UNPROVEN |
+| 5005/4005 | 9005/8005 | 160 | 5 | 690.00 | [{'start': 1000.021, 'end': 1000.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1001.11, 'end': 1001.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1002.021, 'end': 1002.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1002.11, 'end': 1002.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1003.021, 'end': 1003.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1003.11, 'end': 1003.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1004.021, 'end': 1004.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1004.11, 'end': 1004.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1005.021, 'end': 1005.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1005.11, 'end': 1005.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1006.021, 'end': 1006.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1006.11, 'end': 1006.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1007.021, 'end': 1007.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1007.11, 'end': 1007.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1008.021, 'end': 1008.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1008.11, 'end': 1008.14, 'cpu': 160, 'wait_kind': 'runnable'}, {'start': 1009.021, 'end': 1009.06, 'cpu': 160, 'wait_kind': 'wakeup'}, {'start': 1009.11, 'end': 1009.14, 'cpu': 160, 'wait_kind': 'runnable'}]； runnable wait + same CPU running interval; affinity snapshot corroborates scope | MEDIUM | UNPROVEN |
+| 5006/4006 | 9006/8006 | 192 | 6 | 690.00 | [{'start': 1000.021, 'end': 1000.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1001.11, 'end': 1001.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1002.021, 'end': 1002.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1002.11, 'end': 1002.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1003.021, 'end': 1003.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1003.11, 'end': 1003.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1004.021, 'end': 1004.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1004.11, 'end': 1004.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1005.021, 'end': 1005.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1005.11, 'end': 1005.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1006.021, 'end': 1006.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1006.11, 'end': 1006.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1007.021, 'end': 1007.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1007.11, 'end': 1007.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1008.021, 'end': 1008.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1008.11, 'end': 1008.14, 'cpu': 192, 'wait_kind': 'runnable'}, {'start': 1009.021, 'end': 1009.06, 'cpu': 192, 'wait_kind': 'wakeup'}, {'start': 1009.11, 'end': 1009.14, 'cpu': 192, 'wait_kind': 'runnable'}]； runnable wait + same CPU running interval; affinity snapshot corroborates scope | MEDIUM | UNPROVEN |
+| 5007/4007 | 9007/8007 | 224 | 7 | 690.00 | [{'start': 1000.021, 'end': 1000.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1000.11, 'end': 1000.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1001.021, 'end': 1001.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1001.11, 'end': 1001.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1002.021, 'end': 1002.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1002.11, 'end': 1002.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1003.021, 'end': 1003.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1003.11, 'end': 1003.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1004.021, 'end': 1004.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1004.11, 'end': 1004.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1005.021, 'end': 1005.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1005.11, 'end': 1005.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1006.021, 'end': 1006.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1006.11, 'end': 1006.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1007.021, 'end': 1007.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1007.11, 'end': 1007.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1008.021, 'end': 1008.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1008.11, 'end': 1008.14, 'cpu': 224, 'wait_kind': 'runnable'}, {'start': 1009.021, 'end': 1009.06, 'cpu': 224, 'wait_kind': 'wakeup'}, {'start': 1009.11, 'end': 1009.14, 'cpu': 224, 'wait_kind': 'runnable'}]； runnable wait + same CPU running interval; affinity snapshot corroborates scope | MEDIUM | UNPROVEN |
+
+### 热点CPU与关联线程
+
+
+| CPU | NUMA | 利用率 | TID |
+|---|---|---|---|
+| 128 | 4 | 100.00% | 5004, 9004 |
+| 129 | 4 | 95.00% | 10129 |
+
+### CPU Affinity 重叠（配置相关性）
+
+
+Affinity比较范围：{'active_workload_threads': 8, 'compared_threads': 8, 'truncated': False, 'reason': '按已观测等待排序，最多512个活跃关联线程做成对Affinity比较；全线程Affinity仍保留在thread_metrics'}
+
+
+| TID A | TID B | 重叠CPU | 因果 |
+|---|---|---|---|
+| 5000 | 5001 | 0-15 | UNPROVEN |
+| 5000 | 5002 | 0-15 | UNPROVEN |
+| 5000 | 5003 | 0-15 | UNPROVEN |
+| 5000 | 5004 | 0-15 | UNPROVEN |
+| 5000 | 5005 | 0-15 | UNPROVEN |
+| 5000 | 5006 | 0-15 | UNPROVEN |
+| 5000 | 5007 | 0-15 | UNPROVEN |
+| 5001 | 5002 | 0-255 | UNPROVEN |
+| 5001 | 5003 | 0-255 | UNPROVEN |
+| 5001 | 5004 | 0-255 | UNPROVEN |
+| 5001 | 5005 | 0-255 | UNPROVEN |
+| 5001 | 5006 | 0-255 | UNPROVEN |
+| 5001 | 5007 | 0-255 | UNPROVEN |
+| 5002 | 5003 | 0-255 | UNPROVEN |
+| 5002 | 5004 | 0-255 | UNPROVEN |
+| 5002 | 5005 | 0-255 | UNPROVEN |
+| 5002 | 5006 | 0-255 | UNPROVEN |
+| 5002 | 5007 | 0-255 | UNPROVEN |
+| 5003 | 5004 | 0-255 | UNPROVEN |
+| 5003 | 5005 | 0-255 | UNPROVEN |
+| 5003 | 5006 | 0-255 | UNPROVEN |
+| 5003 | 5007 | 0-255 | UNPROVEN |
+| 5004 | 5005 | 0-255 | UNPROVEN |
+| 5004 | 5006 | 0-255 | UNPROVEN |
+| 5004 | 5007 | 0-255 | UNPROVEN |
+| 5005 | 5006 | 0-255 | UNPROVEN |
+| 5005 | 5007 | 0-255 | UNPROVEN |
+| 5006 | 5007 | 0-255 | UNPROVEN |
+
+### cgroup CPU quota / throttling
+
+
+| cgroup/祖先 | TGID | Quota核数 | nr_throttled增量 | throttled_usec增量 | 来源与限制 |
+|---|---|---|---|---|---|
+| /sys/fs/cgroup/ascend/job | 3000, 3100, 4000, 4001, 4002, 4003, 4004, 4005, 4006, 4007, 6000, 6500 | 4.00 | 4 | 80000 | process_start/end.json cgroup ancestor cpu.max/cpu.stat deltas; 前后快照包围trace窗口；计数为整个cgroup而非单线程；throttled时间不能视为整机饱和。 |
+| /sys/fs/cgroup/system.slice/backup | 8000, 8001, 8002, 8003, 8004, 8005, 8006, 8007 | 无限制（核验祖先） | 0 | 0 | process_start/end.json cgroup ancestor cpu.max/cpu.stat deltas; 前后快照包围trace窗口；计数为整个cgroup而非单线程；throttled时间不能视为整机饱和。 |
+| /sys/fs/cgroup/system.slice/normal | 10001, 10002, 10003, 10004, 10005, 10006, 10007, 10008, 10009, 10010, 10011, 10012, 10013, 10014, 10015, 10016, 10017, 10018, 10019, 10020, 10021, 10022, 10023, 10024, 10025, 10026, 10027, 10028, 10029, 10030, 10031, 10033, 10034, 10035, 10036, 10037, 10038, 10039, 10040, 10041, 10042, 10043, 10044, 10045, 10046, 10047, 10048, 10049, 10050, 10051, 10052, 10053, 10054, 10055, 10056, 10057, 10058, 10059, 10060, 10061, 10062, 10063, 10065, 10066, 10067, 10068, 10069, 10070, 10071, 10072, 10073, 10074, 10075, 10076, 10077, 10078, 10079, 10080, 10081, 10082, 10083, 10084, 10085, 10086, 10087, 10088, 10089, 10090, 10091, 10092, 10093, 10094, 10095, 10097, 10098, 10099, 10100, 10101, 10102, 10103, 10104, 10105, 10106, 10107, 10108, 10109, 10110, 10111, 10112, 10113, 10114, 10115, 10116, 10117, 10118, 10119, 10120, 10121, 10122, 10123, 10124, 10125, 10126, 10127, 10129, 10130, 10131, 10132, 10133, 10134, 10135, 10136, 10137, 10138, 10139, 10140, 10141, 10142, 10143, 10144, 10145, 10146, 10147, 10148, 10149, 10150, 10151, 10152, 10153, 10154, 10155, 10156, 10157, 10158, 10159, 10161, 10162, 10163, 10164, 10165, 10166, 10167, 10168, 10169, 10170, 10171, 10172, 10173, 10174, 10175, 10176, 10177, 10178, 10179, 10180, 10181, 10182, 10183, 10184, 10185, 10186, 10187, 10188, 10189, 10190, 10191, 10193, 10194, 10195, 10196, 10197, 10198, 10199, 10200, 10201, 10202, 10203, 10204, 10205, 10206, 10207, 10208, 10209, 10210, 10211, 10212, 10213, 10214, 10215, 10216, 10217, 10218, 10219, 10220, 10221, 10222, 10223, 10225, 10226, 10227, 10228, 10229, 10230, 10231, 10232, 10233, 10234, 10235, 10236, 10237, 10238, 10239, 10240, 10241, 10242, 10243, 10244, 10245, 10246, 10247, 10248, 10249, 10250, 10251, 10252, 10253, 10254, 10255 | 无限制（核验祖先） | 0 | 0 | process_start/end.json cgroup ancestor cpu.max/cpu.stat deltas; 前后快照包围trace窗口；计数为整个cgroup而非单线程；throttled时间不能视为整机饱和。 |
+
+Device时间关联：ALIGNED；匹配 [{'target_tid': 5004, 'npu_id': 4, 'window': {'npu_id': 4, 'start': 1000.021, 'end': 1000.06, 'kind': 'synthetic_device_gap'}, 'causality': 'UNPROVEN'}]。未提供或未对齐时，只能报告Host侧风险，不能确认NPU性能根因。
+
+
+优化与验证：先核验目标/候选线程职责、有效cpuset、IRQ Affinity和cgroup限额；比较同负载下的Worker等待分位数、重叠窗口与NPU吞吐/请求延迟。调整并发或配额等方案须经用户确认，保存原配置，复采同一窗口验证收益与副作用。
+
+
 | Top 运行时间任务 | 累计运行 ms | 说明 |
 |-----------------|-----------:|------|
-| python3 (pid 4115) | 100 | Python 训练/推理主进程或 dataloader |
+| service-129 (TID 10129) | 9500 | 普通任务 |
+| kworker (TID 9004) | 8900 | 普通任务 |
+| service-6 (TID 10006) | 1400 | 普通任务 |
+| service-13 (TID 10013) | 1400 | 普通任务 |
+| service-20 (TID 10020) | 1400 | 普通任务 |
+| service-27 (TID 10027) | 1400 | 普通任务 |
+| service-34 (TID 10034) | 1400 | 普通任务 |
+| service-41 (TID 10041) | 1400 | 普通任务 |
 
 | Top 切出次数任务 | 次数 |
 |-----------------|-----:|
-| python3 (pid 4115) | 1 |
+| kworker (TID 9004) | 30 |
+| backup (TID 9000) | 20 |
+| backup (TID 9001) | 20 |
+| backup (TID 9002) | 20 |
+| backup (TID 9003) | 20 |
+| backup (TID 9005) | 20 |
+| backup (TID 9006) | 20 |
+| backup (TID 9007) | 20 |
+
+| Top 被唤醒任务 | 次数 |
+|---------------|-----:|
+| acl_thread | 10 |
+| acl_thread | 10 |
+| acl_thread | 10 |
+| acl_thread | 10 |
+| acl_thread | 10 |
+| acl_thread | 10 |
+| acl_thread | 10 |
+| acl_thread | 10 |
+
+| Top 迁移任务 | 次数 |
+|-------------|-----:|
+| backup (TID 9000) | 0 |
+| service-1 (TID 10001) | 0 |
+| service-2 (TID 10002) | 0 |
+| service-3 (TID 10003) | 0 |
+| service-4 (TID 10004) | 0 |
+| service-5 (TID 10005) | 0 |
+| service-6 (TID 10006) | 0 |
+| service-7 (TID 10007) | 0 |
 
 ## 11. Affinity / NUMA 分析
+
+CPU 总数 256；NUMA 节点 8；距离矩阵列顺序 [0, 1, 2, 3, 4, 5, 6, 7]。
+
+
+| NUMA | CPU列表 | 内存容量 | 内存空闲 | 节点距离 | 读取限制 |
+|---|---|---|---|---|---|
+| 0 | 0-31 | 128.00 GiB | 64.00 GiB | {0: 10, 1: 20, 2: 20, 3: 20, 4: 20, 5: 20, 6: 20, 7: 20} | {} |
+| 1 | 32-63 | 128.00 GiB | 64.00 GiB | {0: 20, 1: 10, 2: 20, 3: 20, 4: 20, 5: 20, 6: 20, 7: 20} | {} |
+| 2 | 64-95 | 128.00 GiB | 64.00 GiB | {0: 20, 1: 20, 2: 10, 3: 20, 4: 20, 5: 20, 6: 20, 7: 20} | {} |
+| 3 | 96-127 | 128.00 GiB | 64.00 GiB | {0: 20, 1: 20, 2: 20, 3: 10, 4: 20, 5: 20, 6: 20, 7: 20} | {} |
+| 4 | 128-159 | 128.00 GiB | 64.00 GiB | {0: 20, 1: 20, 2: 20, 3: 20, 4: 10, 5: 20, 6: 20, 7: 20} | {} |
+| 5 | 160-191 | 128.00 GiB | 64.00 GiB | {0: 20, 1: 20, 2: 20, 3: 20, 4: 20, 5: 10, 6: 20, 7: 20} | {} |
+| 6 | 192-223 | 128.00 GiB | 64.00 GiB | {0: 20, 1: 20, 2: 20, 3: 20, 4: 20, 5: 20, 6: 10, 7: 20} | {} |
+| 7 | 224-255 | 128.00 GiB | 64.00 GiB | {0: 20, 1: 20, 2: 20, 3: 20, 4: 20, 5: 20, 6: 20, 7: 10} | {} |
+
+CPU许可范围、PSR/trace运行位置、Mems_allowed许可内存节点、numa_maps/numastat实际页分布分别核验。节点距离是拓扑成本提示，实际页不在本地不能单独证明跨节点访问导致性能损失；相关任务证据见2.3节。
+
+
+快照包含 NUMA 拓扑信息（8 个节点可见）。
 
 Top 任务运行分布与各核利用率见第 6 节；任务集中在少数核时可结合绑核配置判断。
 CPU 亲和性、NPU/PID 对应及线程运行核见第二部分；互斥 CPU 分区和宿主机命令见第三部分。
@@ -352,51 +1713,67 @@ CPU 亲和性、NPU/PID 对应及线程运行核见第二部分；互斥 CPU 分
 
 ## 12. 时间窗口分析
 
-时间序列数据不足，无法进行时间窗口分析。
+以下为利用率最高的时间窗口（桶 = 0.08 秒）：
+
+- 窗口 0.0~0.1 秒：利用率峰值 **90.9%**，同期 上下文切换 4452 次/秒、调度延迟 P99 39.00 ms
+- 窗口 1.0~1.1 秒：利用率峰值 **90.9%**，同期 上下文切换 4452 次/秒、调度延迟 P99 39.00 ms
+- 窗口 2.0~2.1 秒：利用率峰值 **90.9%**，同期 上下文切换 4452 次/秒、调度延迟 P99 39.00 ms
+
+若峰值窗口内同步出现中断/调度延迟上升，可建立「负载升高 → 中断增加 → 调度延迟上升 → worker 运行时间下降 → NPU 等待 Host」的关联链；仅当上述同期证据存在时成立。
 
 ## 13. 数据说明与指标解释
+### 可选工具证据覆盖（缺失不等于正常）
+
+| 工具 | 状态 | 证据文件 | 限制 |
+|---|---|---|---|
+| GIL / gil_tracer | NOT_PROVIDED | — | 有文件不表示已完成时钟/内容校验；缺失不作为正常性能证据 |
+| function_monitor | NOT_PROVIDED | — | 有文件不表示已完成时钟/内容校验；缺失不作为正常性能证据 |
+| msprof | NOT_PROVIDED | — | 有文件不表示已完成时钟/内容校验；缺失不作为正常性能证据 |
+| host_analyzer | NOT_PROVIDED | — | 有文件不表示已完成时钟/内容校验；缺失不作为正常性能证据 |
+| PMU | NOT_VALIDATED | — | 本次工具未执行硬件计数器采集，也未提供频率估算 |
+
 
 ### 数据概况
 
-- trace 时间范围：100.000 ~ 101.000（相对秒），时长 1.0 秒
-- CPU 数量（参与统计）：1；报告核数（nproc）：-
-- 内核版本：synthetic ｜ 主机名：DEMO-ONLY-NOT-CUSTOMER
-- 可用事件：sched_switch
-- 解析统计：总行 3，成功 3，失败 0（失败行已自动跳过）
-- buffer 溢出：0（未检测到溢出）
-- HostBound 扩展快照：cpu_online.txt、host_context.txt、lscpu_parse.txt、npu_smi_info.txt、npu_smi_topology.txt、numactl.txt、pid_4115_cpuset_effective.txt、pid_4115_starttime.txt、pid_4115_status.txt、pid_4115_thread_affinity.txt、pid_4115_threads.txt、pid_4116_cpuset_effective.txt、pid_4116_starttime.txt、pid_4116_status.txt、pid_4116_thread_affinity.txt、pid_4116_threads.txt、pid_4117_cpuset_effective.txt、pid_4117_starttime.txt、pid_4117_status.txt、pid_4117_thread_affinity.txt、pid_4117_threads.txt、pid_4118_cpuset_effective.txt、pid_4118_starttime.txt、pid_4118_status.txt、pid_4118_thread_affinity.txt、pid_4118_threads.txt、pid_4119_cpuset_effective.txt、pid_4119_starttime.txt、pid_4119_status.txt、pid_4119_thread_affinity.txt、pid_4119_threads.txt、pid_4120_cpuset_effective.txt、pid_4120_starttime.txt、pid_4120_status.txt、pid_4120_thread_affinity.txt、pid_4120_threads.txt、pid_4121_cpuset_effective.txt、pid_4121_starttime.txt、pid_4121_status.txt、pid_4121_thread_affinity.txt、pid_4121_threads.txt、pid_4122_cpuset_effective.txt、pid_4122_starttime.txt、pid_4122_status.txt、pid_4122_thread_affinity.txt、pid_4122_threads.txt（已纳入证据覆盖说明；名称匹配本身不构成根因）。
+- trace 时间范围：1000.000 ~ 1010.000（相对秒），时长 10.0 秒
+- CPU 数量（参与统计）：256；报告核数（nproc）：256
+- 内核版本：synthetic-openEuler-fixture ｜ 主机名：SYNTHETIC-NOT-A-REAL-HOST
+- 可用事件：cpu_frequency, cpu_idle, irq_handler_entry, irq_handler_exit, sched_process_exit, sched_process_fork, sched_switch, sched_wakeup, sched_waking, softirq_entry, softirq_exit, tracing_mark_write
+- 解析统计：总行 11,521，成功 11,521，失败 0（失败行已自动跳过）
+- buffer 溢出：0（统计已提供）
+- HostBound 扩展快照：capabilities.json、collection_cpus.txt、device_windows.json、frequency_end.json、frequency_samples.jsonl、frequency_start.json、host_context.txt、lscpu_parse.txt、npu_smi_info.txt、npu_smi_info_start.txt、npu_smi_map.txt、npu_smi_topology.txt、numa_topology.json、numactl.txt、pid_4000_cpuset_effective.txt、pid_4000_starttime.txt、pid_4000_status.txt、pid_4000_thread_affinity.txt、pid_4000_threads.txt、pid_4001_cpuset_effective.txt、pid_4001_starttime.txt、pid_4001_status.txt、pid_4001_thread_affinity.txt、pid_4001_threads.txt、pid_4002_cpuset_effective.txt、pid_4002_starttime.txt、pid_4002_status.txt、pid_4002_thread_affinity.txt、pid_4002_threads.txt、pid_4003_cpuset_effective.txt、pid_4003_starttime.txt、pid_4003_status.txt、pid_4003_thread_affinity.txt、pid_4003_threads.txt、pid_4004_cpuset_effective.txt、pid_4004_starttime.txt、pid_4004_status.txt、pid_4004_thread_affinity.txt、pid_4004_threads.txt、pid_4005_cpuset_effective.txt、pid_4005_starttime.txt、pid_4005_status.txt、pid_4005_thread_affinity.txt、pid_4005_threads.txt、pid_4006_cpuset_effective.txt、pid_4006_starttime.txt、pid_4006_status.txt、pid_4006_thread_affinity.txt、pid_4006_threads.txt、pid_4007_cpuset_effective.txt、pid_4007_starttime.txt、pid_4007_status.txt、pid_4007_thread_affinity.txt、pid_4007_threads.txt、process_end.json、process_start.json（已纳入证据覆盖说明；名称匹配本身不构成根因）。
 
 ### 分析限制
 
 - trace 仅覆盖采集窗口，不代表长期行为。
-- 利用率基于 idle 事件/swapper 近似；user/system 区分依赖 /proc/stat（开机累计）。
+- 利用率基于连续switch有效区间，无switch可用cpu_idle降级；user/system快照为开机累计。
 - 调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。
-- 频率单位自动换算可能存在平台差异，仅作相对比较。
+- 频率按显式单位转MHz；驱动报告值不等同于PMU实测频率。
 
 ### 指标解释（每个指标是什么）
 
 | 指标 | 解释 |
 |------|------|
-| cpu_util | CPU 利用率：非空闲时间占比。trace 中可精确得到 busy/idle，user/system 区分依赖 /proc/stat 快照（为开机以来累计值）。 |
+| cpu_util | CPU 利用率：有效观测时间内非idle调度任务时间占比。trace通过连续switch重建busy/idle，user/system 区分依赖 /proc/stat 快照（为开机以来累计值）。 |
 | cpu_util_p95 | CPU 利用率 P95：将所有核心利用率排序后取第 95 分位，反映高负载核心的普遍水平。 |
-| cs_rate | 上下文切换率 (context switches/sec)：每秒进程/线程切换次数，过高说明任务碎片化或争抢激烈。 |
+| cs_rate | 上下文切换率 (context switches/sec)：全机每秒sched_switch次数；高值需结合等待/负载判断。 |
 | wakeup_rate | 唤醒率 (wakeups/sec)：每秒任务被唤醒进入 runnable 的次数，反映任务碎片化程度与调度压力。 |
 | sched_latency | 调度延迟 (scheduling latency)：任务从被唤醒 (sched_wakeup) 到真正获得 CPU (sched_switch) 的等待时间，直接体现 runnable 队列拥堵程度。 |
-| runnable_avg | 平均可运行任务数 (runnable)：任意时刻处于等待 CPU 状态的平均任务数，>核心数说明调度拥挤。 |
+| runnable_avg | 平均可运行任务数 (runnable)：已完成成功唤醒和R/R+切出等待区间的时间加权下界，不是全系统精确runqueue长度。 |
 | irq_time | 硬中断 CPU 占用：CPU 在处理硬件中断上花费的时间占比 (irq_handler_entry~exit)。 |
 | softirq_time | 软中断 CPU 占用：CPU 在处理软中断上花费的时间占比 (softirq_entry~exit)。软中断是中断下半部延迟处理机制。 |
 | irq_hotspot | 中断热点：单个核心 IRQ/SoftIRQ 占用远高于其他核心，通常由网卡中断亲和性 (IRQ affinity) 固定在同一核导致。 |
-| freq_avg | CPU 平均频率：trace 期间 cpu_frequency 事件的平均值，高负载下频率低说明降频/温控/调度器策略问题。 |
+| freq_avg | CPU 平均频率：策略域已知样本持续时间加权平均；驱动报告频率不等于实测频率；低值单独不能证明降频根因。 |
 | idle_ratio | CPU 空闲占比：idle 状态时间占比，过高说明该核负载不足或任务未调度到该核。 |
 | migration | 任务迁移次数：任务在 CPU 之间搬移的次数 (sched_migrate_task 或跨核运行推断)，频繁迁移导致缓存失效、NUMA 跨访。 |
-| preempt | 抢占次数：任务未运行完就被更高优先级任务切出 (prev_state=R 的 sched_switch)。 |
+| preempt | 可运行态切出次数：sched_switch prev_state=R/R+；不能据此证明其他线程因果性抢占。 |
 | buffer_overrun | buffer 溢出条数：采集期间 ring buffer 溢出而丢失的事件数，>0 说明 trace 可能不完整，结论置信度应下调。 |
 
 ### 事件/术语解释
 
 | 术语 | 解释 |
 |------|------|
-| NET_RX | 网络接收软中断：网卡收到数据包后，协议栈处理（IP/TCP 解析、socket 分发）在软中断中延迟执行。NET_RX 软中断打满单核是分布式训练/推理通信中最常见的 IRQ 热点根因。 |
+| NET_RX | 网络接收软中断：网卡收到数据包后，协议栈处理（IP/TCP 解析、socket 分发）在软中断中延迟执行。NET_RX集中单核是需结合Worker时间线验证的Host侧风险。 |
 | NET_TX | 网络发送软中断：网卡发送完成后的收尾处理。 |
 | TIMER | 定时器软中断：内核定时器 (tick/timer_list) 的到期处理，过高说明大量定时器密集到期。 |
 | TASKLET | TASKLET 软中断：驱动常用的延迟执行机制，常见于网卡/NVMe 驱动。 |
@@ -417,5 +1794,5 @@ CPU 亲和性、NPU/PID 对应及线程运行核见第二部分；互斥 CPU 分
 | task_newtask | 新建任务事件 (fork/clone)。 |
 | sched_migrate_task | 任务迁移事件：任务被调度器迁往其他 CPU。 |
 | cpu_idle | CPU 空闲状态事件：state=进入的 C-state，state=4294967295 表示退出 idle 恢复运行。 |
-| cpu_frequency | CPU 频率变化事件：state=新频率（单位通常 kHz，x86 平台）或 Hz（ARM 部分平台）。 |
+| cpu_frequency | CPU 频率变化事件：state=驱动报告的新频率，标准power/cpu_frequency为kHz；非标准导出需显式声明单位。 |
 | irq_line_unknown | 未收录中断名：按中断号展示，可在 /proc/interrupts 中查询对应设备。 |
