@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Shared NPU evidence content for the offline HTML and Markdown reports."""
+"""NPU affinity summaries and concrete AI task binding plans for HTML."""
 from html import escape
 from .npu_affinity import STATE_CN
-from .report_explanation import collection_actions_html, collection_actions_md
+from .report_explanation import collection_actions_html
 from .report_tables import DISPLAY_LIMIT
 
 
@@ -42,14 +42,6 @@ def affinity_html(data, integrity=None):
             parts.append('</article>')
         parts.append('</div></section>')
     if len(rows)>12: parts.append('</details>')
-    if data.get('children'):
-        parts.append('<h4>已识别的子进程</h4><table><thead><tr><th>宿主机 PID</th><th>AI 父进程</th><th>建议 CPU</th><th>证据/阻碍</th></tr></thead><tbody>')
-        for row in data['children'][:DISPLAY_LIMIT]:
-            parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % tuple(escape(str(v)) for v in
-                (row['pid'], row['parent_pid'], row['target'], '；'.join(row['blockers']) or '稳定父子关系、身份及逐线程 cpuset 已核验')))
-        parts.append('</tbody></table>')
-    for note in data.get('notes', []):
-        parts.append('<p class="note">%s</p>' % escape(note))
     parts.append('<p class="note">证据：hostbound/npu_smi_info.txt、npu_smi_topology.txt、numactl.txt/lscpu_parse.txt、pid_*_{status,threads,thread_affinity,cpuset_effective}.txt；运行观测与配置快照可能位于不同采样时点。</p>')
     return ''.join(parts)
 
@@ -66,85 +58,30 @@ def _process_html(row):
     parts.append('<div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>%s → %s</code></div>' % (escape(','.join(map(str, row['observed_numa'])) or '未知'), escape(','.join(map(str, row['numa'])) or '未知')))
     for key, value in [('当前 allowed CPU（线程并集）', row['allowed']), ('ftrace 观测 CPU', row['trace'])]:
         parts.append('<div class="aff-line"><span>%s</span><code>%s</code></div>' % (key, escape(value or '未提供')))
-    parts.append('<div class="aff-target"><span>建议CPU / NUMA →</span><code>%s / %s</code></div>' % (escape(str(row.get('recommended_cpu') or row['target'] or '待补证据')),escape(','.join(map(str,row.get('recommended_numa') or [])) or '待核验')))
-    parts.append('<details class="npu-evidence"><summary>依据、来源、内存与线程证据（展开）</summary>')
-    for key,value in [('NPU 亲和 CPU',row['affinity']),('PSR 最近运行 CPU',row['psr'])]:
-        parts.append('<div class="aff-line"><span>%s</span><code>%s</code></div>'%(key,escape(value or '未提供')))
-    if row.get('sources'):
-        parts.append('<p class="note"><b>证据来源：</b>%s</p>'%escape('；'.join(map(str,row['sources']))))
-    memory=row.get('memory_locality',{})
-    if not isinstance(memory,dict): memory={}
-    if memory:
-        parts.append('<div class="aff-line"><span>内存许可节点（Mems_allowed）</span><code>%s</code></div>'%escape(str(memory.get('allowed_nodes','未知'))))
-        parts.append('<div class="aff-line"><span>实际页分布 / 节点</span><code>%s / %s</code></div>'%(escape(str(memory.get('actual_pages_by_node','未知'))),escape(str(memory.get('actual_nodes','未知')))))
-        parts.append('<p class="note">内存证据：%s；%s。许可节点不代表实际页驻留；跨节点页存在也不等于已证实远端访问性能损失。</p>'%(escape(str(memory.get('source','未提供'))),escape(str(memory.get('status','UNKNOWN')))))
-    for key,label in [('mapping_status','映射状态'),('identity_status','进程身份'),('recommendation_status','建议状态'),('allocation_mode','分配模式'),('reasons','原因'),('risks','风险'),('expected_improvement','预期改善'),('verification','验证方法'),('rollback','回滚路径')]:
-        value=row.get(key)
-        if value:
-            parts.append('<p class="note"><b>%s：</b>%s</p>'%(label,escape('；'.join(map(str,value)) if isinstance(value,list) else str(value))))
-    if row['blockers']:
-        parts.append('<p class="note">方案待核验：%s</p>' % escape('；'.join(row['blockers'])))
-    parts.append('</details>')
     parts.append('</div>')
     return ''.join(parts)
 
 
-def affinity_md(data):
-    total = len(data.get('rows', []))
-    data = dict(data, rows=data.get('rows', [])[:DISPLAY_LIMIT])
-    lines = ['### 2.3 NPU 任务与 NUMA 亲和性', '', _EXPLANATION, '',
-             '| NPU/Chip | 主进程/其他进程 | 宿主机 PID | 线程数 | 亲和 NUMA / CPU | 当前 allowed CPU | 观测 NUMA | ftrace / PSR | CPU 亲和判断 | 建议分区 |',
-             '|---|---|---:|---:|---|---|---|---|---|---|']
-    for r in data.get('rows', []):
-        lines.append('| %d/%s | %s（%s） | %s | %d | %s / %s | %s | %s | %s / %s | %s | %s |' % (
-            r['npu'], r['chip'] if r['chip'] is not None else '—', r['name'].replace('|', '\\|'), r['role'], r['pid'] or '—', r['threads'],
-            ','.join(map(str, r['numa'])) or '待核验', r['affinity'] or '未知', r['allowed'] or '未知',
-            ','.join(map(str, r['observed_numa'])) or '未知',
-            r['trace'] or '未提供', r['psr'] or '未提供', STATE_CN[r['state']], r['target'] or '待补证据'))
-    if not data.get('rows'):
-        lines.append('\n当前无可确认的NPU任务映射；采集清单未记录的行为不能视为成功。')
-        lines.append(collection_actions_md(data.get('collection_integrity',{})))
-    if total > DISPLAY_LIMIT:
-        lines.append('\n仅展示前100 / %d条进程亲和记录；完整记录见 report_data.json。' % total)
-    for note in data.get('notes', []):
-        lines.append('\n> '+note)
-    for r in data.get('rows', []):
-        if r['blockers']:
-            lines.append('\n- NPU %d / PID %s：%s' % (r['npu'], r['pid'], '；'.join(r['blockers'])))
-        for key,label in [('mapping_status','映射状态'),('identity_status','进程身份'),('recommendation_status','建议状态'),('allocation_mode','分配模式'),('recommended_cpu','建议CPU'),('recommended_numa','建议NUMA'),('reasons','原因'),('risks','风险'),('expected_improvement','预期改善'),('verification','验证方法'),('rollback','回滚路径')]:
-            value=r.get(key)
-            if value:
-                lines.append('\n- NPU %d / PID %s · %s：%s'%(r['npu'],r['pid'],label,'；'.join(map(str,value)) if isinstance(value,list) else value))
-        memory=r.get('memory_locality',{})
-        if memory:
-            lines.append('\n- NPU %d / PID %s · Mems_allowed许可节点 %s；实际页分布 %s；来源 %s；状态 %s。'%(r['npu'],r['pid'],memory.get('allowed_nodes'),memory.get('actual_pages_by_node'),memory.get('source'),memory.get('status')))
-    if data.get('children'):
-        lines += ['', '#### 已识别的子进程', '', '| 宿主机 PID | AI 父进程 | 建议 CPU | 证据/阻碍 |', '|---:|---:|---|---|']
-        for row in data['children'][:DISPLAY_LIMIT]:
-            lines.append('| %s | %s | %s | %s |' % (row['pid'], row['parent_pid'], row['target'], '；'.join(row['blockers']) or '稳定父子关系、身份及逐线程 cpuset 已核验'))
-    lines += ['', '证据来源：hostbound/npu_smi_*.txt、numactl.txt/lscpu_parse.txt、pid_* 状态/线程/affinity/cpuset；ftrace 运行观测与配置快照可能位于不同采样时点。']
-    return '\n'.join(lines)
-
-
-def binding_md(data):
-    lines = ['### NPU / NUMA 绑核命令（宿主机执行）', '', _OPERATIONS, '']
-    if data.get('commands'):
-        commands = data['commands'].splitlines()
-        lines += ['```bash', '\n'.join(commands[:DISPLAY_LIMIT]), '```']
-        if len(commands) > DISPLAY_LIMIT:
-            lines.append('仅展示前100 / %d条命令；完整命令见 report_data.json 的 metrics.npu_affinity.commands。' % len(commands))
+def binding_html(data, integrity=None, plan=None):
+    from urllib.parse import quote
+    from .report_sections import table
+    plan = plan or data.get('binding_plan', {})
+    tasks = plan.get('tasks', [])
+    parts = ['<h3>AI 进程与线程清单</h3>', '<p>%s</p>' % escape(plan.get('note', '根据已采集的NPU、进程和线程关系整理。'))]
+    if tasks:
+        parts.append(table(['NPU','PID/TGID','TID','父PID','对象','名称','角色','当前CPU','绑定CPU','NUMA','状态 / 原因'], [
+            [row.get('npu_ids'),row['pid'],row['tid'],row.get('ppid'),row['object_type'],row['name'],row['role'],row['current_cpu'],row['target_cpu'] or '无法确定',row['numa'],row['status']+'；'+row['reason']]
+            for row in tasks], True, title='AI 进程与线程清单'))
     else:
-        lines += ['当前没有证据充分且需要变更的绑核项；请参阅第二部分的证据与缺项。']
-    return '\n'.join(lines)
-
-
-def binding_html(data, integrity=None):
-    parts = ['<h3>NPU / NUMA 绑核命令（宿主机执行）</h3><p>%s</p>' % escape(_OPERATIONS)]
-    if data.get('commands'):
-        commands = data['commands'].splitlines()
+        parts.append('<p>未识别到可关联的 AI 对象；不能用任意 Python 进程或示例 PID 代替。</p>')
+    parts += ['<h3>具体绑核命令与脚本</h3><p>%s</p>' % escape(_OPERATIONS)]
+    commands = (plan.get('commands') or data.get('commands') or '').splitlines()
+    if commands:
         parts.append('<div class="code-panel"><button type="button" class="copy-code" onclick="copyBinding(this)">复制绑核命令</button><pre><code>%s</code></pre></div>' % escape('\n'.join(commands[:DISPLAY_LIMIT])))
         if len(commands) > DISPLAY_LIMIT:
-            parts.append('<p>仅展示前100 / %d条命令；完整命令见 report_data.json 的 metrics.npu_affinity.commands。</p>' % len(commands))
+            parts.append('<p>仅展示前100 / %d条命令；完整脚本与JSON保留全部命令。</p>' % len(commands))
+        if plan.get('script'):
+            parts.append('<p><a download="bind_cpu.sh" href="data:text/x-shellscript;charset=utf-8,%s">下载完整绑核脚本 bind_cpu.sh</a>（包含宿主机、PID/TID 身份及当前 CPU 范围核验；全部预检通过后才应用。）</p>' % quote(plan['script'], safe=''))
     else:
-        parts.append('<p>当前没有证据充分且需要变更的绑核项；请参阅第二部分的证据与缺项。</p>')
+        parts.append('<p>没有通过身份/CPU核验的执行项。逐对象的缺项与原因已在上表列出；缺少原始事实时不生成虚构命令。</p>')
     return ''.join(parts)

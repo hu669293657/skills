@@ -137,9 +137,9 @@ def topology_section(m,html=False):
     return ''.join(out) if html else '\n'.join(out)
 
 
-def resource_section(m, html=False, summary=False):
+def resource_section(m, html=False):
     r = m.get('resources', {})
-    out = [heading('2.4 机器资源风险' if summary else '机器资源与压力（CPU / 内存 / 磁盘）', html)]
+    out = [heading('机器资源与压力（CPU / 内存 / 磁盘）', html)]
     if not r.get('available'):
         out.append(paragraph('本包缺少机器资源数据；无法据此排除内存、磁盘或资源配额不足。', html))
         return ''.join(out) if html else '\n'.join(out)
@@ -150,8 +150,6 @@ def resource_section(m, html=False, summary=False):
         out.append(table(['风险候选', '依据', '判断限制'], [[x['title'], x['evidence'], x['note']] for x in risks], html, title='机器资源风险明细'))
     else:
         out.append(paragraph('已有资源数据未触发经验筛选条件；短窗口不能排除其他时段的资源不足。', html))
-    if summary:
-        return ''.join(out) if html else '\n'.join(out)
     cpu, memory = r.get('cpu', {}), r.get('memory', {})
     def gib(kb):
         return fmt(kb / 1048576., ' GiB') if isinstance(kb, (int, float)) else 'N/A'

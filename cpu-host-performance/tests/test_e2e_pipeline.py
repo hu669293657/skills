@@ -71,7 +71,8 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(metrics['topology'], self.data['metrics']['topology'])
             self.assertEqual(metrics['npu_affinity']['commands'], self.data['metrics']['npu_affinity']['commands'])
             self.assertEqual(metrics['collection_integrity']['manifest_status'], 'COLLECTED')
-            self.assertTrue((out / 'report.md').is_file())
+            self.assertFalse((out / 'report.md').exists())
+            self.assertTrue((out / 'bind_cpu.sh').is_file())
 
 
 if __name__ == '__main__':

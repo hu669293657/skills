@@ -183,6 +183,8 @@ def compute_metrics(td):
                     if ev.cpu not in scoped: scoped.append(ev.cpu)
     m['timeseries']=build_timeseries(m,events)
     m['npu_affinity']=analyze_npu_affinity(m)
+    from .binding_plan import build_binding_plan
+    m['binding_plan']=build_binding_plan(m)
     m['topology']=analyze_topology(m)
     from .resource_analysis import analyze_resources
     m['resources']=analyze_resources(m)

@@ -4,7 +4,7 @@ import unittest
 from analyzer.parser import TraceData, Event
 from analyzer.metrics import compute_metrics
 from analyzer.diagnosis import diagnose
-from analyzer.report import render_md, render_html, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN
+from analyzer.report import render_html, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN
 
 
 def sample(n=8):
@@ -47,9 +47,9 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn('</script',safe_json({'name':'</script><script>alert(1)</script>'}))
         self.assertEqual(json.loads(safe_json({'x':'<&\u2028'})),{'x':'<&\u2028'})
 
-    def test_six_explanations_in_section_two_both_formats(self):
-        m=sample();h=html(m);md=render_md(m,diagnose(m))
-        for text,start,end in ((h,"<h2 id='sec-2'>","<h2 id='sec-3'>"),(md,'## 2. 问题证据','## 3. 优化建议')):
+    def test_six_explanations_in_section_two_html(self):
+        m=sample();h=html(m)
+        for text,start,end in ((h,"<h2 id='sec-2'>","<h2 id='sec-3'>"),):
             part=text[text.index(start):text.index(end,text.index(start))]
             for name in ('CPU 平均利用率','单核最高利用率','上下文切换率','调度延迟 P99','硬中断总占比','软中断总占比'):
                 self.assertIn(name,part)
@@ -67,18 +67,51 @@ class ReportTests(unittest.TestCase):
         self.assertIn('CPU Contention Analysis',h)
         self.assertIn('Process / Thread Discovery',h)
     def test_optional_tool_coverage_explicit(self):
-        m=sample();h=html(m);md=render_md(m,diagnose(m))
-        for text in (h,md):
+        m=sample();h=html(m)
+        for text in (h,):
             for name in ('GIL','msprof','function_monitor','NOT_PROVIDED'):
                 self.assertIn(name,text)
     def test_missing_wakeup_source_stays_null(self):
         m=sample()
         self.assertIsNone(m['sched']['wakeup_total'])
-        for text in (html(m),render_md(m,diagnose(m))):
+        for text in (html(m),):
             self.assertNotIn('唤醒总计 <b>0',text)
             self.assertNotIn('唤醒总计 **0',text)
 
 class ReportDisclosureTests(unittest.TestCase):
+    def test_selected_legacy_rankings_are_removed_without_losing_metrics(self):
+        m=sample()
+        m['tasks']['top_migration']=[(1001,'worker',7)]
+        original=list(m['tasks']['top_runtime'])
+        h=html(m)
+        self.assertNotIn('Top 运行时间任务',h)
+        self.assertNotIn('Top 迁移任务',h)
+        self.assertIn('Top CPU Runtime Threads',h)
+        self.assertIn('Top CPU Migration Threads',h)
+        self.assertEqual(m['tasks']['top_runtime'],original)
+        self.assertEqual(m['tasks']['top_migration'][0][2],7)
+
+    def test_resource_risk_details_are_centralized_in_section_five(self):
+        m=sample()
+        marker='RESOURCE_RISK_UNIQUE_EVIDENCE'
+        m['resources'].update(available=True,risks=[{'type':'MEMORY_PRESSURE','title':'内存风险测试',
+            'evidence':marker,'evidence_state':'POTENTIAL','note':'资源候选需验证'}])
+        h=html(m)
+        five=h.split("<h2 id='sec-5'>",1)[1].split("<h2 id='sec-6'>",1)[0]
+        self.assertIn(marker,five)
+        self.assertNotIn(marker,h.replace(five,''))
+        self.assertNotIn('2.4 机器资源风险',h)
+        self.assertEqual(len(m['resources']['risks']),1)
+
+    def test_dictionary_is_one_native_collapsed_help_block(self):
+        h=html(sample())
+        block=re.search(r'<details id="metric-help" class="report-help">(.*?)</details>',h,re.S)
+        self.assertIsNotNone(block)
+        self.assertIn('指标解释（每个指标是什么）',block.group(1))
+        self.assertIn('事件/术语解释',block.group(1))
+        self.assertNotIn('<details',block.group(1))
+        self.assertIn('cpu_util',block.group(1))
+
     def test_full_core_table_collapsed_with_all_records_and_tools(self):
         from analyzer.report_sections import core_table
         h = core_table(sample(256), True)
@@ -141,12 +174,7 @@ class ReportDisclosureTests(unittest.TestCase):
         from analyzer.npu_report import affinity_html
         m=metrics(snapshots(),measured=True)
         h=affinity_html(m['npu_affinity'])
-        self.assertIn('<details class="npu-evidence">',h)
-        self.assertNotRegex(h,r'<details[^>]*class="npu-evidence"[^>]*\bopen\b')
-        first=h.index('<details class="npu-evidence">')
-        self.assertIn('建议CPU / NUMA',h[:first])
-        self.assertIn('0-11',h[:first])
-        self.assertIn('当前 allowed CPU',h[:first])
-        self.assertIn('原因',h[first:])
-        self.assertIn('验证方法',h[first:])
-        self.assertNotIn('此PID全部线程亲和证据',h)
+        self.assertNotIn('npu-evidence',h)
+        self.assertNotIn('建议CPU / NUMA',h)
+        self.assertIn('当前 allowed CPU',h)
+        self.assertNotIn('依据、来源、内存与线程证据',h)

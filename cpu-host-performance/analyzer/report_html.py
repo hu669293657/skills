@@ -77,21 +77,18 @@ ol.pri{margin:8px 0 0 22px}ol.pri li{margin:5px 0}
 .npu-process{margin:12px 0;font-size:14px}.npu-process strong{margin-left:8px;color:#e6edf3}
 .npu-process small{display:block;color:var(--muted);font-size:11px;margin-top:3px}
 .npu-process-entry{margin-top:10px}.npu-process-entry+.npu-process-entry{border-top:1px solid var(--border);padding-top:12px}
-.npu-evidence{margin-top:12px;border-top:1px solid var(--border);padding-top:8px}
-.npu-evidence>summary{cursor:pointer;color:#a9d1ff;font-size:12px;padding:3px 0}
-.npu-evidence[open]>summary{margin-bottom:10px}
 .numa-verdict{font-size:12px;color:#f39a9a;margin:8px 0}.numa-verdict.local-numa{color:#6dd69a}
 .numa-verdict.unknown-numa{color:#efc36a}
 .aff-line{display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;font-size:12px;margin:6px 0}
 .aff-line span{color:var(--muted)}code{font-family:Consolas,monospace;overflow-wrap:anywhere}
-.aff-target{margin-top:12px;border-top:1px solid var(--border);padding-top:10px;display:flex;gap:14px;align-items:center}
-.aff-target span{font-size:12px;color:var(--muted)}.aff-target code{font-size:17px;color:#8cc5ff;font-weight:600}
 pre{white-space:pre;overflow:auto;background:#090e15;border:1px solid var(--border);border-radius:8px;padding:16px;font-size:12px;line-height:1.6;margin:10px 0}
 .code-panel{position:relative;padding-top:30px}.copy-code{position:absolute;right:0;top:0;background:#1c3252;border:1px solid #315379;border-radius:6px;color:#a9d1ff;padding:4px 10px;cursor:pointer}
 .code-panel pre{max-height:440px}
 @media(max-width:700px){.npu-grid{grid-template-columns:1fr}.wrap{padding:0 12px}}
 @media print{body{background:#fff;color:#111}.card,.kpi,.finding,.chart,.status-hero{border-color:#ccc}}
 
+.report-help{margin:12px 0;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--panel)}
+.report-help>summary{cursor:pointer;color:#a9d1ff;font-weight:600}
 .data-details{margin:12px 0;border:1px solid var(--border);border-radius:8px;background:var(--panel)}
 .data-details>summary,.fi-legend>summary{cursor:pointer;padding:10px 12px;color:#a9d1ff;font-weight:600}
 .data-details[open]>summary{border-bottom:1px solid var(--border)}
@@ -210,13 +207,20 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A(_kpi(fmt(soft.get("total_ratio"),"%"), "软中断总占比", (soft.get('max_cpu_ratio') or 0)>=20))
     A("</div>")
     p = diag.get("primary")
-    if p:
+    resource_types = {'CPU_RESOURCE_PRESSURE','MEMORY_PRESSURE','DISK_CAPACITY','IO_PRESSURE','CGROUP_RESOURCE_LIMIT'}
+    resource_types.update(r['type'] for r in m.get('resources', {}).get('risks', []))
+    resource_findings = [f for f in diag['findings'] if f['type'] in resource_types]
+    other_findings = [f for f in diag['findings'] if f['type'] not in resource_types]
+    primary_resource = bool(p and p['type'] in resource_types)
+    if p and not primary_resource:
         A("<div class='card' style='border-left:4px solid %s'>" % sev_color.get(p["severity"], "#6b7280"))
         A("<h3>核心问题：%s</h3>" % esc(p["title"]))
         A("<p><span class='lbl'>置信度：</span><span class='evt'>%s</span> ｜ <span class='lbl'>类别：</span>"
           "<span class='evt'>%s</span></p>" % (esc(p["confidence"]), esc(p["type"])))
         A("<p><span class='lbl'>影响：</span>%s</p>" % esc(p["impact"]))
         A("<p class='note'>完整优化方案与可复制命令见第三部分。</p></div>")
+    elif primary_resource:
+        A("<div class='card'><p>主要发现为机器资源风险；<a href='#sec-5'>风险依据与判断统一见第5节</a>。</p></div>")
     else:
         A("<div class='card'><p>未发现明显的 CPU Host 侧问题。若业务性能仍异常，建议从 NPU/IO/框架侧继续排查。</p></div>")
     if m.get("warnings"):
@@ -227,30 +231,35 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A(explanations_html(m,diag))
     # ---------- 2.2 根因 ----------
     A("<h3>2.2 根因判断与证据链</h3>")
-    if p:
+    if p and not primary_resource:
         A("<div class='card'><p><span class='lbl'>现象</span> → %s</p>" % esc(p["title"]))
         A("<p><span class='lbl'>证据</span> → %s</p>" % esc(
             "；".join("%s=%s（阈值 %s）" % (e["metric"], e["value"], e["threshold"]) for e in p["evidence"])))
         A("<p><span class='lbl'>推断</span> → %s</p>" % esc(p["possible_root_cause"]))
         A("<p><span class='lbl'>候选判断</span> → <span class='evt'>%s</span>（%s）</p></div>" % (
             esc(p["type"]), esc(p.get("explanation", ""))))
+    elif primary_resource:
+        A("<p>主要候选来自机器资源证据；<a href='#sec-5'>详见第5节</a>。</p>")
     else:
         A("<p>未发现需要根因判断的问题。</p>")
     A(affinity_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
-    A(resource_section(m, True, summary=True))
     # ---------- 3. 建议 ----------
     A("<h2>3. 优化建议</h2>")
-    A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
+    A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {}), m.get("binding_plan", {})))
     # ---------- 4. 问题详情 ----------
     A("<h2>4. 问题详情</h2>")
-    if diag["findings"]:
-        for f in diag["findings"][:100]:
+    if other_findings:
+        for f in other_findings[:100]:
             A(_finding_html(f, esc, sev_color, sev_cn))
-    else:
+    elif not resource_findings:
         A("<p>未发现问题。</p>")
+    if resource_findings:
+        A("<p>机器资源风险及其依据已统一移至<a href='#sec-5'>第5节</a>。</p>")
     # ---------- 5. 总体状态 ----------
     A("<h2>5. 机器资源与 CPU 总体状态</h2>")
     A(resource_section(m, True))
+    for finding in resource_findings[:100]:
+        A(_finding_html(finding, esc, sev_color, sev_cn))
     ps = m.get("proc_stat") or {}
     if ps:
         A("<div class='card'><p>/proc/stat 快照（开机以来累计）：user %.1f%%、system %.1f%%、iowait %.1f%%、"
@@ -305,13 +314,6 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A("<h2>10. Task / Thread 分析</h2>")
     A(thread_section(m,True))
     tk = m.get("tasks", {})
-    if tk.get("top_runtime"):
-        A("<table><tr><th>Top 运行时间任务</th><th class='num'>累计运行 ms</th><th>说明</th></tr>")
-        for pid, comm, v in tk["top_runtime"]:
-            from .metrics import _explain_task
-            A("<tr><td>%s</td><td class='num'>%.0f</td><td>%s</td></tr>" % (
-                esc(_pid_disp(comm, pid)), v * 1000, esc(_explain_task(comm or "") or "普通任务")))
-        A("</table>")
     if tk.get("top_cs"):
         A("<table><tr><th>Top 切出次数任务</th><th class='num'>次数</th></tr>")
         for pid, comm, v in tk["top_cs"]:
@@ -322,11 +324,6 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<table><tr><th>Top 被唤醒任务</th><th class='num'>次数</th></tr>")
         for comm, n in tk["top_wakeup"]:
             A("<tr><td>%s</td><td class='num'>%s</td></tr>" % (esc(comm or "?"), format(n, ",")))
-        A("</table>")
-    if tk.get("top_migration"):
-        A("<table><tr><th>Top 迁移任务</th><th class='num'>次数</th></tr>")
-        for pid, comm, n in tk["top_migration"]:
-            A("<tr><td>%s</td><td class='num'>%d</td></tr>" % (esc(_pid_disp(comm, pid)), n))
         A("</table>")
     # ---------- 11. Affinity / NUMA ----------
     A("<h2>11. Affinity / NUMA 分析</h2>")
@@ -361,16 +358,18 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
       "<li>利用率基于连续sched_switch有效区间；无switch的CPU可用cpu_idle区间降级；user/system快照为开机累计。</li>"
       "<li>调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。</li>"
       "<li>频率按显式单位换算；标准trace/sysfs为kHz，报告为MHz。驱动报告值不等同于已验证的PMU实测频率。</li></ul></div>")
+    A('<details id="metric-help" class="report-help"><summary>指标与术语解释（按需展开）</summary>')
     A("<h3>指标解释（每个指标是什么）</h3>")
-    A("<table><tr><th>指标</th><th>解释</th></tr>")
+    A('<table data-inline-help><tr><th>指标</th><th>解释</th></tr>')
     for k, v in METRIC_EXPLANATIONS.items():
         A("<tr><td class='evt'>%s</td><td>%s</td></tr>" % (esc(k), esc(v)))
     A("</table>")
     A("<h3>事件/术语解释</h3>")
-    A("<table><tr><th>术语</th><th>解释</th></tr>")
+    A('<table data-inline-help><tr><th>术语</th><th>解释</th></tr>')
     for k, v in EVENT_EXPLANATIONS.items():
         A("<tr><td class='evt'>%s</td><td>%s</td></tr>" % (esc(k), esc(v)))
     A("</table>")
+    A('</details>')
     # ---------- 图表：时间序列 ----------
     ts = m.get("timeseries") or {}
     util = ts.get("util") or []

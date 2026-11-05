@@ -5,7 +5,7 @@
 - parser            多格式输入解析（tar.gz / zip / 目录 / ftrace 文本 / trace-cmd / Chrome JSON）
 - metrics           指标计算 + 中文指标释义表
 - diagnosis         13 类诊断规则引擎（组合判断 + 置信度）
-- report            Markdown 报告 + inline SVG 图表
+- report            HTML/JSON/绑核脚本输出 + inline SVG 图表
 - report_html       单文件离线 HTML 报告渲染
 - analyze_cpu_trace CLI 入口（run_analysis / main）
 

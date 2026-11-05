@@ -11,7 +11,7 @@ from analyzer.metrics import compute_metrics
 from analyzer.diagnosis import diagnose
 from analyzer.npu_report import affinity_html
 from analyzer.npu_affinity import cpus
-from analyzer.report import render_md, render_html, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN
+from analyzer.report import render_html, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN
 
 
 def snapshots():
@@ -197,18 +197,16 @@ class NpuAffinityTests(unittest.TestCase):
     def test_report_merges_cause_and_moves_advice_before_details(self):
         m = metrics(snapshots(), measured=True)
         diag = diagnose(m)
-        md = render_md(m, diag)
         html = render_html(m, diag, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN)
-        md_sections = re.findall(r'^## (\d+)\. (.+)', md, re.M)
-        self.assertEqual([int(n) for n, _ in md_sections], list(range(1, 14)))
-        self.assertIn('根因', md_sections[1][1])
-        self.assertIn('优化建议', md_sections[2][1])
-        self.assertIn('问题详情', md_sections[3][1])
-        for report in [md, html]:
-            self.assertIn('4115', report)
-            self.assertIn('144-155', report)
-            self.assertIn('taskset -apc 144-155 4115', report)
-            self.assertIn('宿主机', report)
+        sections = re.findall(r"<h2 id='sec-(\d+)'>([^<]+)",html)
+        self.assertEqual([int(n) for n,_ in sections],list(range(1,14)))
+        self.assertIn('根因',sections[1][1])
+        self.assertIn('优化建议',sections[2][1])
+        self.assertIn('问题详情',sections[3][1])
+        self.assertIn('4115',html)
+        self.assertIn('144-155',html)
+        self.assertIn('taskset -pc 144-155 4115',html)
+        self.assertIn('宿主机',html)
 
     def test_npu_mismatch_is_a_configuration_risk_in_diagnosis(self):
         diag = diagnose(metrics(snapshots()))

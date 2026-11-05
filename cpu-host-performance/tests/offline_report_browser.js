@@ -55,6 +55,14 @@ const {chromium} = require(process.argv[2]);
       return;
     }
     assert.equal(await page.locator('details.data-details[open]').count(),0,'Full tables start collapsed');
+    const help = page.locator('#metric-help');
+    assert.equal(await help.getAttribute('open'),null,'Dictionary starts collapsed');
+    assert.equal(await help.locator('table').count(),2,'Both dictionaries share one help block');
+    assert.equal(await help.locator('details').count(),0,'Help needs only one expansion');
+    assert.equal(await help.locator('table').first().isVisible(),false);
+    await help.locator('summary').click();
+    assert.equal(await help.locator('table').first().isVisible(),true);
+    await help.locator('summary').click();
     const cores = page.locator('details.data-details').filter({has: page.locator('summary', {hasText:'全部CPU核心明细'})});
     await cores.locator('summary').click();
     assert.equal(await cores.locator('tbody tr').count(),100);
@@ -99,6 +107,10 @@ const {chromium} = require(process.argv[2]);
     const native = fallback.locator('details.data-details').filter({has: fallback.locator('summary',{hasText:'全部CPU核心明细'})});
     await native.locator('summary').click();
     assert.equal(await native.locator('tbody tr:visible').count(),100,'native disclosure works with JS disabled');
+    const nativeHelp = fallback.locator('#metric-help');
+    assert.equal(await nativeHelp.locator('table').first().isVisible(),false);
+    await nativeHelp.locator('summary').click();
+    assert.equal(await nativeHelp.locator('table').first().isVisible(),true,'dictionary works with JS disabled');
     await noJS.close();
     console.log('all offline browser interactions passed');
   } finally { await browser.close(); }

@@ -13,7 +13,7 @@
   - trace-cmd report 文本
   - Chrome/Perfetto JSON (traceEvents)
 
-输出：<输出目录>/report.md 与 hostbound_report.html（固定名称、单文件离线 HTML、全中文）。
+输出：<输出目录>/hostbound_report.html、report_data.json 与 bind_cpu.sh。
 仅依赖 Python 标准库。
 """
 import argparse
@@ -56,7 +56,7 @@ def run_analysis(input_path, out_dir=None, quiet=False):
     say("[1/4] 解析 trace：%s" % input_path)
     td = load_input(input_path)
     try:
-        sidecars=("frequency_start.json","frequency_end.json","frequency_samples.jsonl","process_start.json","capabilities.tsv","capabilities.json","collection_manifest.json")
+        sidecars=("frequency_start.json","frequency_end.json","frequency_samples.jsonl","process_start.json","resource_start.json","resource_end.json","capabilities.tsv","capabilities.json","collection_manifest.json")
         if not td.events and not any(name.rsplit("/",1)[-1] in sidecars for name in td.snapshot):
             raise ValueError(
                 "未能从输入中解析出任何事件。当前识别格式：%s。"
@@ -73,16 +73,16 @@ def run_analysis(input_path, out_dir=None, quiet=False):
         diag = diagnose(m)
 
         say("[4/4] 生成报告 ...")
-        md_path, html_path = generate_reports(m, diag, out_dir)
+        html_path = generate_reports(m, diag, out_dir)
         say("")
         say("Host 状态：%s" % diag["host_status"])
         p = diag.get("primary")
         say("核心问题：%s" % (p["title"] if p else "未发现明显问题"))
         say("")
         say("报告已生成：")
-        say("  Markdown: %s" % md_path)
         say("  HTML    : %s" % html_path)
         say("  JSON    : %s" % os.path.join(out_dir,"report_data.json"))
+        say("  绑核脚本: %s" % os.path.join(out_dir,"bind_cpu.sh"))
         return diag, out_dir
     finally:
         cleanup_temp(td)
@@ -92,7 +92,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="analyzer",
         description="CPU Host 性能分析：解析 ftrace/trace-cmd/Perfetto JSON 等多格式 trace，"
-                    "输出全中文 Markdown + 离线 HTML 诊断报告（仅标准库）。",
+                    "输出全中文离线 HTML、JSON 与绑核脚本（仅标准库）。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例：\n"
                "  python3 -m analyzer analyze cpu_trace_20240101_120000.tar.gz\n"

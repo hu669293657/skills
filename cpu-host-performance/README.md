@@ -49,20 +49,20 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 支持 tar.gz、zip、目录、ftrace/trace-cmd文本、Chrome/Perfetto JSON。输出：
 
 - `hostbound_report.html`：固定入口，单文件离线打开，无CDN/外部JS。
-- `report.md`：同口径中文报告。
+- `bind_cpu.sh`：带必要身份和CPU预检的具体绑核脚本，Bash/awk，无Python依赖；只生成，不自动执行。
 - `report_data.json`：schema_version=2，包含单位、任务身份、指标、原始快照、等待/运行区间、候选证据和诊断。
 
 也允许分析只有频率/进程sidecar的目录：生成明确缺失调度数据的降级报告。解压累计默认上限512MiB；较大可信采集包请先解压到新的专用目录，再以目录分析。归档路径穿越、链接和设备成员被拒绝。
 
 ## 报告阅读
 
-固定13节：1摘要；2关键指标解释/候选证据链/NPU亲和性；3优化建议；4发现详情；5机器资源与CPU总体状态；6全CPU负载；7调度；8中断；9频率/Idle；10进程线程与竞争；11Affinity/NUMA；12时间窗口；13数据覆盖。
+固定13节：1摘要；2关键指标解释/候选证据链/NPU亲和性；3优化建议；4发现详情；5机器资源与CPU总体状态；6全CPU负载；7调度；8中断；9频率/Idle；10进程线程与竞争；11Affinity/NUMA；12时间窗口；13数据覆盖。资源风险的具体内容统一在第5节，其余章节保留跳转；第10节移除旧版运行时间/迁移Top小表，保留新版排名；第13节词典默认折叠为一个帮助区。
 
 第二节直接解释CPU平均利用率、单核最高利用率、上下文切换率、调度延迟P99、硬中断总占比、软中断总占比。每项有当前值、公式、关注原因、动态解读、诊断限制和可信度。阈值为可审查的经验筛选值，不是官方性能标准。
 
 第6节：默认全部CPU利用率折线；可切柱状图、NUMA、CPU范围和指标显隐。百分比、次数/秒、MHz分成独立指标组。256核全部保留，静默/未采集核心显示N/A。悬停/键盘聚焦显示数值；标记热点、均值、极值。无JS和打印使用全核静态图及表格。
 
-HTML/MD每类明细最多展示100条，并保留总记录数；长表默认收缩，搜索/排序仅作用于当前展示记录，完整数据在report_data.json中。2.3已移除逐PID全线程亲和证据表。第9节将 Frequency 与 Idle Residency 放在一个离线交互图中：共用时间轴，MHz 左轴、% 右轴；可按 CPU、NUMA、Policy 筛选并勾选系列，默认仅少量重点曲线。Idle 由进入/退出事件持续时间计算，`-1` 和无符号退出值不作为状态编号；未知区间显示 N/A。频率按策略域展示来源、接口失败和可靠性。查看 `frequency.status` 与 `event_status`：
+HTML每类明细最多展示100条，并保留总记录数；长表默认收缩，搜索/排序仅作用于当前展示记录，完整数据在report_data.json中。2.3只保留当前亲和摘要，删除“依据、来源、内存与线程证据”和“建议CPU / NUMA”区块。第三节先列NPU主进程、AI父子进程和Python/下发/数据加载等线程，再给具体taskset命令与完整脚本下载。第9节将 Frequency 与 Idle Residency 放在一个离线交互图中：共用时间轴，MHz 左轴、% 右轴；可按 CPU、NUMA、Policy 筛选并勾选系列，默认仅少量重点曲线。Idle 由进入/退出事件持续时间计算，`-1` 和无符号退出值不作为状态编号；未知区间显示 N/A。频率按策略域展示来源、接口失败和可靠性。查看 `frequency.status` 与 `event_status`：
 
 | 状态 | 含义 |
 |---|---|
@@ -79,7 +79,7 @@ HTML/MD每类明细最多展示100条，并保留总记录数；长表默认收�
 
 第10节首先展示 AI 进程、潜在竞争者和系统任务摘要，Top N 之外及无关进程进入可展开列表。TID→TGID→PPID→cgroup→NPU 的关联附 HIGH/MEDIUM/LOW 置信度；名称只作线索。完整线程身份、运行/等待、Affinity、全部竞争重叠窗口和原始快照保留在 JSON。
 
-CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；若共同的完整在线本地亲和池、宿主机身份和全TID cpuset均已核验，则生成共享池taskset命令（不承诺隔离）；每个可执行方案检查稳定宿主机 PID/TID、在线 CPU、逐线程 cpuset、完整 SMT 核心组和分区互斥。已合规进程不重复生成命令。第三部分代码块只提供具体 taskset 命令：整进程 `taskset -apc CPU_LIST PID`，指定线程 `taskset -pc CPU_LIST TID`。`-a` 不包含子进程，已知且证据完整的子 PID 分别列出；已有合规窄掩码予以保留。不附执行框架、Python 或查询命令。直接命令执行前需确认身份与资源配置仍与快照一致；taskset 不迁移现有内存页。
+CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；若共同的完整在线本地亲和池、宿主机身份和全TID cpuset均已核验，则生成共享池taskset命令（不承诺隔离）；每个执行方案校验身份和CPU范围；互斥分区仍需完整负载/SMT证据。已合规线程也给出保持原掩码的命令。缺cpuset时只使用逐线程已观测allowed子集；旧包缺TID出生但有进程身份且掩码一致时使用待现场核验的进程级方案；异构窄掩码保持不变。第三部分代码块只提供具体 taskset 命令：整进程 `taskset -apc CPU_LIST PID`，指定线程 `taskset -pc CPU_LIST TID`。`-a` 不包含子进程，已知且证据完整的子 PID 分别列出；已有合规窄掩码予以保留。HTML命令块不附辅助代码；下载脚本带必要的现场预检，无Python或自动调优操作。直接命令执行前需确认身份与资源配置仍与快照一致；taskset 不迁移现有内存页。
 
 竞争候选必须有可运行等待与同核运行时间重叠，Affinity只作旁证。NPU直接归属与父子关联不同；单纯Python名称、CPU高、共享Affinity、R/R+都不能认定根因。没有同域Device窗口时仅报告Host侧风险。详见 [数据契约、算法与限制](references/analysis_v2.md)。
 
@@ -111,3 +111,5 @@ python3 examples/generate_synthetic.py --output /tmp/cpu-synthetic-demo
 /proc 前后快照并非原子，短命任务可能只有生命周期而无TGID；无clone证据时保留未知，PID复用和命名空间不明时阻止跨身份关联。丢失 trace 只报告已观测下界。Affinity 成对比较按等待排序最多512个活跃关联线程，截断范围会明示；完整线程身份、Affinity 和竞争时间窗口仍保留在 JSON。内存页位置不等于实测远端访存流量，仅拓扑偏离不提升为 P1。
 
 保留官方msprof、GIL、function_monitor、host_analyzer的独立工具边界，参阅 [官方工具适配](references/official_tool_integration.md)、[诊断规则](references/hostbound_diagnosis_rules.md)、[NPU/NUMA规则](references/npu_numa_binding.md)。
+
+HTML直接由metrics/diagnosis渲染，不经过Markdown。取消report.md的生成和写入，避免额外的渲染/编码/文件错误；完整证据保留JSON。复用输出目录时仅清理可识别为本生成器产物的旧report.md。

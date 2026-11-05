@@ -14,7 +14,7 @@ BASH=shutil.which('bash') or ('C:/Program Files/Git/bin/bash.exe' if Path('C:/Pr
 @unittest.skipUnless(BASH,'bash unavailable')
 class CollectionShellTests(unittest.TestCase):
     def run_bash(self,script,*args):
-        return subprocess.run([BASH,str(script)]+list(args),capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=30)
+        return subprocess.run([BASH,str(script)]+list(args),capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=60)  # Git Bash process startup dominates these Windows fixtures
 
     def test_bash_syntax(self):
         r=subprocess.run([BASH,'-n',str(REPO/'scripts/cpu_trace_collect.sh')],capture_output=True)
@@ -80,6 +80,15 @@ mkdir(){
 rmdir(){ printf '%s\\n' "$1" >> "CLEANUP_LOG"; }
 '''.replace('TEMPLATE',template.as_posix()).replace('CLEANUP_LOG',(base/'cleanup.log').as_posix())
                 text=text.replace('set +e',setup+'\nset +e',1)
+                # These tests exercise tracefs lifecycle/capabilities, not host
+                # df/lsblk probes. Keep them independent of Windows drive latency.
+                fake_commands='''
+hb_command(){
+  printf 'synthetic optional tool output\\n' > "$SNAP/$2"
+  hb_entry "$1" COLLECTED "$2" "fixture_command" 0
+}
+'''
+                text=text.replace('# END standalone evidence','# END standalone evidence\n'+fake_commands,1)
                 script=base/'collect.sh';script.write_text(text,encoding='utf-8',newline='\n')
                 args=['--no-hostbound','--duration','1','--output',(base/'out').as_posix()]
                 if minimal:args.append('--minimal')

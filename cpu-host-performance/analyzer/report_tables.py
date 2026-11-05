@@ -43,7 +43,7 @@ def disclose_table(markup, title='完整明细', count=None, force=False):
         prior = re.search(r'data-total-rows="(\d+)"', markup)
         count = int(prior.group(1)) if prior else max(0, len(re.findall(r'<tr\b', markup)) - 1)
     markup = limit_table(markup)
-    if not force and count <= 12:
+    if 'data-inline-help' in markup or (not force and count <= 12):
         return markup
     return ('<details class="data-details"><summary>%s（共 %d 条记录，最多展示100条）</summary>'
             '<div class="table-tools"><label>搜索 <input data-table-search type="search" placeholder="关键词 / CPU / TID"></label>'
