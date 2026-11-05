@@ -69,3 +69,55 @@ def explanations_md(m,diag):
         for key,value in r.items():
             if key not in ('name','当前值'):out.append('**%s：** %s\n'%(key,value))
     return '\n'.join(out)
+
+
+def collection_actions_html(integrity):
+    """Actionable existing-file/collection guidance, driven by verified states."""
+    actions = (integrity or {}).get('actions', [])
+    if not actions:
+        return '<p class="note">采集执行清单未提供；仅据现有文件判断，无法确认缺失项是否曾请求或成功采集。</p>'
+    out = ['<h3>数据补证与处理路径</h3>']
+    for item in actions:
+        out.append('<div class="card collection-action"><p><b>%s · %s</b>：%s</p><p>%s</p>' % (
+            escape(str(item.get('category', '证据'))), escape(str(item.get('status', 'UNKNOWN'))),
+            escape(str(item.get('reason', '未记录原因'))), escape(str(item.get('action', '核验现有原始证据')))))
+        if item.get('recollect') and item.get('command'):
+            command = item['command']
+            if isinstance(command, list):
+                import shlex
+                command = ' '.join(shlex.quote(str(x)) for x in command)
+            out.append('<pre><code>%s</code></pre>' % escape(str(command)))
+        out.append('</div>')
+    return ''.join(out)
+
+
+def collection_integrity_html(integrity):
+    from .report_sections import table
+    data = integrity or {}
+    ftrace, hostbound = data.get('ftrace', {}), data.get('hostbound', {})
+    out = ['<h3>采集完整性与证据清单</h3><p>ftrace：%s；事件解析：%s；丢失统计：%s。HostBound：%s；状态分布：%s。</p>' % (
+        escape(str(ftrace.get('status', 'UNKNOWN'))), escape(str(ftrace.get('parse_success', 'UNKNOWN'))),
+        escape(str(ftrace.get('loss_status', 'UNKNOWN'))), escape(str(hostbound.get('complete', 'UNKNOWN'))),
+        escape(str(hostbound.get('status_counts', {}))))]
+    out.append('<p class="note">%s</p>' % escape(str(hostbound.get('note', '未记录的采集行为不视作成功。'))))
+    out.append(table(['类别','状态','原始文件','存在/空文件','解析成功/记录数','返回码','失败原因'], [
+        [r.get('category'), r.get('status'), r.get('raw_path'), '%s / %s' % (r.get('raw_exists'), r.get('empty')),
+         '%s / %s' % (r.get('parse_success'), r.get('parsed_count')), r.get('returncode'), r.get('failure_reason')]
+        for r in data.get('entries', [])], True, title='全部采集执行记录', force=True))
+    return ''.join(out)
+
+
+def collection_actions_md(integrity):
+    out=['### 数据补证与处理路径', '']
+    actions=(integrity or {}).get('actions',[])
+    if not actions:
+        return '采集执行清单未提供；无法确认缺失项是否曾请求或成功采集。'
+    for item in actions:
+        out.append('- **%s · %s**：%s %s' % (item.get('category','证据'),item.get('status','UNKNOWN'),item.get('reason','未记录原因'),item.get('action','核验现有原始证据')))
+        if item.get('recollect') and item.get('command'):
+            command=item['command']
+            if isinstance(command,list):
+                import shlex
+                command=' '.join(shlex.quote(str(x)) for x in command)
+            out += ['', '```bash',str(command),'```','']
+    return '\n'.join(out)

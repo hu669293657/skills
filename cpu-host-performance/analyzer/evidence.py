@@ -5,7 +5,8 @@ import json
 def read_json(snapshot, name, default=None):
     raw = snapshot.get('hostbound/' + name, snapshot.get(name, ''))
     try:
-        return json.loads(raw)
+        value = json.loads(raw)
+        return default if isinstance(default, (dict, list)) and not isinstance(value, type(default)) else value
     except (ValueError, TypeError):
         return default
 
@@ -39,7 +40,15 @@ def cpulist(text):
 
 def capabilities(snapshot):
     value=read_json(snapshot,'capabilities.json',{}) or {}
-    events=value.setdefault('events',{})
+    events=value.get('events',{})
+    if not isinstance(events,dict):
+        value.setdefault('errors',[]).append('capabilities.events must be an object')
+        events={}
+    invalid=[key for key,row in events.items() if not isinstance(row,dict)]
+    events={key:row for key,row in events.items() if key not in invalid}
+    if invalid:
+        value.setdefault('errors',[]).append('invalid capability event rows: '+', '.join(invalid))
+    value['events']=events
     text=snapshot.get('hostbound/capabilities.tsv','')
     for line in text.splitlines()[1:]:
         cols=line.split('\t')
@@ -56,6 +65,8 @@ def capabilities(snapshot):
 def optional_tools(snapshot):
     manifest=read_json(snapshot,'collection_manifest.json',{}) or {}
     declared=manifest.get('external_tools',{})
+    if not isinstance(declared,dict):
+        declared={}
     tools=[]
     for key,label,patterns in [('gil_tracer','GIL / gil_tracer',('gil',)),('function_monitor','function_monitor',('function_monitor',)),('msprof','msprof',('msprof',)),('host_analyzer','host_analyzer',('host_analyzer',))]:
         paths=[name for name in snapshot if any(p in name.lower() for p in patterns)]

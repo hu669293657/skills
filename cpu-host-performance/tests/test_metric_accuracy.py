@@ -47,3 +47,34 @@ class MetricAccuracyTests(unittest.TestCase):
         m=compute_metrics(td)
         self.assertIsNone(m['irq']['total_ratio'])
         self.assertEqual(m['irq']['unpaired_events'],1)
+
+    def test_unsigned_64_idle_exit_does_not_become_an_idle_state(self):
+        td = TraceData()
+        td.events = [Event(0, 0, 'cpu_idle', fields={'state': '1', 'cpu_id': '0'}),
+                     Event(5, 0, 'cpu_idle', fields={'state': '18446744073709551615', 'cpu_id': '0'}),
+                     Event(10, 0, 'cpu_idle', fields={'state': '1', 'cpu_id': '0'})]
+        m = compute_metrics(td)
+        self.assertEqual(m['per_cpu'][0]['util'], 50)
+        self.assertNotIn('18446744073709551615', m['cstate_dist'])
+        self.assertEqual(m['idle']['per_cpu_ratio'][0], 50)
+
+    def test_missing_idle_transition_keeps_gap_out_of_core_observation(self):
+        td = TraceData()
+        td.events = [Event(0, 0, 'cpu_idle', fields={'state': '1', 'cpu_id': '0'}),
+                     Event(5, 0, 'cpu_idle', fields={'state': '2', 'cpu_id': '0'}),
+                     Event(10, 0, 'cpu_idle', fields={'state': '-1', 'cpu_id': '0'})]
+        m = compute_metrics(td)
+        self.assertEqual(m['per_cpu'][0]['observed_sec'], 5)
+        self.assertIsNone(m['idle']['per_cpu_ratio'][0])
+        self.assertNotIn('1', m['cstate_dist'])
+
+    def test_irq_sources_beyond_top_ten_remain_in_report_data(self):
+        td = TraceData()
+        td.events = [Event(0, 0, 'sched_switch', fields={'prev_pid': 0, 'next_pid': 1}),
+                     Event(10, 0, 'sched_switch', fields={'prev_pid': 1, 'next_pid': 0})]
+        for irq in range(15):
+            td.events.extend([Event(1+irq*.02, 0, 'irq_handler_entry', fields={'irq': irq, 'name': 'device%d' % irq}),
+                              Event(1.01+irq*.02, 0, 'irq_handler_exit', fields={'irq': irq})])
+        m = compute_metrics(td)
+        self.assertEqual(len(m['irq']['top_names']), 10)
+        self.assertEqual(len(m['irq']['all_names']), 15)

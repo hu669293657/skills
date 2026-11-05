@@ -31,16 +31,24 @@ def generate(output):
     processes=[];threads=[]
     def process(pid,ppid,name,cmd,cgroup='/ascend/job',kernel=False):
         processes.append({'tgid':pid,'ppid':ppid,'name':name,'cmdline':cmd,'cgroup':cgroup,'starttime':pid*100,'kernel_thread':kernel,
-                          'cgroup_cpu':[{'path':'/sys/fs/cgroup'+cgroup,'version':2,'cpu.max':'400000 100000' if cgroup=='/ascend/job' else 'max 100000','cpu.stat':'nr_throttled 10\nthrottled_usec 10000'}]})
+                          'namespace_pids':[pid], 'allowed_cpus':list(range(256)), 'mems_allowed_list':'0-7',
+                          'numa_maps': {'available': True, 'node_pages': {str(max(0,min(7,pid-4000))): 100}, 'node_kb': {}},
+                          'cgroup_cpu':[{'path':'/sys/fs/cgroup'+cgroup,'version':2,'cpuset.cpus.effective':'0-255','cpu.max':'400000 100000' if cgroup=='/ascend/job' else 'max 100000','cpu.stat':'nr_throttled 10\nthrottled_usec 10000'}]})
     def thread(tid,tgid,name,cpus):
         threads.append({'tid':tid,'tgid':tgid,'ppid':next(p['ppid'] for p in processes if p['tgid']==tgid),'name':name,
-                        'starttime':tid*100,'last_cpu':cpus[0],'allowed_cpus':cpus,'mems_allowed_list':str(cpus[0]//32),'state':'S', 'utime_ticks':100,'stime_ticks':20})
+                        'starttime':tid*100,'last_cpu':cpus[0],'allowed_cpus':cpus,'mems_allowed_list':'0-7','state':'S',
+                        'namespace_pids':[tid], 'cpuset_cpus_effective':list(range(256)), 'utime_ticks':100,'stime_ticks':20})
     process(3000,1,'python3','python -m vllm.entrypoints.openai.api_server')
     thread(3000,3000,'python3',[2,3])
     process(3100,3000,'EngineCore','vllm EngineCore');thread(3100,3100,'EngineCore',[4,5])
     for n in range(8):
         p=4000+n;t=5000+n;cpu=n*32
         process(p,3100,'python3','vllm worker --rank %d'%n);thread(p,p,'python3',list(range(cpu,cpu+32)));thread(t,p,'acl_thread',list(range(cpu,cpu+16)))
+        # NPU0 demonstrates a compliant process; the rest deliberately have a
+        # broad effective affinity so the guarded proposal path is exercised.
+        if n:
+            threads[-2]['allowed_cpus'] = list(range(256))
+            threads[-1]['allowed_cpus'] = list(range(256))
         process(8000+n,1,'kworker' if n==4 else 'backup-agent','background synthetic CPU task','/system.slice/backup',kernel=n==4)
         thread(9000+n,8000+n,'kworker' if n==4 else 'backup',list(range(cpu,cpu+16)))
         for sec in range(10):
@@ -54,18 +62,25 @@ def generate(output):
             sw(at+.2,cpu,t,9000+n if n==4 else 0)
             ev(at+.01,cpu,'irq_handler_entry',irq=32+n,name='hns3-rxtx');ev(at+.015,cpu,'irq_handler_exit',irq=32+n)
             ev(at+.025,cpu,'softirq_entry',vec=3,action='NET_RX');ev(at+.04,cpu,'softirq_exit',vec=3)
+            if n != 4:
+                if sec == 0: ev(at,cpu,'cpu_idle',cpu_id=cpu,state=-1)
+                ev(at+.2,cpu,'cpu_idle',cpu_id=cpu,state=1)
+                ev(at+1,cpu,'cpu_idle',cpu_id=cpu,state=-1)
         sw(1010,cpu,9000+n if n==4 else 0,0)
         write('hostbound/pid_%d_status.txt'%p,'Name:\tpython3\nTgid:\t%d\nPid:\t%d\nThreads:\t2\nCpus_allowed_list:\t%d-%d\n'%(p,p,cpu,cpu+31))
         write('hostbound/pid_%d_threads.txt'%p,'PID TID PSR %%CPU STAT COMMAND\n%d %d %d 0 S python3\n%d %d %d 0 S acl_thread\n'%(p,p,cpu,p,t,cpu))
         write('hostbound/pid_%d_thread_affinity.txt'%p,"pid %d's current affinity list: %d-%d\npid %d's current affinity list: %d-%d\n"%(p,cpu,cpu+31,t,cpu,cpu+15))
         write('hostbound/pid_%d_starttime.txt'%p,str(p*100))
-        write('hostbound/pid_%d_cpuset_effective.txt'%p,'%d-%d'%(cpu,cpu+31))
+        write('hostbound/pid_%d_cpuset_effective.txt'%p,'0-255')
     for c in range(256):
         if c%32==0:continue
         pid=10000+c;process(pid,1,'service-%d'%c,'synthetic background work','/system.slice/normal');thread(pid,pid,'service-%d'%c,[c])
         fraction=.95 if c==129 else .05+(c%7)*.015
         for sec in range(10):
             sw(1000+sec,c,0,pid);sw(1000+sec+fraction,c,pid,0)
+            if sec == 0: ev(1000,c,'cpu_idle',cpu_id=c,state=-1)
+            ev(1000+sec+fraction,c,'cpu_idle',cpu_id=c,state=1)
+            ev(1001+sec,c,'cpu_idle',cpu_id=c,state=-1)
             if c==129:
                 ev(1000+sec+.1,c,'irq_handler_entry',irq=88,name='nvme0q1');ev(1000+sec+.3,c,'irq_handler_exit',irq=88)
                 ev(1000+sec+.4,c,'softirq_entry',vec=4,action='BLOCK');ev(1000+sec+.65,c,'softirq_exit',vec=4)
@@ -90,8 +105,12 @@ def generate(output):
     write('hostbound/lscpu_parse.txt','# CPU,Core,Socket,Node,Online\n'+'\n'.join('%d,%d,%d,%d,Y'%(c,c,c//128,c//32) for c in range(256)))
     write('hostbound/npu_smi_info.txt','\n'.join('| %d 0 | %d | python3 | 26415 |'%(n,4000+n) for n in range(8)))
     write('hostbound/npu_smi_info_start.txt',(hb/'npu_smi_info.txt').read_text())
+    write('hostbound/npu_smi_map.txt','| NPU ID | Chip ID | Chip Logic ID |\n'+'\n'.join('| %d | 0 | %d |'%(n,n) for n in range(8)))
     write('hostbound/npu_smi_topology.txt','NPU CPU Affinity\n'+'\n'.join('NPU%d X HCCS %d-%d'%(n,n*32,n*32+31) for n in range(8)))
-    write('hostbound/host_context.txt','execution_context=unknown\nboot_id=SYNTHETIC\n')
+    write('hostbound/host_context.txt','execution_context=host\nboot_id=SYNTHETIC-NOT-A-REAL-BOOT-ID\n')
+    js('numa_topology.json', {'schema_version': 1, 'online_cpus': list(range(256)), 'online_nodes': list(range(8)),
+        'distance_node_order': list(range(8)), 'nodes': [{'node': n, 'cpus': list(range(n*32,n*32+32)),
+        'distance': [10 if x==n else 20 for x in range(8)], 'memory_kb': {'MemTotal': 134217728,'MemFree': 67108864}, 'errors': {}} for n in range(8)]})
     js('process_start.json',{'ts':999.9,'processes':processes,'threads':threads})
     finish=json.loads(json.dumps(processes))
     for p in finish:
@@ -99,9 +118,25 @@ def generate(output):
     js('process_end.json',{'ts':1010.1,'processes':finish,'threads':threads})
     js('frequency_start.json',{'ts':999.95,'policies':policies});js('frequency_end.json',{'ts':1010.01,'policies':policies})
     write('hostbound/frequency_samples.jsonl','\n'.join(json.dumps({'ts':1000+i,'policies':[dict(p,scaling_cur_freq=1200000 if p['id']=='policy128' and i<9 else 2600000) for p in policies]}) for i in range(11)))
-    eventnames=['sched/sched_switch','sched/sched_wakeup','sched/sched_wakeup_new','sched/sched_migrate_task','sched/sched_process_fork','sched/sched_process_exec','sched/sched_process_exit','irq/irq_handler_entry','irq/irq_handler_exit','irq/softirq_entry','irq/softirq_exit','power/cpu_frequency']
+    eventnames=['sched/sched_switch','sched/sched_wakeup','sched/sched_wakeup_new','sched/sched_migrate_task','sched/sched_process_fork','sched/sched_process_exec','sched/sched_process_exit','irq/irq_handler_entry','irq/irq_handler_exit','irq/softirq_entry','irq/softirq_exit','power/cpu_frequency','power/cpu_idle']
     js('capabilities.json',{'events':{e:{'exists':True,'writable':True,'requested':True,'enabled':True} for e in eventnames}})
     js('device_windows.json',{'clock':'mono','data_origin':'SYNTHETIC_TEST_DATA','windows':[{'npu_id':4,'start':1000.021,'end':1000.06,'kind':'synthetic_device_gap'}]})
+    # The fixture declares synthetic file generation, never vendor execution.
+    for filename, value in [('interrupts.txt','CPU0\n32: 1 synthetic'),('softirqs.txt','CPU0\nNET_RX: 1'),
+                            ('proc_stat.txt','cpu 1 0 1 8 0 0 0 0'),('schedstat.txt','version 15\ncpu0 0 0 0 0 0 0 100 10 1')]:
+        write(filename,value)
+    manifest = {'schema_version': 1, 'data_origin':'SYNTHETIC_TEST_DATA', 'entries': []}
+    paths = [('cpu_topology','hostbound/numa_topology.json'),('npu_info','hostbound/npu_smi_info.txt'),
+             ('npu_mapping','hostbound/npu_smi_map.txt'),('npu_topology','hostbound/npu_smi_topology.txt'),
+             ('processes','hostbound/process_start.json'),('processes','hostbound/process_end.json'),
+             ('numa_process','hostbound/process_end.json'),('frequency','hostbound/frequency_samples.jsonl'),
+             ('irq','interrupts.txt'),('softirq','softirqs.txt'),('proc_stat','proc_stat.txt'),('schedstat','schedstat.txt'),
+             ('idle','trace.txt'),('trace','trace.txt')]
+    for category,path in paths:
+        manifest['entries'].append({'category':category,'requested':True,'command':['synthetic_fixture_generator'],
+            'command_exists':True,'returncode':0,'raw_path':path,'raw_exists':True,'empty':False,
+            'parse_success':None,'parsed_count':None,'started_at':None,'ended_at':None,'failure_reason':'','status':'COLLECTED'})
+    write('collection_manifest.json',json.dumps(manifest,ensure_ascii=False))
     archive=output/'synthetic_256_capture.tar.gz'
     with tarfile.open(str(archive),'w:gz') as tf:tf.add(str(capture),arcname='cpu_trace')
     run_analysis(str(archive),str(output),quiet=False)

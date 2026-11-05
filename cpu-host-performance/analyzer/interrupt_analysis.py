@@ -68,6 +68,7 @@ def analyze_interrupts(m,events):
                 'total_ratio':100*total/denominator if available and denominator and (complete or total>0) else None,
                 'max_cpu_ratio':max(nonnull) if nonnull else None,'observed_cpu_sec':denominator,
                 'per_cpu_ratio':per,top_key:sorted([(name,n,t) for name,(n,t) in named.items()],key=lambda x:-x[2])[:10],
+                'all_names' if kind=='irq' else 'all_actions':sorted([(name,n,t) for name,(n,t) in named.items()],key=lambda x:-x[2]),
                 'available':available,'complete':complete,'unpaired_events':missed,
                 'ratio_kind':'handler interval union / effective observed CPU time',
                 'note':'配对handler区间占比，不覆盖全部硬中断入口/IPI开销；SoftIRQ区间可能含嵌套IRQ，二者不可简单相加。'}
@@ -78,5 +79,8 @@ def analyze_interrupts(m,events):
                     raises[str(ev.fields.get('action',ev.fields.get('vec','?')))]+=1
             result['raise_counts']=dict(raises)
         m[kind]=result
-    m['idle']={'per_cpu_ratio':{c:pc['idle_ratio'] for c,pc in m['per_cpu'].items()},'cstate_dist':m.get('cstate_dist',{}),'available':'cpu_idle' in m['available']}
+    # C-state residency has its own validated time intervals. Scheduler idle
+    # ratio remains per_cpu.idle_ratio and must not overwrite that evidence.
+    m.setdefault('idle', {'per_cpu_ratio': {}, 'available': False})
+    m['idle']['cstate_dist'] = m.get('cstate_dist', {})
     return m

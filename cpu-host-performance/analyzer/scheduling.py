@@ -168,27 +168,31 @@ def analyze_scheduling(m, events):
                   'wakeups':wake_count[cpu],'wakeup_rate':wake_count[cpu]/obs if obs and bool(m['available'] & {'sched_wakeup','sched_wakeup_new'}) else None,
                   'preempt':runnable_count[cpu],'runnable_switch_out_rate':runnable_count[cpu]/obs if obs else None,
                   'migration_rate':migrations[cpu]/obs if obs and 'sched_migrate_task' in m['available'] else None}
-    # cpu_idle-only archives retain utilization; scheduling rates stay unavailable.
-    idle_state={};cstates=defaultdict(float)
-    for ev in events:
-        if ev.etype!='cpu_idle':continue
-        cpu=int(ev.fields.get('cpu_id',ev.cpu if ev.cpu is not None else -1))
-        state=str(ev.fields.get('state','?'))
-        leaving=state in ('-1','4294967295') or ev.fields.get('idle_exit')
-        if cpu in idle_state:
-            lo,previous=idle_state[cpu]
-            if previous is not None:cstates[previous]+=max(0,ev.ts-lo)
-            if cpu not in cur and cs[cpu]==0 and ev.ts>lo:
-                intervals.append({'cpu':cpu,'start':lo,'end':ev.ts,'tid':0 if previous is not None else -1,'identity':None})
-                observation[cpu]+=ev.ts-lo
-                if previous is None:busy[cpu]+=ev.ts-lo
-        idle_state[cpu]=(ev.ts,None if leaving else state)
-    for cpu,(lo,state) in idle_state.items():
-        if state is not None:cstates[state]+=max(0,end-lo)
-        if cs[cpu]==0 and end>lo:
-            intervals.append({'cpu':cpu,'start':lo,'end':end,'tid':0 if state is not None else -1,'identity':None})
-            observation[cpu]+=end-lo
-            if state is None:busy[cpu]+=end-lo
+    # Reuse the same validated transitions as the Frequency/Idle report, so
+    # missing events and unsigned exit sentinels have one interpretation.
+    from .idle_analysis import analyze_idle
+    m['idle'] = analyze_idle(dict(m, per_cpu=per), events)
+    cstates=defaultdict(float)
+    for row in m['idle']['cpus']:
+        cpu = row['cpu']
+        for state in row['states']:
+            cstates[str(state['state'])] += state['residency_sec']
+        if cs[cpu] != 0:
+            continue
+        if cpu not in per:
+            per[cpu] = {'observation_scope': 'selected', 'cs': 0, 'cs_rate': None,
+                        'wakeups': 0, 'wakeup_rate': None, 'preempt': 0,
+                        'runnable_switch_out_rate': None, 'migration_rate': None,
+                        'observed_sec': 0., 'util': None, 'idle_ratio': None, 'util_known': False}
+        for part in row['intervals']:
+            if part['idle'] is None:
+                continue
+            dt = part['end']-part['start']
+            intervals.append({'cpu': cpu, 'start': part['start'], 'end': part['end'],
+                              'tid': 0 if part['idle'] else -1, 'identity': None})
+            observation[cpu] += dt
+            if not part['idle']:
+                busy[cpu] += dt
     # Recompute idle-only CPU observations after fallback intervals have been added.
     for cpu,pc in per.items():
         if cs[cpu]==0 and observation[cpu]>0:

@@ -90,3 +90,60 @@ class ProcessDiscoveryTests(unittest.TestCase):
     def test_comm_hint_does_not_override_acl_role_with_api_cmdline(self):
         t=next(t for t in fixture([proc(cmd='vllm serve')],[thread(name='acl_thread')],npu='| 0 0 | 100 | python | 1 |')['process_analysis']['tasks'] if t['tid']==101)
         self.assertEqual(t['role'],'ACL_THREAD')
+
+    def test_reused_process_tgid_does_not_attach_old_npu_ownership(self):
+        end={'ts':10,'processes':[proc(starttime=900)],'threads':[thread(starttime=20)]}
+        tasks=fixture([proc()],[thread()],end=end,npu='| 0 0 | 100 | python | 1 |')['process_analysis']['tasks']
+        target=next(t for t in tasks if t['tid']==101)
+        self.assertTrue(target['identity_ambiguous'])
+        self.assertEqual(target['npu_ids'],[])
+
+    def test_namespace_collision_is_not_guessed_by_numeric_pid(self):
+        processes=[proc(100,namespace_pids=[100]),proc(200,cgroup='/other',namespace_pids=[200,100])]
+        analysis=fixture(processes,[thread(),thread(201,200)],npu='| 0 0 | 100 | python | 1 |')['process_analysis']
+        self.assertTrue(any('namespace' in e.lower() for e in analysis['errors']))
+        self.assertEqual(next(t for t in analysis['tasks'] if t['tid']==101)['npu_ids'],[])
+
+    def test_container_numeric_pid_match_is_not_host_npu_ownership(self):
+        td=TraceData();td.events=[Event(0,0,'sched_switch',fields={'prev_pid':0,'next_pid':101}),Event(1,0,'sched_switch',fields={'prev_pid':101,'next_pid':0})]
+        batch=json.dumps({'processes':[proc(100,namespace_pids=[100])],'threads':[thread()]})
+        td.snapshot={'hostbound/process_start.json':batch,'hostbound/process_end.json':batch,
+                     'hostbound/host_context.txt':'execution_context=container\n',
+                     'hostbound/npu_smi_info.txt':'| 0 0 | 100 | python | 1 |'}
+        target=next(t for t in compute_metrics(td)['process_analysis']['tasks'] if t['tid']==101)
+        self.assertEqual(target['npu_ids'],[])
+        self.assertNotEqual(target['confidence'],'HIGH')
+
+    def test_legacy_numeric_npu_match_has_unverified_namespace_confidence(self):
+        target=next(t for t in fixture([proc()],[thread()],npu='| 0 0 | 100 | python | 1 |')['process_analysis']['tasks'] if t['tid']==101)
+        self.assertEqual(target['ownership_status'],'UNVERIFIED')
+        self.assertEqual(target['confidence'],'LOW')
+
+    def test_mindie_and_megatron_need_framework_plus_role_evidence(self):
+        for command in ('mindie_service --worker', 'python megatron/inference/worker.py'):
+            target=next(t for t in fixture([proc(cmd=command)],[thread(name='hccl_worker')])['process_analysis']['tasks'] if t['tid']==101)
+            self.assertEqual(target['category'],'AI_WORKLOAD')
+            self.assertEqual(target['role'],'HCCL_THREAD')
+            self.assertEqual(target['confidence'],'MEDIUM')
+
+    def test_framework_and_role_can_identify_ai_without_device_table(self):
+        target=next(t for t in fixture([proc(cmd='python -m vllm.entrypoints.openai.api_server')],[thread(name='EngineCore')])['process_analysis']['tasks'] if t['tid']==101)
+        self.assertEqual(target['category'],'AI_WORKLOAD')
+        self.assertEqual(target['confidence'],'MEDIUM')
+
+    def test_system_summary_counts_all_snapshotted_tasks(self):
+        analysis=fixture([proc(),proc(200,cmd='sshd',cgroup='/other')],[thread(),thread(201,200,name='sshd')])['process_analysis']
+        self.assertEqual(analysis['system_summary']['total_threads'],len(analysis['tasks']))
+
+    def test_malformed_sidecar_shapes_are_not_identity_evidence(self):
+        td=TraceData();td.events=[Event(0,0,'sched_switch',fields={'prev_pid':0,'next_pid':101}),Event(1,0,'sched_switch',fields={'prev_pid':101,'next_pid':0})]
+        td.snapshot={'hostbound/process_start.json':json.dumps({'processes':123,'threads':[None,{},'oops']})}
+        analysis=compute_metrics(td)['process_analysis']
+        self.assertTrue(analysis['errors'])
+        self.assertIsNone(next(t for t in analysis['tasks'] if t['tid']==101)['tgid'])
+
+    def test_malformed_nested_cpuset_and_namespace_do_not_crash(self):
+        m=fixture([proc(namespace_pids={'bad':1}, cgroup=['not text'])],
+                  [thread(cpuset_cpus_effective=['invalid'],namespace_pids='invalid')],
+                  npu='| 0 0 | 100 | python | 1 |')
+        self.assertTrue(m['process_analysis']['errors'])

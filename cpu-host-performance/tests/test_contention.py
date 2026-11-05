@@ -146,3 +146,10 @@ class ContentionTests(unittest.TestCase):
     def test_device_clock_mismatch_no_correlation_claim(self):
         m=analyze([switch(0,0,9),wake(1,101),switch(2,9,101),switch(3,101,0)],extra={'hostbound/device_windows.json':json.dumps({'clock':'realtime','windows':[{'npu_id':2,'start':1,'end':2}]})})
         self.assertEqual(m['contention']['device_correlation']['matches'],[])
+
+    def test_competitor_category_requires_actual_wait_overlap(self):
+        m=analyze([switch(0,0,9),wake(1,101),switch(2,9,101),switch(3,101,0)])
+        contender=next(t for t in m['thread_metrics'] if t['tid']==9)
+        self.assertEqual(contender['category'],'COMPETITOR')
+        self.assertIn(contender['identity'],m['contention']['ai_competitors'])
+        self.assertEqual(m['process_analysis']['system_summary']['competitor_threads'],1)

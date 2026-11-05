@@ -18,6 +18,19 @@ def read(path):
         return None
 
 
+def read_failure(path):
+    """Explain a failed optional read without flattening permission and exit."""
+    try:
+        Path(path).read_text(errors='replace')
+        return {'status': 'PARSE_FAILED', 'failure_reason': 'malformed_or_changed_file'}
+    except PermissionError as exc:
+        return {'status': 'PERMISSION_DENIED', 'failure_reason': str(exc)}
+    except FileNotFoundError as exc:
+        return {'status': 'EXECUTION_FAILED', 'failure_reason': 'process_exited_or_file_missing: ' + str(exc)}
+    except OSError as exc:
+        return {'status': 'EXECUTION_FAILED', 'failure_reason': str(exc)}
+
+
 def cpus(text):
     out = set()
     for token in (text or '').replace(',', ' ').split():
@@ -55,7 +68,51 @@ def frequency_snapshot(sys_root='/sys'):
             else:
                 row[key] = int(value) if value.isdigit() and key not in ('related_cpus', 'scaling_governor') else value
         policies.append(row)
-    return {'schema_version': 2, 'ts': time.monotonic(), 'policies': policies}
+    return {'schema_version': 2, 'ts': time.monotonic(), 'policies': policies,
+            'capability': 'available' if policies else 'unsupported_or_unreadable'}
+
+
+def topology_snapshot(sys_root='/sys'):
+    """Keep actual sysfs node IDs and distance ordering; never invent a node map."""
+    base = Path(sys_root) / 'devices/system'
+    nodes = []
+    for path in sorted((base / 'node').glob('node[0-9]*')):
+        if not path.name[4:].isdigit():
+            continue
+        row = {'node': int(path.name[4:]), 'cpus': cpus(read(path / 'cpulist')),
+               'distance': [], 'memory_kb': {}, 'errors': {}}
+        for key in ('cpulist', 'distance', 'meminfo', 'numastat', 'vmstat'):
+            value = read(path / key)
+            row[key + '_raw'] = value
+            if value is None:
+                row['errors'][key] = 'missing_or_unreadable'
+        try:
+            row['distance'] = [int(x) for x in (row['distance_raw'] or '').split()]
+        except ValueError:
+            row['errors']['distance'] = 'parse_failed'
+        for key, value in re.findall(r'Node\s+\d+\s+(\w+):\s+(\d+)\s+kB', row['meminfo_raw'] or ''):
+            row['memory_kb'][key] = int(value)
+        nodes.append(row)
+    return {'schema_version': 1, 'ts': time.monotonic(),
+            'online_cpus': cpus(read(base / 'cpu/online')),
+            'online_nodes': cpus(read(base / 'node/online')),
+            'nodes': nodes, 'distance_node_order': cpus(read(base / 'node/online'))}
+
+
+def idle_snapshot(sys_root='/sys'):
+    states = []
+    for path in sorted((Path(sys_root) / 'devices/system/cpu').glob('cpu[0-9]*/cpuidle/state*')):
+        row = {'cpu': int(path.parent.parent.name[3:]), 'state': path.name, 'errors': {}}
+        for key in ('name', 'desc', 'disable', 'latency', 'residency', 'time', 'usage'):
+            value = read(path / key)
+            if value is None:
+                row['errors'][key] = 'missing_or_unreadable'
+            else:
+                row[key] = int(value) if value.isdigit() else value
+        states.append(row)
+    return {'schema_version': 1, 'ts': time.monotonic(), 'states': states,
+            'capability': 'available' if states else 'unsupported_or_unreadable',
+            'time_unit': 'microseconds', 'usage_unit': 'entries'}
 
 
 def write_json(path, obj):
@@ -85,8 +142,12 @@ def cgroup_snapshot(proc_cgroup, sys_root):
         if hierarchy=='0':
             root=base
             version=2
-        elif 'cpu' in controllers.split(','):
-            root=next((x for x in (base/'cpu', base/'cpu,cpuacct', base/'cpuacct,cpu') if x.is_dir()),base/'cpu')
+        elif 'cpu' in controllers.split(',') or 'cpuset' in controllers.split(','):
+            if 'cpu' in controllers.split(','):
+                candidates = (base / 'cpu', base / 'cpu,cpuacct', base / 'cpuacct,cpu')
+            else:
+                candidates = (base / 'cpuset',)
+            root=next((x for x in candidates if x.is_dir()), candidates[0])
             version=1
         else:
             continue
@@ -97,8 +158,10 @@ def cgroup_snapshot(proc_cgroup, sys_root):
         except ValueError:
             continue
         while True:
-            row={'path':str(path), 'version':version}
-            for key in ('cpu.max','cpu.stat','cpu.cfs_quota_us','cpu.cfs_period_us','cpuset.cpus.effective'):
+            row={'path':str(path), 'version':version, 'controllers':controllers or 'unified'}
+            for key in ('cpu.max','cpu.stat','cpu.cfs_quota_us','cpu.cfs_period_us',
+                        'cpuset.cpus.effective','cpuset.mems.effective','cpuset.effective_cpus',
+                        'cpuset.effective_mems','cpuset.cpus','cpuset.mems'):
                 value=read(path/key)
                 if value is not None:
                     row[key]=value
@@ -109,36 +172,111 @@ def cgroup_snapshot(proc_cgroup, sys_root):
     return rows
 
 
-def process_snapshot(proc_root='/proc', sys_root='/sys'):
+def status_fields(text):
+    return dict(re.findall(r'^(\w+):[^\S\n]*(.*?)$', text or '', re.M))
+
+
+def namespace_pids(fields):
+    return [int(x) for x in fields.get('NSpid', '').split() if x.isdigit()]
+
+
+def summarize_numa_maps(text):
+    """Convert pages using each mapping's page size, not the host default."""
+    if text is None:
+        return {'available': False, 'node_pages': {}, 'node_kb': {}, 'unknown_page_size_pages': {}, 'mapping_count': 0}
+    pages, kb, unknown, policies = {}, {}, {}, {}
+    count = 0
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        count += 1
+        policy = fields[1]
+        policies[policy] = policies.get(policy, 0) + 1
+        size = re.search(r'\bkernelpagesize_kB=(\d+)\b', line)
+        for node, value in re.findall(r'\bN(\d+)=(\d+)\b', line):
+            value = int(value); pages[node] = pages.get(node, 0) + value
+            if size:
+                kb[node] = kb.get(node, 0) + value * int(size.group(1))
+            else:
+                unknown[node] = unknown.get(node, 0) + value
+    return {'available': True, 'node_pages': pages, 'node_kb': kb,
+            'unknown_page_size_pages': unknown, 'mapping_count': count, 'policies': policies}
+
+
+def effective_cpuset(rows, kind='cpus'):
+    # Only a readable empty v1 configured cpuset establishes inheritance.
+    # Missing leaf files do not establish that a broader ancestor is effective.
+    applicable = [row for row in rows if row.get('version') == 2 or
+                  'cpuset' in row.get('controllers', '').split(',')]
+    for row in applicable:
+        for key in ('cpuset.%s.effective' % kind, 'cpuset.effective_%s' % kind):
+            if key in row:
+                return cpus(row[key])
+        if row.get('version') == 2:
+            return None
+        configured = row.get('cpuset.%s' % kind)
+        if configured is None:
+            return None
+        if configured:
+            return cpus(configured)
+    return None
+
+
+def process_snapshot(proc_root='/proc', sys_root='/sys', pids=None):
     processes, threads, errors = [], [], []
     cache={}
     begin=time.monotonic()
-    for path in sorted(Path(proc_root).glob('[0-9]*')):
+    paths = ([Path(proc_root) / str(p) for p in pids] if pids is not None else sorted(Path(proc_root).glob('[0-9]*')))
+    for path in paths:
+        if not path.name.isdigit():
+            continue
+        identity_started = time.monotonic()
         stat=parse_stat(read(path/'stat'))
         if not stat:
-            errors.append({'pid':path.name,'reason':'stat_unreadable_or_exited'})
+            errors.append(dict(read_failure(path/'stat'), pid=path.name, reason='stat_unreadable_or_exited'))
             continue
         tgid=int(path.name)
         cg=read(path/'cgroup')
         if cg not in cache:
             cache[cg]=cgroup_snapshot(cg,sys_root)
         cmd=read(path/'cmdline')
-        process=dict(stat,tgid=tgid,name=read(path/'comm'),cmdline=(cmd or '').replace('\x00',' '),
+        fields = status_fields(read(path/'status'))
+        ticks=os.sysconf('SC_CLK_TCK') if hasattr(os,'sysconf') else None
+        process=dict(stat,tgid=tgid,pid=tgid,name=read(path/'comm'),cmdline=(cmd or '').replace('\x00',' '),
                      kernel_thread=bool(stat['flags'] & 0x00200000), cgroup=cg,
-                     cgroup_cpu=cache[cg])
-        processes.append(process)
-        for task in path.glob('task/[0-9]*'):
+                     cgroup_cpu=cache[cg], cpuset_cpus_effective=effective_cpuset(cache[cg]),
+                     cpuset_mems_effective=effective_cpuset(cache[cg], 'mems'),
+                     namespace_pids=namespace_pids(fields), allowed_cpus=cpus(fields.get('Cpus_allowed_list')) if 'Cpus_allowed_list' in fields else None,
+                     cpus_allowed_list=fields.get('Cpus_allowed_list'), mems_allowed_list=fields.get('Mems_allowed_list'),
+                     numa_maps=summarize_numa_maps(read(path/'numa_maps')),
+                     identity_started_at=identity_started,
+                     cpu_time_sec=(stat['utime_ticks']+stat['stime_ticks'])/ticks if ticks else None)
+        process_threads = []
+        for task in sorted(path.glob('task/[0-9]*')):
+            tid_started = time.monotonic()
             tstat=parse_stat(read(task/'stat'))
             status=read(task/'status')
             if not tstat or not status:
-                errors.append({'tid':task.name,'reason':'thread_exited_or_permission'})
+                errors.append(dict(read_failure(task/('stat' if not tstat else 'status')), tid=task.name, reason='thread_exited_or_permission'))
                 continue
-            fields=dict(re.findall(r'^(\w+):\s*(.*?)$',status,re.M))
+            fields=status_fields(status)
             if str(fields.get('Tgid',tgid)) != str(tgid):
                 continue
+            task_cg = read(task / 'cgroup')
+            # Older procfs fixtures/kernels may omit task/cgroup; keep the
+            # fallback visible instead of pretending a thread-specific read.
+            cgroup_source = 'task' if task_cg is not None else 'leader_fallback'
+            task_cg = task_cg if task_cg is not None else cg
+            if task_cg not in cache:
+                cache[task_cg] = cgroup_snapshot(task_cg, sys_root)
             thread=dict(tstat,tid=int(task.name),tgid=tgid,name=fields.get('Name'),
                         allowed_cpus=cpus(fields.get('Cpus_allowed_list')) if 'Cpus_allowed_list' in fields else None,
-                        mems_allowed_list=fields.get('Mems_allowed_list'),cgroup=cg,cpus_allowed_list=fields.get('Cpus_allowed_list'))
+                        mems_allowed_list=fields.get('Mems_allowed_list'),cgroup=task_cg,cpus_allowed_list=fields.get('Cpus_allowed_list'),
+                        cgroup_cpu=cache[task_cg], cgroup_source=cgroup_source,
+                        namespace_pids=namespace_pids(fields), cpuset_cpus_effective=effective_cpuset(cache[task_cg]) if cgroup_source == 'task' else None,
+                        cpuset_mems_effective=effective_cpuset(cache[task_cg], 'mems') if cgroup_source == 'task' else None,
+                        identity_started_at=tid_started)
             ticks=os.sysconf('SC_CLK_TCK') if hasattr(os,'sysconf') else None
             thread['cpu_time_sec']=(tstat['utime_ticks']+tstat['stime_ticks'])/ticks if ticks else None
             # task may exit or PID may be recycled during this read.
@@ -146,7 +284,16 @@ def process_snapshot(proc_root='/proc', sys_root='/sys'):
             if not check or check['starttime']!=tstat['starttime']:
                 errors.append({'tid':task.name,'reason':'identity_changed_during_snapshot'})
                 continue
-            threads.append(thread)
+            thread['identity_verified_at'] = time.monotonic()
+            process_threads.append(thread)
+        # Verify the leader too: keeping threads from a recycled TGID is unsafe.
+        check = parse_stat(read(path / 'stat'))
+        if not check or check['starttime'] != stat['starttime']:
+            errors.append({'pid': path.name, 'reason': 'identity_changed_during_snapshot'})
+            continue
+        process['identity_verified_at'] = time.monotonic()
+        processes.append(process)
+        threads.extend(process_threads)
     return {'schema_version':2,'ts':begin,'end_ts':time.monotonic(),'clock':'monotonic',
             'clock_ticks':os.sysconf('SC_CLK_TCK') if hasattr(os,'sysconf') else None,
             'processes':processes,'threads':threads,'errors':errors}

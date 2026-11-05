@@ -1,0 +1,105 @@
+'use strict';
+const assert = require('node:assert/strict');
+const {chromium} = require(process.argv[2]);
+(async () => {
+  const browser = await chromium.launch({executablePath:process.argv[3],headless:true});
+  try {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror',error => errors.push(error.message));
+    await page.route(/^https?:/, route => { errors.push('unexpected network access'); return route.abort(); });
+    await page.goto(process.argv[4]);
+    if (process.argv[5] === '--e2e') {
+      assert.equal(await page.locator('h2[id^="sec-"]').count(),13,'all thirteen sections survive archive pipeline');
+      assert.equal(await page.locator('details.data-details[open]').count(),0,'complete archive tables initially collapsed');
+      assert.equal(await page.locator('details.npu-evidence[open]').count(),0,'NPU rationale and full evidence start collapsed');
+      assert.ok(await page.locator('details.npu-evidence').count()>0);
+      await page.setViewportSize({width:1440,height:900});
+      const cardGeometry = await page.locator('.npu-grid').first().evaluate(grid => {
+        const card=grid.querySelector('.npu-card');
+        return {cards:grid.children.length,gridWidth:grid.getBoundingClientRect().width,width:card.getBoundingClientRect().width,height:card.getBoundingClientRect().height};
+      });
+      assert.equal(cardGeometry.cards,1);
+      assert.ok(Math.abs(cardGeometry.width-cardGeometry.gridWidth)<2,'single NPU fills NUMA group');
+      assert.ok(cardGeometry.height<450,'conclusion-first NPU card remains compact');
+      const unbroken = await page.locator('td').evaluateAll(cells=>cells.filter(cell=>/^(5001|python3)$/.test(cell.textContent.trim()) && cell.getBoundingClientRect().height>0).every(cell=>{
+        const range=document.createRange();range.selectNodeContents(cell);
+        return getComputedStyle(cell).overflowWrap==='normal' && range.getClientRects().length===1;
+      }));
+      assert.ok(unbroken,'numeric IDs and process names remain unbroken in local table scroll');
+      const chart = JSON.parse(await page.locator('#frequency-idle-data').textContent());
+      assert.equal(chart.window[0],1000); assert.equal(chart.window[1],1010);
+      const frequencies = chart.series.filter(series => series.kind === 'frequency');
+      assert.equal(frequencies.length,8,'eight shared policies, no 256-CPU duplicate series');
+      assert.equal(new Set(frequencies.map(series=>series.policy)).size,8);
+      assert.ok(chart.series.some(series=>series.kind==='idle' && series.points.some(point=>point[1]!==null)),'actual idle residency reaches chart');
+      assert.equal(await page.locator('#fi-plot path[data-series]').count(),4,'few selected defaults');
+      await page.locator('#fi-numa').selectOption('4');
+      assert.ok(await page.locator('#fi-plot path[data-series]').count()<4,'NUMA filter acts on generated archive');
+      await page.locator('#fi-reset').click();
+      const extra = frequencies[2];
+      await page.locator('#fi-policy').selectOption(extra.policy);
+      assert.equal(await page.locator('#fi-plot path[data-series]').count(),0,'unchecked policy stays hidden until chosen explicitly');
+      await page.locator('.fi-legend summary').click();
+      await page.locator('input[data-series-id="'+extra.id+'"]').check();
+      assert.equal(await page.locator('#fi-plot path[data-series]').count(),1,'selecting an off-default archive policy updates plot');
+      await page.locator('#fi-plot').focus(); await page.keyboard.press('ArrowRight');
+      assert.match(await page.locator('#fi-tooltip').innerText(),/MHz/);
+      assert.match(await page.locator('#fi-tooltip').innerText(),/可靠性/);
+      for (const width of [1440,375]) {
+        await page.setViewportSize({width,height:900});
+        assert.ok(await page.evaluate(()=>document.body.scrollWidth<=window.innerWidth+1),'no page-wide horizontal overflow at '+width);
+      }
+      assert.deepEqual(errors,[]);
+      console.log('generated archive offline browser checks passed');
+      return;
+    }
+    assert.equal(await page.locator('details.data-details[open]').count(),0,'Full tables start collapsed');
+    const cores = page.locator('details.data-details').filter({has: page.locator('summary', {hasText:'全部CPU核心明细'})});
+    await cores.locator('summary').click();
+    assert.equal(await cores.locator('tbody tr').count(),256);
+    await cores.locator('[data-table-search]').fill('255');
+    assert.equal(await cores.locator('tbody tr:visible').count(),1);
+    assert.equal(await cores.locator('tbody tr:visible td').first().innerText(),'255');
+    await cores.locator('[data-table-search]').fill('');
+    await cores.locator('[data-table-direction]').click();
+    assert.equal(await cores.locator('tbody tr').first().locator('td').first().innerText(),'255','numeric descending sort');
+    assert.equal(await cores.locator('tbody tr').count(),256,'search and sorting retain all rows');
+    assert.equal(await page.locator('#fi-plot path[data-series]').count(),4,'at most two frequency and two idle selected initially');
+    await page.locator('#fi-numa').selectOption('4');
+    assert.equal(await page.locator('#fi-plot path[data-series]').count(),2,'NUMA scopes both kinds');
+    await page.locator('#fi-cpu').fill('0');
+    assert.equal(await page.locator('#fi-plot path[data-series]').count(),0,'CPU and NUMA filters combine');
+    await page.locator('#fi-reset').click();
+    await page.locator('#fi-policy').selectOption('policy0');
+    assert.equal(await page.locator('#fi-plot path[data-series]').count(),2,'policy filter deduplicates shared CPU frequency');
+    await page.locator('.fi-legend summary').click();
+    await page.locator('input[data-series-id="frequency:policy0"]').uncheck();
+    assert.equal(await page.locator('#fi-plot path[data-series]').count(),1,'legend checkbox changes chart');
+    await page.locator('#fi-reset').click();
+    assert.match(await page.locator('#fi-tooltip').innerText(),/N\/A/,'unknown initial frequency remains missing');
+    assert.match(await page.locator('#fi-tooltip').innerText(),/ftrace:power\/cpu_frequency/);
+    assert.match(await page.locator('#fi-tooltip').innerText(),/可靠性/);
+    assert.match(await page.locator('#fi-tooltip').innerText(),/CPU 0-1 · NUMA 0/);
+    const path = await page.locator('#fi-plot path[data-series="frequency:policy0"]').getAttribute('d');
+    assert.ok(path.startsWith(' M153.70,'),'frequency starts at first known sample, not zero or window start');
+    await page.locator('#fi-plot').focus();
+    await page.keyboard.press('ArrowRight');
+    assert.match(await page.locator('#fi-tooltip').innerText(),/0\.100 s/);
+    await page.locator('#fi-plot svg').scrollIntoViewIfNeeded();
+    const box = await page.locator('#fi-plot svg').boundingBox();
+    await page.locator('#fi-plot svg').hover({position:{x:box.width*(68+857*.5)/1000,y:box.height*.5}});
+    await page.waitForFunction(()=>/时间 [45]\./.test(document.getElementById('fi-tooltip').textContent));
+    assert.match(await page.locator('#fi-tooltip').innerText(),/时间 [45]\./,'pointer hover reads shared time position');
+    assert.match(await page.locator('#fi-tooltip').innerText(),/2000\.00 MHz/);
+    assert.deepEqual(errors,[],'offline scripts execute without errors');
+    await page.close();
+    const noJS = await browser.newContext({javaScriptEnabled:false});
+    const fallback = await noJS.newPage(); await fallback.goto(process.argv[4]);
+    const native = fallback.locator('details.data-details').filter({has: fallback.locator('summary',{hasText:'全部CPU核心明细'})});
+    await native.locator('summary').click();
+    assert.equal(await native.locator('tbody tr:visible').count(),256,'native disclosure works with JS disabled');
+    await noJS.close();
+    console.log('all offline browser interactions passed');
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode=1; });

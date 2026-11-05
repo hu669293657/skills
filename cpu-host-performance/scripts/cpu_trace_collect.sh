@@ -1,14 +1,14 @@
 #!/bin/bash
 # ==========================================================
 # CPU Host 性能采集脚本 (cpu_trace_collect.sh) — 统一采集入口
-# - 仅依赖 bash + ftrace(tracefs/debugfs) + /proc + /sys，无第三方软件
-# - 采集前后保存/恢复 tracing 原配置，不破坏客户现场
-# - 支持: --duration / --output / --buffer-size / --cpu-list / --minimal / --pid / --hostbound
+# - bash 5.1 + ftrace + /proc + /sys；Python 3.7 stdlib 生成完整证据侧车
+# - 仅写独立 trace instance，退出时清理，不修改全局 tracing
+# - 默认 30 秒全量采集；--no-hostbound 显式降级，--minimal 仅精简 trace 事件
 # - --pid <PID[,PID...]>: 追加 HostBound 只读快照 (NUMA/NPU 拓扑、IRQ、目标进程
 #   及线程 affinity 等), 写入采集包 hostbound/ 目录; 不改变 ftrace 事件与恢复行为
 # - 全程进度展示: 阶段导航 + 动态进度条 (百分比/已用时/预计剩余/速率/事件数),
 #   管道或重定向输出时自动降级为纯文本日志 (无 ANSI 颜色与 \r 刷新, 支持 NO_COLOR)
-# - 产物: cpu_trace_YYYYMMDD_HHMMSS.tar.gz (trace + 系统快照, 加 --pid 时含 hostbound/)
+# - 产物: cpu_trace_YYYYMMDD_HHMMSS.tar.gz (trace + 系统快照 + hostbound/ 证据清单)
 # ==========================================================
 set +e  # 单项能力缺失不致命，由脚本自行控制
 
@@ -126,9 +126,9 @@ print_banner(){
 
 usage() {
 cat <<EOF
-CPU Host 性能采集工具 (统一入口: 全量 ftrace + 可选 HostBound 快照)
+CPU Host 性能采集工具 (统一入口: 默认全量 ftrace + HostBound + 进程发现)
 用法: sudo bash $0 [选项]
-  -t, --duration <秒>     采集时长, 默认 3
+  -t, --duration <秒>     采集时长, 默认 30 (default: 30 s)
   -o, --output <目录>     输出目录, 默认当前目录
   -b, --buffer-size <KB>  单核 buffer 大小, 默认 4096
   -c, --cpu-list <列表>   CPU 列表, 如 1,2,3 或 0-47 (默认全量)
@@ -136,6 +136,7 @@ CPU Host 性能采集工具 (统一入口: 全量 ftrace + 可选 HostBound 快�
   -p, --pid <PID[,PID]>   追加 HostBound 只读快照: NUMA/NPU 拓扑、IRQ、目标进程与
                           线程 affinity 等, 写入 hostbound/ 目录 (不改 ftrace 采集)
       --hostbound        自动发现全部 NPU 占卡宿主机 PID 并采集亲和性快照
+      --no-hostbound     显式关闭 NPU/目标进程/全进程发现；仍采集系统能力与频率
       --discover         只读 /proc 全进程/全线程前后快照与生命周期事件
       --frequency-interval <秒>  sysfs 轮询，默认1，最小0.2
       --full             显式全量模式（默认）
@@ -151,8 +152,12 @@ EOF
 }
 
 # ---------- 参数解析 ----------
-DURATION=3; OUTDIR="."; BUFFER_SIZE=4096; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=0; DISCOVER=0; FREQ_INTERVAL=1
+DURATION=30; OUTDIR="."; BUFFER_SIZE=4096; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=1; DISCOVER=1; FREQ_INTERVAL=1
 while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -t|--duration|-o|--output|-b|--buffer-size|-c|--cpu-list|-p|--pid|--frequency-interval)
+      [[ $# -ge 2 && "$2" != --* ]] || { err "missing option value (缺少参数): $1"; exit 1; };;
+  esac
   case "$1" in
     -t|--duration)    DURATION="$2"; shift 2;;
     -o|--output)      OUTDIR="$2"; shift 2;;
@@ -164,6 +169,7 @@ while [[ $# -gt 0 ]]; do
     -m|--minimal)     MINIMAL=1; shift;;
     -p|--pid)         PID_LIST="$2"; HOSTBOUND=1; shift 2;;
     --hostbound)      HOSTBOUND=1; shift;;
+    --no-hostbound)   HOSTBOUND=0; DISCOVER=0; shift;;
     -h|--help)        usage; exit 0;;
     *) err "未知参数: $1"; usage; exit 1;;
   esac
@@ -180,10 +186,95 @@ if [[ "$DURATION" =~ ^[0-9]+$ ]] && [[ "$BUFFER_SIZE" =~ ^[0-9]+$ ]] && (( DURAT
 for _p in ${PID_LIST//,/ }; do
   [[ "$_p" =~ ^[1-9][0-9]*$ ]] || { err "pid 必须为正整数: $_p"; exit 1; }
 done
+# 创建证据目录与只读侧车在 tracefs/root 探测之前；降级结果也必须可审计。
+PHASE_TOTAL=5
+phase_begin "采集只读能力、拓扑与进程前置证据"
+mkdir -p "$OUTDIR/cpu_trace/hostbound" || exit 1
+SNAP="$OUTDIR/cpu_trace"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+HELPER="$SCRIPT_DIR/host_snapshot.py"
+EVIDENCE_HELPER="$SCRIPT_DIR/collection_evidence.py"
+PYTHON=""; command -v python3 >/dev/null 2>&1 && PYTHON=python3
+EVIDENCE_READY=0; SIDECAR_FAILURE_STATUS=COMMAND_NOT_FOUND; SIDECAR_FAILURE_REASON=python3_not_found
+if [[ -n "$PYTHON" ]]; then
+  if [[ ! -r "$HELPER" ]]; then
+    SIDECAR_FAILURE_REASON=host_snapshot.py_not_found
+  elif [[ ! -r "$EVIDENCE_HELPER" ]]; then
+    SIDECAR_FAILURE_REASON=collection_evidence.py_not_found
+  else
+    SIDECAR_FAILURE_STATUS=UNSUPPORTED; SIDECAR_FAILURE_REASON=python3_or_collection_helper_unusable
+    "$PYTHON" "$EVIDENCE_HELPER" --help >/dev/null 2>&1 && EVIDENCE_READY=1
+  fi
+fi
+record_trace_status(){
+  local status="$1" reason="$2"
+  printf '%s: %s\n' "$status" "$reason" > "$SNAP/hostbound/trace_error.txt"
+  if (( EVIDENCE_READY )); then
+    "$PYTHON" "$EVIDENCE_HELPER" trace --root "$SNAP" --status "$status" --reason "$reason"
+  else
+    # Only fixed identifiers, booleans, status enum and UTC date enter JSON.
+    local stamp trace_exists=false trace_empty=null helper_exists=false category requested category_reason
+    stamp=$(date -u +%FT%TZ)
+    [[ -n "$PYTHON" ]] && helper_exists=true
+    [[ -f "$SNAP/trace.txt" ]] && { trace_exists=true; trace_empty=true; [[ -s "$SNAP/trace.txt" ]] && trace_empty=false; }
+    [[ -e "$SNAP/hostbound/helper_error.txt" ]] || printf '%s\n' "$SIDECAR_FAILURE_REASON" > "$SNAP/hostbound/helper_error.txt"
+    printf '{"schema_version":1,"entries":[{"category":"sidecar_helper","requested":true,"command":["python3","collection_evidence.py"],"command_exists":%s,"returncode":null,"raw_path":"hostbound/helper_error.txt","raw_exists":true,"empty":false,"parse_success":false,"parsed_count":0,"started_at":"%s","ended_at":"%s","failure_reason":"%s","status":"%s"}' "$helper_exists" "$stamp" "$stamp" "$SIDECAR_FAILURE_REASON" "$SIDECAR_FAILURE_STATUS" > "$SNAP/hostbound/collection_manifest.json"
+    for category in cpu_topology npu_info npu_mapping npu_topology processes numa_process irq softirq proc_stat schedstat frequency idle; do
+      requested=true; local category_status="$SIDECAR_FAILURE_STATUS"; category_reason="$SIDECAR_FAILURE_REASON"
+      if [[ "$category" == npu_* || "$category" == processes || "$category" == numa_process ]] && (( ! HOSTBOUND )); then requested=false; category_status=NOT_REQUESTED; category_reason=disabled_by_no_hostbound; fi
+      printf ',{"category":"%s","requested":%s,"command":null,"command_exists":null,"returncode":null,"raw_path":null,"raw_exists":false,"empty":null,"parse_success":null,"parsed_count":null,"started_at":"%s","ended_at":"%s","failure_reason":"%s","status":"%s"}' "$category" "$requested" "$stamp" "$stamp" "$category_reason" "$category_status" >> "$SNAP/hostbound/collection_manifest.json"
+    done
+    printf ',{"category":"trace","requested":true,"command":["ftrace","private_instance"],"command_exists":null,"returncode":null,"raw_path":"trace.txt","raw_exists":%s,"empty":%s,"parse_success":null,"parsed_count":null,"started_at":"%s","ended_at":"%s","failure_reason":"see hostbound/trace_error.txt","status":"%s"}]}\n' "$trace_exists" "$trace_empty" "$stamp" "$stamp" "$status" >> "$SNAP/hostbound/collection_manifest.json"
+    cp "$SNAP/hostbound/collection_manifest.json" "$SNAP/collection_manifest.json"
+  fi
+}
+record_sidecar_failure(){
+  local phase="$1" rc="$2"
+  printf 'sidecar_%s_failed returncode=%s\n' "$phase" "$rc" >> "$SNAP/hostbound/helper_error.txt"
+  # Keep the ledger independent of the failed helper and preserve prior rows.
+  "$PYTHON" - "$SNAP" "$phase" "$rc" <<'SIDECAR_FAILURE_LEDGER'
+import datetime, json, os, sys
+from pathlib import Path
+root, phase, rc = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+path = root / 'hostbound/collection_manifest.json'
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or not isinstance(data.get('entries'), list):
+        raise ValueError('invalid manifest')
+except (OSError, ValueError):
+    data = {'schema_version': 1, 'entries': []}
+stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+raw = root / 'hostbound/helper_error.txt'
+data['entries'].append({'category': 'sidecar_'+phase, 'requested': True,
+    'command': [sys.executable, 'collection_evidence.py', phase], 'command_exists': True,
+    'returncode': rc, 'raw_path': 'hostbound/helper_error.txt', 'raw_exists': raw.is_file(),
+    'empty': raw.stat().st_size == 0 if raw.is_file() else None,
+    'parse_success': False, 'parsed_count': None, 'started_at': stamp, 'ended_at': stamp,
+    'failure_reason': 'sidecar_%s_failed returncode=%d; phase snapshots may be incomplete' % (phase, rc),
+    'status': 'EXECUTION_FAILED'})
+for name in ('collection_manifest.json', 'hostbound/collection_manifest.json'):
+    dest = root / name
+    temp = dest.with_suffix('.json.tmp')
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    os.replace(str(temp), str(dest))
+SIDECAR_FAILURE_LEDGER
+}
+if (( EVIDENCE_READY )); then
+  if ! "$PYTHON" "$EVIDENCE_HELPER" start --root "$SNAP" --hostbound "$HOSTBOUND" --discover "$DISCOVER" --pids "$PID_LIST" --duration "$DURATION" --minimal "$MINIMAL"; then
+    printf '%s\n' 'sidecar_start_failed' >> "$SNAP/hostbound/helper_error.txt"
+    SIDECAR_FAILURE_STATUS=EXECUTION_FAILED; SIDECAR_FAILURE_REASON=sidecar_start_failed
+    EVIDENCE_READY=0; record_trace_status NOT_INCLUDED sidecar_start_failed
+  fi
+else
+  printf '%s\n' "$SIDECAR_FAILURE_REASON" > "$SNAP/hostbound/helper_error.txt"
+  record_trace_status NOT_INCLUDED sidecar_helper_unavailable
+  warn "完整侧车不可用，原因已写入 hostbound/helper_error.txt 与 collection_manifest.json"
+fi
+phase_end "前置证据状态已保存: $SNAP/hostbound/collection_manifest.json"
 if [[ "$EUID" -ne 0 ]]; then
-  err "请使用 root 权限运行: sudo bash $0"; exit 1; fi
-# 阶段总数: 快照/采集/导出/打包 (+ 可选 HostBound 快照)
-PHASE_TOTAL=4; (( HOSTBOUND )) && PHASE_TOTAL=5
+  record_trace_status PERMISSION_DENIED root_required_for_private_ftrace_instance
+  err "请使用 root 权限运行: sudo bash $0；只读证据已保留: $SNAP"; exit 1; fi
+# 阶段总数: 前置证据/兼容快照/采集/导出/打包。
 
 # ---------- 定位 tracefs ----------
 TRACE_DIR=""
@@ -191,18 +282,19 @@ for d in /sys/kernel/tracing /sys/kernel/debug/tracing; do
   [[ -d "$d" ]] && TRACE_DIR="$d" && break
 done
 if [[ -z "$TRACE_DIR" ]]; then
-  err "未找到 tracefs/debugfs (需内核开启 CONFIG_FTRACE 并挂载 debugfs)"; exit 1; fi
+  record_trace_status UNSUPPORTED tracefs_not_found
+  err "未找到 tracefs/debugfs；只读证据已保留: $SNAP"; exit 1; fi
 ok "使用 tracing 目录: $TRACE_DIR"
 # per_cpu stats 可读时, 采集进度条额外展示已捕获事件数/速率/丢弃告警
 STATS_OK=0; compgen -G "$TRACE_DIR/per_cpu/cpu*/stats" >/dev/null 2>&1 && STATS_OK=1
-if ! echo test_probe_write >/dev/null 2>&1 && [[ ! -w "$TRACE_DIR/tracing_on" ]]; then
+if [[ ! -w "$TRACE_DIR/tracing_on" ]]; then
+  record_trace_status PERMISSION_DENIED tracefs_not_writable
   err "tracing 目录不可写, 请确认 root 权限"; exit 1; fi
 
 # 独立 instance 避免破坏其他诊断工具的 events、buffer 和原始 trace。
 TRACE_BASE="$TRACE_DIR"
 TRACE_DIR="$TRACE_BASE/instances/cpu_host_$$"
-mkdir "$TRACE_DIR" 2>/dev/null || { err "内核/权限不支持独立 trace instance；未改动全局 tracing。可用 host_snapshot.py 只读补采。"; exit 1; }
-INSTANCE_CREATED=1
+INSTANCE_CREATED=0
 # ---------- CPU 掩码 ----------
 to_mask() {  # "0-3,8" -> 16 进制 mask (每 32 核一组逗号分隔)
   echo "$1" | awk '{ gsub(/\[|\]|[[:space:]]/,""); n=split($0,p,",");
@@ -228,7 +320,7 @@ irq/softirq_entry irq/softirq_exit irq/softirq_raise power/cpu_idle power/cpu_fr
 fi
 
 # ---------- 私有 instance 清理（包括失败/信号/正常退出） ----------
-FREQ_PID=""; SNAP=""; CLEANED=0
+FREQ_PID=""; CLEANED=0
 cleanup() {
   (( CLEANED )) && return 0
   CLEANED=1
@@ -242,17 +334,21 @@ cleanup() {
 abort(){
   progress_clear
   for j in $(jobs -pr 2>/dev/null); do kill "$j" 2>/dev/null; done
+  record_trace_status EXECUTION_FAILED collection_interrupted
   err "采集被中断，清理独立 instance，保留已写入的证据"
   exit 130
 }
 trap cleanup EXIT
 trap abort INT TERM
+mkdir "$TRACE_DIR" 2>/dev/null || {
+  record_trace_status UNSUPPORTED private_trace_instance_unavailable
+  err "内核/权限不支持独立 trace instance；只读证据已保留: $SNAP"; exit 1;
+}
+INSTANCE_CREATED=1
 ENABLED_EVENTS=""
-mkdir -p "$OUTDIR/cpu_trace/hostbound" || exit 1
-SNAP="$OUTDIR/cpu_trace"
 CAPS="$SNAP/hostbound/capabilities.tsv"
 printf 'event\texists\twritable\trequested\tenabled\treason\n' > "$CAPS"
-[[ -n "$CPU_MASK" ]] && { echo "$CPU_MASK" > "$TRACE_DIR/tracing_cpumask" || exit 1; }
+[[ -n "$CPU_MASK" ]] && { echo "$CPU_MASK" > "$TRACE_DIR/tracing_cpumask" || { record_trace_status PERMISSION_DENIED tracing_cpumask_write_failed; exit 1; }; }
 # mono 与 Python time.monotonic 同域；不支持时报告不做跨时钟关联。
 TRACE_CLOCK="unknown"
 if grep -qw mono "$TRACE_DIR/trace_clock"; then
@@ -285,7 +381,7 @@ if (( MINIMAL )); then
   [[ -w "$TRACE_DIR/events/power/cpu_frequency/enable" ]] && writable=1
   printf 'power/cpu_frequency\t%s\t%s\t0\t0\tnot_requested_minimal\n' "$exists" "$writable" >> "$CAPS"
 fi
-[[ -z "$ENABLED_EVENTS" ]] && { err "没有任何可用事件, 无法采集"; cleanup; exit 1; }
+[[ -z "$ENABLED_EVENTS" ]] && { record_trace_status UNSUPPORTED no_trace_events_enabled; err "没有任何可用事件, 无法采集"; cleanup; exit 1; }
 ok "已启用事件:$ENABLED_EVENTS"
 print_banner
 
@@ -296,7 +392,7 @@ exists=0; writable=0
 printf 'sched/sched_stat_wait\t%s\t%s\t0\t0\tnot_requested_overhead_budget\n' "$exists" "$writable" >> "$CAPS"
 # ---------- 系统快照 ----------
 
-snap_file(){ [[ -r "$1" ]] && cp "$1" "$SNAP/$2" 2>/dev/null || echo "N/A (文件不存在)" > "$SNAP/$2"; }
+snap_file(){ [[ -e "$SNAP/$2" ]] && return 0; [[ -r "$1" ]] && cp "$1" "$SNAP/$2" 2>/dev/null || echo "N/A (文件不存在)" > "$SNAP/$2"; }
 phase_begin "采集系统静态快照 (/proc, /sys)"
 : > "$SNAP/hostbound/export_errors.txt"
 snap_file /proc/cpuinfo     cpuinfo.txt
@@ -320,29 +416,13 @@ snap_file /sys/devices/system/cpu/online  cpu_online.txt
   command -v numactl >/dev/null && numactl -H; } > "$SNAP/system_info.txt" 2>/dev/null
 phase_end "静态快照已写入 $SNAP/"
 
-# Python helper 为可选低开销增强；缺失时 ftrace/旧 HostBound 快照继续工作。
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-HELPER="$SCRIPT_DIR/host_snapshot.py"
-PYTHON=""; command -v python3 >/dev/null 2>&1 && PYTHON=python3
-if [[ -n "$PYTHON" && -r "$HELPER" ]]; then
-  "$PYTHON" "$HELPER" frequency --output "$SNAP/hostbound/frequency_start.json"
-  if (( DISCOVER )); then
-    "$PYTHON" "$HELPER" process --output "$SNAP/hostbound/process_start.json"
-    ps -e -o pid,ppid,psr,stat,comm,args > "$SNAP/hostbound/ps_start.txt" 2>&1
-    command -v pstree >/dev/null && pstree -p > "$SNAP/hostbound/pstree_start.txt" 2>&1
-    command -v npu-smi >/dev/null && npu-smi info > "$SNAP/hostbound/npu_smi_info_start.txt" 2>&1
-  fi
-else
-  warn "缺少 python3 或同目录 host_snapshot.py：sysfs 动态频率和 /proc 前后快照降级；ftrace 继续"
-  printf '%s\n' 'python3_or_helper_unavailable' > "$SNAP/hostbound/helper_error.txt"
-fi
-
+# 频率轮询使用与快照相同的只读 helper；能力缺失已写入 manifest。
 # ---------- 执行采集 ----------
 START_TS=$(date +%s); START_TIME=$(date "+%Y-%m-%d %H:%M:%S")
 echo "$START_TIME" > "$SNAP/trace_start_time.txt"
 phase_begin "ftrace 采集 (${DURATION}s · $([[ $MINIMAL -eq 1 ]] && echo 精简 || echo 全量)模式$([[ -n "$PID_LIST" ]] && echo " · HostBound:$PID_LIST"))"
-echo 1 > "$TRACE_DIR/tracing_on" || { err "开启 tracing 失败"; cleanup; exit 1; }
-if [[ -n "$PYTHON" && -r "$HELPER" ]]; then
+echo 1 > "$TRACE_DIR/tracing_on" || { record_trace_status PERMISSION_DENIED tracing_start_failed; err "开启 tracing 失败"; cleanup; exit 1; }
+if (( EVIDENCE_READY )); then
   "$PYTHON" "$HELPER" poll --output "$SNAP/hostbound/frequency_samples.jsonl" --interval "$FREQ_INTERVAL" --stop-file "$SNAP/hostbound/poll.stop" & FREQ_PID=$!
 fi
 echo 'CPU_HOST_WINDOW_START' > "$TRACE_DIR/trace_marker"
@@ -375,9 +455,10 @@ if [[ -n "$FREQ_PID" ]]; then
   touch "$SNAP/hostbound/poll.stop"
   wait "$FREQ_PID" || echo "frequency_poll_failed" >> "$SNAP/hostbound/helper_error.txt"; FREQ_PID=""
 fi
-if [[ -n "$PYTHON" && -r "$HELPER" ]]; then
-  "$PYTHON" "$HELPER" frequency --output "$SNAP/hostbound/frequency_end.json"
-  (( DISCOVER )) && "$PYTHON" "$HELPER" process --output "$SNAP/hostbound/process_end.json"
+if (( EVIDENCE_READY )); then
+  "$PYTHON" "$EVIDENCE_HELPER" end --root "$SNAP" --hostbound "$HOSTBOUND" --discover "$DISCOVER" --pids "$PID_LIST" --duration "$DURATION" --minimal "$MINIMAL"
+  SIDECAR_END_RC=$?
+  (( SIDECAR_END_RC == 0 )) || record_sidecar_failure end "$SIDECAR_END_RC"
 fi
 END_TIME=$(date "+%Y-%m-%d %H:%M:%S"); echo "$END_TIME" > "$SNAP/trace_end_time.txt"
 phase_end "采集结束 ($END_TIME)"
@@ -445,81 +526,11 @@ printf '%s\n' "${CPU_LIST:-$(cat /sys/devices/system/cpu/online)}" > "$SNAP/host
 
 cleanup
 
-# ---------- HostBound 只读快照 (--pid 或 --hostbound 时执行；在宿主机运行) ----------
-# 写入 $SNAP/hostbound/, 随采集包一并打包; 文件名布局与分析器约定一致。
-snapshot_hostbound() {
-  local HB="$SNAP/hostbound"
-  mkdir -p "$HB" 2>/dev/null || { warn "无法创建 hostbound 快照目录, 跳过"; return 0; }
-  _hbcap(){ "$@" > "$HB/$1.txt" 2>&1 || true; }
-  _hbcap nproc
-  _hbcap lscpu
-  _hbcap numactl -H
-  _hbcap taskset -pc 1
-  LC_ALL=C lscpu -p=CPU,CORE,SOCKET,NODE,ONLINE > "$HB/lscpu_parse.txt" 2>&1 || true
-  cat /sys/devices/system/cpu/online > "$HB/cpu_online.txt" 2>/dev/null || true
-  local context="unknown" detected="unknown"
-  if command -v systemd-detect-virt >/dev/null 2>&1; then
-    detected=$(systemd-detect-virt --container 2>/dev/null)
-    [[ "$detected" == "none" ]] && context="host"
-    [[ -n "$detected" && "$detected" != "none" ]] && context="container"
-  fi
-  [[ -e /.dockerenv || -e /run/.containerenv ]] && context="container"
-  { printf 'execution_context=%s\n' "$context"
-    printf 'boot_id=%s\n' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
-    printf 'container_detector=%s\n' "$detected"
-    printf 'collector_pid=%s\n' "$$"
-    printf 'pid_namespace=%s\n' "$(readlink /proc/self/ns/pid 2>/dev/null)"
-    printf 'collected_at=%s\n' "$(date -u +%FT%TZ)"
-  } > "$HB/host_context.txt"
-  [[ "$context" == "host" ]] || warn "宿主机上下文未确认 ($context)，报告将限制生成可执行绑核命令"
-  cp /proc/interrupts "$HB/interrupts_at_end.txt" 2>/dev/null || true
-  cp /proc/softirqs    "$HB/softirqs_at_end.txt" 2>/dev/null || true
-  { cat /proc/cmdline; echo; } > "$HB/kernel_cmdline.txt" 2>/dev/null || true
-  if command -v npu-smi >/dev/null 2>&1; then
-    npu-smi info         > "$HB/npu_smi_info.txt" 2>&1 || true
-    npu-smi info -m      > "$HB/npu_smi_map.txt" 2>&1 || true
-    npu-smi info -t topo > "$HB/npu_smi_topology.txt" 2>&1 || true
-  fi
-  # 数值列严格匹配进程表，避免将 NPU 温度/功耗/状态行误识别成 PID。
-  local discovered
-  discovered=$(awk -F'|' '{a=$1; b=$2; c=$3; d=$4; if ($1 ~ /^[[:space:]]*$/) {a=$2;b=$3;c=$4;d=$5} if (a ~ /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]*$/ && b ~ /^[[:space:]]*[0-9]+[[:space:]]*$/ && d ~ /^[[:space:]]*[0-9]+[[:space:]]*$/) {gsub(/[[:space:]]/,"",b); print b}}' "$HB/npu_smi_info.txt" 2>/dev/null)
-  local p tid cg f stat_text
-  for p in $(printf '%s\n' ${PID_LIST//,/ } $discovered | sort -nu); do
-    [[ "$p" =~ ^[1-9][0-9]*$ ]] || continue
-    [[ -d "/proc/$p" ]] || { warn "进程不存在, 跳过其快照: $p"; continue; }
-    cp "/proc/$p/status" "$HB/pid_${p}_status.txt" 2>/dev/null || true
-    tr '\0' ' ' < "/proc/$p/cmdline" > "$HB/pid_${p}_cmdline.txt" 2>/dev/null || true
-    cp "/proc/$p/cgroup" "$HB/pid_${p}_cgroup.txt" 2>/dev/null || true
-    stat_text=$(cat "/proc/$p/stat" 2>/dev/null); stat_text=${stat_text##*) }
-    { set -- $stat_text; printf '%s\n' "${20}"; } > "$HB/pid_${p}_starttime.txt"
-    cg=$(awk -F: '$1==0 {print $3}' "/proc/$p/cgroup" 2>/dev/null)
-    : > "$HB/pid_${p}_cpuset_effective.txt"
-    if [[ -n "$cg" && -r "/sys/fs/cgroup${cg}/cpuset.cpus.effective" ]]; then
-      cat "/sys/fs/cgroup${cg}/cpuset.cpus.effective" > "$HB/pid_${p}_cpuset_effective.txt"
-    else
-      cg=$(awk -F: '$2 ~ /(^|,)cpuset(,|$)/ {print $3}' "/proc/$p/cgroup" 2>/dev/null)
-      for f in "/sys/fs/cgroup/cpuset${cg}/cpuset.effective_cpus" "/sys/fs/cgroup/cpuset${cg}/cpuset.cpus"; do
-        [[ -n "$cg" ]] || break
-        if [[ -r "$f" ]]; then
-          local value; value=$(cat "$f")
-          if [[ -n "$value" ]]; then printf '%s\n' "$value" > "$HB/pid_${p}_cpuset_effective.txt"; break; fi
-        fi
-      done
-    fi
-    taskset -pc "$p" > "$HB/pid_${p}_affinity.txt" 2>&1 || true
-    ps -T -p "$p" -o pid,tid,psr,pcpu,stat,comm > "$HB/pid_${p}_threads.txt" 2>&1 || true
-    while read -r tid; do taskset -pc "$tid"; done < <(ls "/proc/$p/task") \
-      > "$HB/pid_${p}_thread_affinity.txt" 2>&1 || true
-  done
-  # 清单: 记录本次未运行的外部工具, 避免把缺失数据误当作正常
-  cat > "$HB/collection_manifest.json" <<EOF
-{"collector":"cpu_trace_collect.sh","mode":"unified","duration_sec":$DURATION,"pid":"${PID_LIST}","auto_npu_pids":true,"execution_context":"$context","minimal":$MINIMAL,"ftrace":"cpu_trace_collect.sh","external_tools":{"gil_tracer":"not_run","function_monitor":"not_run","msprof":"not_run","host_analyzer":"not_run"}}
-EOF
-}
-if (( HOSTBOUND )); then
-  phase_begin "HostBound 只读快照 (全部 NPU PID + $PID_LIST)"
-  snapshot_hostbound
-  phase_end "HostBound 快照已写入 hostbound/ 目录"
+# HostBound/进程/NUMA 前后证据已由 collection_evidence.py 收集。
+if (( EVIDENCE_READY )); then
+  "$PYTHON" "$EVIDENCE_HELPER" trace --root "$SNAP" --status COLLECTED
+else
+  record_trace_status COLLECTED helper_unavailable_raw_trace_retained
 fi
 
 # ---------- 元数据与打包 ----------

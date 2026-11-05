@@ -9,8 +9,8 @@ from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, IRQ_NAME_EXPLANATI
 from .diagnosis import THRESHOLDS
 from .report_html import render_html, _cs_limit
 from .npu_report import affinity_md, binding_md
-from .report_explanation import explanations_md, fmt
-from .report_sections import frequency_section, thread_section, core_table, coverage_section
+from .report_explanation import explanations_md, fmt, collection_actions_md
+from .report_sections import frequency_section, thread_section, core_table, coverage_section, topology_section
 
 SEV_COLOR = {"CRITICAL": "#d64545", "WARNING": "#d98f00", "INFO": "#6b7280", "OK": "#2e9e5b"}
 SEV_CN = {"CRITICAL": "严重", "WARNING": "警告", "INFO": "提示", "OK": "健康"}
@@ -174,6 +174,7 @@ def render_md(m, diag):
     A(affinity_md(m.get("npu_affinity", {})))
     A("")
     A("## 3. 优化建议")
+    A(collection_actions_md(m.get('collection_integrity',{})))
     A("")
     A(binding_md(m.get("npu_affinity", {})))
     A("")
@@ -318,6 +319,7 @@ def render_md(m, diag):
         A("")
     A("## 11. Affinity / NUMA 分析")
     A("")
+    A(topology_section(m))
     numa_txt = (m.get("snapshot", {}) or {}).get("numa.txt", "")
     if numa_txt and "node" in numa_txt:
         nnodes = numa_txt.count("== /sys/devices/system/node/node") if "== " in numa_txt else None

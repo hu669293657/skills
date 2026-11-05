@@ -49,22 +49,9 @@ def _parse_cpulist(s):
 
 
 def _numa_node_cpus(snapshot):
-    """从 numa.txt 快照解析 NUMA 节点 -> cpu 集合; 无拓扑时返回 {}。"""
-    txt = (snapshot or {}).get("numa.txt", "") or ""
-    nodes, cur = {}, None
-    for line in txt.splitlines():
-        s = line.strip()
-        mm = re.match(r"^==\s*/sys/devices/system/node/node(\d+)/cpulist\s*==\s*$", s)
-        if mm:
-            cur = int(mm.group(1))
-            nodes[cur] = ""
-            continue
-        if cur is not None:
-            if s.startswith("=="):
-                cur = None
-            elif s and not nodes[cur]:
-                nodes[cur] = s
-    return {n: _parse_cpulist(v) for n, v in nodes.items() if v}
+    """Use the same sysfs/numactl/lscpu CPU->NUMA mapping as NPU evidence."""
+    from .npu_affinity import _topology
+    return _topology(snapshot or {})[1]
 
 
 DIAG_EXPLANATIONS = {
@@ -126,6 +113,8 @@ def diagnose(m):
             "type": dtype, "severity": severity, "confidence": confidence,
             "title": title, "evidence": evidence, "impact": impact + "；此为Host侧风险描述，NPU性能因果尚未证实。",
             "causality": "UNPROVEN", "evidence_class": "observed facts with candidate interpretation",
+            "priority": "P2" if dtype == 'NUMA_RISK' else ("P0" if severity == 'CRITICAL' else ("P1" if severity == 'WARNING' else "P2")),
+            "evidence_state": "POTENTIAL" if dtype == 'NUMA_RISK' else "OBSERVED_CANDIDATE",
             "possible_root_cause": "待验证候选：" + root, "recommendation": rec,
             "explanation": DIAG_EXPLANATIONS.get(dtype, ""),
         })
@@ -250,7 +239,7 @@ def diagnose(m):
                 "关键线程被唤醒后需等待较久才能运行，通信/数据准备节奏被打断，NPU 等待 Host",
                 "CPU 竞争 (饱和/中断/优先级) 导致 runnable 排队",
                 ["结合 CPU 利用率与中断热点结论处理根源负载",
-                 "提高关键线程优先级 (nice/chrt) 或绑核隔离 (isolcpus/cpuset)",
+                 "核验关键线程的有效 cpuset、优先级与同核等待证据；调整前保存逐 TID 配置",
                  "减少 Host 线程数，避免过度并发"])
     # ============ 5. CPU_FREQUENCY_LOW ============
     freq_per = _f(m, ["freq", "per_cpu"], {}) or {}
@@ -290,7 +279,7 @@ def diagnose(m):
                 "跨核迁移导致 L1/L2 缓存与 TLB 失效，可能跨 NUMA 访存，性能抖动",
                 "负载均衡器频繁搬移任务或任务未绑核",
                 ["将关键线程固定核心 (taskset -c / numactl --physcpubind)",
-                 "调小内核调度域负载均衡激进度 (如 sched_migration_cost_ns 调大)"])
+                 "核验迁移是否跨 NUMA，结合线程等待、实际内存页位置和同负载性能比较后再决定局部绑定"])
     # ============ 6b. TASK_AFFINITY_PROBLEM / NUMA_RISK ============
     idle_cpus = [c for c in known_cpus if per_cpu[c]["util"] <= 30.0]
     # 任务绑核风险: 任务仅在极少数核心运行 + 这些核心饱和 + 存在空闲核 (仅报风险)
@@ -335,7 +324,7 @@ def diagnose(m):
                 cross_tasks.append("%s (节点 %s)" % (comm or ("pid%s" % p), "/".join(str(x) for x in ns)))
         mig_rate = (m.get("migration_total", 0) or 0) / dur
         if cross_tasks or mig_rate >= T["migration_rate_high"]:
-            add("NUMA_RISK", "WARNING", "LOW", "NUMA 风险: 存在跨 NUMA 节点访问的可能性",
+            add("NUMA_RISK", "INFO", "LOW", "跨 NUMA 调度观测（潜在局部性风险）",
                 [{"metric": "NUMA 节点拓扑", "value": "%d 个节点: %s" % (
                     len(node_cpus),
                     "; ".join("node%d(%d核)" % (nd, len(nd_cpus)) for nd, nd_cpus in sorted(node_cpus.items()))),
@@ -343,17 +332,17 @@ def diagnose(m):
                  {"metric": "跨节点运行的任务", "value": "; ".join(cross_tasks[:3]) or "-", "threshold": "-"},
                  {"metric": "迁移速率", "value": "%.1f 次/秒" % mig_rate,
                   "threshold": "≥%.0f 次/秒 视为频繁" % T["migration_rate_high"]}],
-                "跨节点访存延迟高, 任务/内存在节点间漂移可能带来性能抖动",
-                "未绑核或内存策略未指定节点, 由调度器/内存分配器自行分布",
-                ["结合 numactl -H 与 numastat 快照确认内存分布 (本报告仅有拓扑与迁移旁证)",
-                 "对关键线程做节点内绑定 (numactl --cpunodebind/--membind), 执行前保存现状",
-                 "此结论为风险提示, 不应直接认定跨 NUMA 为根因"])
+                "CPU 跨节点运行不证明远程访存；缺少内存位置、等待和业务性能关联时只能保留潜在风险",
+                "观测到跨节点运行或迁移，尚未证实内存局部性或性能损失",
+                ["分别核验全 TID affinity/cpuset、numa_maps/numastat 实际内存分布与 Mems_allowed 许可范围",
+                 "仅在实际 NPU CPU 映射、迁移/内存位置/等待和同负载性能证据齐备后，评估进程级灰度调整",
+                 "taskset 不迁移内存页；不能由拓扑单独建议 membind 或升级为 P1 根因"])
     # ============ NPU / 宿主机 PID / NUMA 配置证据 ============
     npu_risks = [r for r in m.get('npu_affinity', {}).get('rows', [])
                  if r['state'] in ('UNCONFINED', 'REMOTE_ALLOWED', 'REMOTE_OBSERVED')]
     if npu_risks:
         window = 'ftrace %.3f~%.3fs；配置/PSR 为采集结束快照' % (m.get('t_start', 0), m.get('t_end', 0))
-        add('NUMA_RISK', 'WARNING', 'MEDIUM', 'NPU 任务 CPU 亲和性存在风险（待性能验证）',
+        add('NUMA_RISK', 'INFO', 'MEDIUM', 'NPU 任务 CPU 亲和性潜在风险（待性能验证）',
             [{'metric': 'NPU/PID 与 CPU 亲和性',
               'value': '；'.join('NPU%d/PID%d: allowed=%s, observed=%s, local=%s' %
                                (r['npu'], r['pid'], r['allowed'], r['observed'], r['affinity']) for r in npu_risks),
@@ -362,7 +351,7 @@ def diagnose(m):
               'time_window': window}],
             '配置可能引入跨节点运行或共享 CPU 争用；未关联 Device 空泡/性能差异，不能确认 HostBound 根因',
             '已识别 NPU 对应进程的调度许可范围未收敛，或观测到非亲和 CPU；内存页位置仍待核验',
-            ['按第二部分的 NPU/PID 对照核验，第三部分给出宿主机预检、逐 TID 备份、互斥分区、taskset 命令及回滚',
+            ['按 NPU/PID/TID 对照核验当前与建议范围；仅证据完整的方案提供宿主机预检、逐 TID 备份和回滚',
              '同负载复采验证吞吐与延迟；taskset 不迁移内存页，不越过有效 cpuset'])
 
     # ============ 7. CPU_IDLE_EXCESSIVE / HOST_NOT_BOTTLENECK ============
@@ -399,6 +388,9 @@ def diagnose(m):
         limited.append("频率状态 %s：%s" % (m["frequency"]["status"], "；".join(m["frequency"]["reasons"])))
     if limited:
         if len(limited) >= 3:
+            actions = m.get('collection_integrity', {}).get('actions', [])
+            rec = ['先查看采集清单的 requested/支持/权限/返回码/解析状态；事件未发生与采集失败分别判断。']
+            rec.extend(a.get('action', '') + (' ' + a.get('command', '') if a.get('command') else '') for a in actions if a.get('action'))
             add("INSUFFICIENT_EVIDENCE", "INFO", "LOW", "本次采集数据维度有限",
                 [{"metric": "缺失维度", "value": "；".join(limited), "threshold": "-"},
                  {"metric": "采集模式", "value": "精简模式(仅 sched_switch)" if
@@ -406,7 +398,7 @@ def diagnose(m):
                   set(av) <= {"sched_switch", "task_newtask"} else "全量", "threshold": "-"}],
                 "相关维度结论缺失，无法覆盖该类问题",
                 "采集脚本精简模式或内核不支持部分事件",
-                ["如需完整分析请用全量模式重新采集: sudo bash cpu_trace_collect.sh --duration 30 (不加 -m)"])
+                rec)
         else:
             m["warnings"].extend(["诊断提示: " + s for s in limited if "诊断提示: " + s not in m["warnings"]])
 

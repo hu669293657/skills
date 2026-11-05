@@ -61,9 +61,9 @@ CPU Host 性能分析报告骨架模板
 
 ### NPU / NUMA 绑核方案（仅在物理机/宿主机执行）
 
-{使用真实宿主机 PID 和 CPU 列表；有偏离/未收敛时提供可复制完整 Bash：宿主机/boot_id/PID starttime/cpuset/online 预检 → 逐 TID 备份 → taskset -acp → 全线程核验 → 回滚入口。}
+{使用真实宿主机 PID 和 CPU 列表；有偏离/未收敛时提供可复制完整 Bash：宿主机/boot_id/逐 TID starttime/线程集合/cpuset/online 预检 → 逐 TID 备份 → taskset -pc → 全线程核验 → 回滚入口。}
 
-{同 PID 多卡、线程证据缺失或 cpuset 不允许时，给出阻塞和最小补采集，不生成猜测命令。taskset 不递归覆盖已有子进程、不迁移内存页。}
+{同 PID 多卡、线程证据缺失或 cpuset 不允许时，给出具体阻塞和 Manifest 驱动的处理，不生成猜测命令。原文存在优先修解析/打包；工具/权限问题说明条件；无活动任务不机械复采。taskset 不递归覆盖已有子进程、不迁移内存页。}
 
 ## 4. 问题详情
 

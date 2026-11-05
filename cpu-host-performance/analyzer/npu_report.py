@@ -2,6 +2,8 @@
 """Shared NPU evidence content for the offline HTML and Markdown reports."""
 from html import escape
 from .npu_affinity import STATE_CN
+from .report_explanation import collection_actions_html, collection_actions_md
+from .report_tables import disclose_table
 
 
 _EXPLANATION = ('allowed CPU 是调度许可范围；PSR 是采样时最近运行核，ftrace 是窗口内观测核。'
@@ -9,16 +11,18 @@ _EXPLANATION = ('allowed CPU 是调度许可范围；PSR 是采样时最近运�
                 '红色表示观测到非亲和 CPU/绑定范围偏离。CPU 绑定与内存页 NUMA 分布分别核验，'
                 '亲和性风险不等于已确认的 HostBound 根因。主进程按占卡显存最高推定，所有占卡 PID 均保留。')
 _OPERATIONS = ('以下方案仅在原物理机/宿主机执行，使用宿主机 PID；需要 sudo、taskset 和 python3。'
-               'taskset -acp 覆盖指定 PID 的现有线程，已有子进程应逐 PID 处理；新线程通常继承创建线程的 affinity，'
+               '脚本逐 TID 使用 taskset -pc，仅处理已核验且已备份的线程；新线程通常继承创建线程的 affinity，'
                '业务可重新设置，执行后需复查。taskset 不迁移既有内存页，不提供跨重启持久化，也不独占 CPU；'
                '同机其他业务/IRQ 的 CPU 争用仍须结合负载核验。有效 cpuset 不允许的区间需先在宿主机调整资源配置，再重新采集。')
 
 
-def affinity_html(data):
+def affinity_html(data, integrity=None):
+    integrity=integrity or data.get("collection_integrity",{})
     rows = data.get('rows', [])
     if not rows:
-        return '<h3>2.3 NPU 任务与 NUMA 亲和性</h3><p class="note">未提供可解析的 NPU 进程/拓扑快照，无法判断当前任务；最小补采集见第三部分。</p>'
+        return '<h3>2.3 NPU 任务与 NUMA 亲和性</h3><p class="note">当前无可确认的NPU任务映射；采集状态与处理路径见下方。</p>'+collection_actions_html(integrity)
     parts = ['<h3>2.3 NPU 任务与 NUMA 亲和性</h3><p class="note">%s</p>' % escape(_EXPLANATION)]
+    if len(rows)>12: parts.append('<details class="npu-details"><summary>全部NPU任务亲和明细（共 %d 条记录，展开）</summary>'%len(rows))
     groups = {}
     for row in rows:
         label = 'NUMA '+','.join(map(str, row['numa'])) if row['numa'] else 'NUMA 待核验'
@@ -35,6 +39,7 @@ def affinity_html(data):
                 parts.append(_process_html(row))
             parts.append('</article>')
         parts.append('</div></section>')
+    if len(rows)>12: parts.append('</details>')
     for note in data.get('notes', []):
         parts.append('<p class="note">%s</p>' % escape(note))
     parts.append('<p class="note">证据：hostbound/npu_smi_info.txt、npu_smi_topology.txt、numactl.txt/lscpu_parse.txt、pid_*_{status,threads,thread_affinity,cpuset_effective}.txt；运行观测与配置快照可能位于不同采样时点。</p>')
@@ -51,12 +56,32 @@ def _process_html(row):
     numa_tone = {'LOCAL_OBSERVED': 'local-numa', 'REMOTE_OBSERVED': 'remote-numa', 'UNKNOWN': 'unknown-numa'}[row['numa_locality']]
     parts.append('<p class="numa-verdict %s">%s</p>' % (numa_tone, locality))
     parts.append('<div class="aff-line"><span>运行观测 NUMA → 亲和 NUMA</span><code>%s → %s</code></div>' % (escape(','.join(map(str, row['observed_numa'])) or '未知'), escape(','.join(map(str, row['numa'])) or '未知')))
-    for key, value in [('NPU 亲和 CPU', row['affinity']), ('当前 allowed CPU（线程并集）', row['allowed']),
-                       ('ftrace 观测 CPU', row['trace']), ('PSR 最近运行 CPU', row['psr'])]:
+    for key, value in [('当前 allowed CPU（线程并集）', row['allowed']), ('ftrace 观测 CPU', row['trace'])]:
         parts.append('<div class="aff-line"><span>%s</span><code>%s</code></div>' % (key, escape(value or '未提供')))
-    parts.append('<div class="aff-target"><span>建议分区 →</span><code>%s</code></div>' % escape(row['target'] or '待补证据'))
+    parts.append('<div class="aff-target"><span>建议CPU / NUMA →</span><code>%s / %s</code></div>' % (escape(str(row.get('recommended_cpu') or row['target'] or '待补证据')),escape(str(row.get('recommended_numa','待核验')))))
+    parts.append('<details class="npu-evidence"><summary>依据、来源、内存与线程证据（展开）</summary>')
+    for key,value in [('NPU 亲和 CPU',row['affinity']),('PSR 最近运行 CPU',row['psr'])]:
+        parts.append('<div class="aff-line"><span>%s</span><code>%s</code></div>'%(key,escape(value or '未提供')))
+    if row.get('sources'):
+        parts.append('<p class="note"><b>证据来源：</b>%s</p>'%escape('；'.join(map(str,row['sources']))))
+    memory=row.get('memory_locality',{})
+    if not isinstance(memory,dict): memory={}
+    if memory:
+        parts.append('<div class="aff-line"><span>内存许可节点（Mems_allowed）</span><code>%s</code></div>'%escape(str(memory.get('allowed_nodes','未知'))))
+        parts.append('<div class="aff-line"><span>实际页分布 / 节点</span><code>%s / %s</code></div>'%(escape(str(memory.get('actual_pages_by_node','未知'))),escape(str(memory.get('actual_nodes','未知')))))
+        parts.append('<p class="note">内存证据：%s；%s。许可节点不代表实际页驻留；跨节点页存在也不等于已证实远端访问性能损失。</p>'%(escape(str(memory.get('source','未提供'))),escape(str(memory.get('status','UNKNOWN')))))
+    for key,label in [('mapping_status','映射状态'),('identity_status','进程身份'),('recommendation_status','建议状态'),('reasons','原因'),('risks','风险'),('expected_improvement','预期改善'),('verification','验证方法'),('rollback','回滚路径')]:
+        value=row.get(key)
+        if value:
+            parts.append('<p class="note"><b>%s：</b>%s</p>'%(label,escape('；'.join(map(str,value)) if isinstance(value,list) else str(value))))
+    thread_rows=row.get('thread_rows',[])
+    if thread_rows:
+        headers=sorted(set(k for entry in thread_rows for k in entry))
+        markup='<table><thead><tr>'+''.join('<th>%s</th>'%escape(str(x)) for x in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>%s</td>'%escape(str(entry.get(x,'N/A'))) for x in headers)+'</tr>' for entry in thread_rows)+'</tbody></table>'
+        parts.append(disclose_table(markup,'此PID全部线程亲和证据',len(thread_rows),True))
     if row['blockers']:
         parts.append('<p class="note">方案待核验：%s</p>' % escape('；'.join(row['blockers'])))
+    parts.append('</details>')
     parts.append('</div>')
     return ''.join(parts)
 
@@ -72,12 +97,20 @@ def affinity_md(data):
             ','.join(map(str, r['observed_numa'])) or '未知',
             r['trace'] or '未提供', r['psr'] or '未提供', STATE_CN[r['state']], r['target'] or '待补证据'))
     if not data.get('rows'):
-        lines.append('\n未提供可解析的 NPU 进程/拓扑快照，无法判断当前任务。')
+        lines.append('\n当前无可确认的NPU任务映射；采集清单未记录的行为不能视为成功。')
+        lines.append(collection_actions_md(data.get('collection_integrity',{})))
     for note in data.get('notes', []):
         lines.append('\n> '+note)
     for r in data.get('rows', []):
         if r['blockers']:
             lines.append('\n- NPU %d / PID %s：%s' % (r['npu'], r['pid'], '；'.join(r['blockers'])))
+        for key,label in [('mapping_status','映射状态'),('identity_status','进程身份'),('recommendation_status','建议状态'),('recommended_cpu','建议CPU'),('recommended_numa','建议NUMA'),('reasons','原因'),('risks','风险'),('expected_improvement','预期改善'),('verification','验证方法'),('rollback','回滚路径')]:
+            value=r.get(key)
+            if value:
+                lines.append('\n- NPU %d / PID %s · %s：%s'%(r['npu'],r['pid'],label,'；'.join(map(str,value)) if isinstance(value,list) else value))
+        memory=r.get('memory_locality',{})
+        if memory:
+            lines.append('\n- NPU %d / PID %s · Mems_allowed许可节点 %s；实际页分布 %s；来源 %s；状态 %s。'%(r['npu'],r['pid'],memory.get('allowed_nodes'),memory.get('actual_pages_by_node'),memory.get('source'),memory.get('status')))
     lines += ['', '证据来源：hostbound/npu_smi_*.txt、numactl.txt/lscpu_parse.txt、pid_* 状态/线程/affinity/cpuset；ftrace 运行观测与配置快照可能位于不同采样时点。']
     return '\n'.join(lines)
 
@@ -90,12 +123,12 @@ def binding_md(data):
     else:
         lines += ['当前没有证据完整且需要变更的可执行绑核项。已有线程若全部落在建议分区内，则无需重复绑定。']
     if not data.get('rows') or any(r['blockers'] for r in data.get('rows', [])):
-        lines += ['', '待核验项不生成猜测命令。一次性最小补采集（在物理机/宿主机运行；PID 从 npu-smi 自动发现）：', '',
-                  '```bash', 'sudo bash scripts/cpu_trace_collect.sh --duration 30 --output /tmp --hostbound', '```']
+        lines += ['', collection_actions_md(data.get('collection_integrity',{}))]
     return '\n'.join(lines)
 
 
-def binding_html(data):
+def binding_html(data, integrity=None):
+    integrity=integrity or data.get("collection_integrity",{})
     parts = ['<h3>NPU / NUMA 绑核方案（宿主机执行）</h3><p>%s</p>' % escape(_OPERATIONS)]
     if data.get('commands'):
         parts += ['<p>先核验、逐 TID 备份，再绑定与验证；脚本输出备份目录及可运行的回滚命令。</p>',
@@ -105,5 +138,5 @@ def binding_html(data):
         parts.append('<p>当前没有证据完整且需要变更的可执行绑核项；已符合建议分区的线程无需重复绑定。</p>')
     blockers = [r for r in data.get('rows', []) if r['blockers']]
     if not data.get('rows') or blockers:
-        parts.append('<p class="note">待核验项不生成猜测命令。最小补采集：在物理机/宿主机运行，自动发现所有占卡 PID。</p><pre><code>sudo bash scripts/cpu_trace_collect.sh --duration 30 --output /tmp --hostbound</code></pre>')
+        parts.append(collection_actions_html(integrity))
     return ''.join(parts)

@@ -18,7 +18,7 @@
 | collection_cpus.txt / trace_clock.txt | 实际请求CPU范围与时钟模式 |
 | device_windows.json（仅导入，可选） | clock=mono且与metadata一致的NPU窗口；本工具不自动采集Device |
 
-保持旧的 `pid_*_status/threads/thread_affinity/starttime/cpuset_effective.txt` 等文件，供已有NPU绑定方案使用。taskset调用仅查询 `-pc`，不会执行 `-cp` 设置。
+保留对旧 `pid_*_status/threads/thread_affinity/starttime/cpuset_effective.txt` 文件的读取兼容。新采集使用完整 process_start/end.json、逐 TID cgroup/cpuset 和目标 *_start/end 原文，详见 [采集契约](collection_contract.md)。采集中的 taskset 只查询，不设置 CPU；报告建议脚本不自动执行。
 
 ## 统一输出
 
@@ -63,7 +63,7 @@ comm可能截断且会重名；角色分类结合关系、NPU、命令行和comm
 - 不用sched_waking作为延迟起点，不把重复成功wakeup当独立延迟样本；退出/边界/不连续/歧义样本不补齐。真实长等待不再被任意30秒老化丢弃。
 - R/R+计为Runnable Switch-out，不等于其他任务因果性抢占。可运行等待期间的迁移会把目标CPU时间窗分段。
 - 候选必须在目标等待片段对应CPU上实际运行。已知Affinity与CPU冲突时不形成强候选；Affinity交集本身只是配置相关性。
-- 候选总重叠时间全量累计，保存最多20个窗口例证；JSON另有完整等待和运行区间。四类Top榜最多20项，但全线程数据保留。
+- 候选总重叠时间和全部窗口保存至 JSON；HTML 默认仅展示 Top N/少量例证，详细数据可展开。全线程数据、完整等待和运行区间仍保留。
 - Affinity成对比较按已观测等待排序最多512个活跃关联线程，输出比较范围/截断标记，避免巨量线程的无界二次方比较；全线程Affinity仍保留。
 - cgroup v2读取cpu.max/cpu.stat，v1读取cfs quota/period与throttled_time（ns转μs）。检查祖先，不把quota问题等价于整机饱和。快照窗口包围trace，增量不能直接归到某个线程或某次请求。
 - Device导入仅在明确mono同域且窗口相交时标记相关。即使相交，也不证明因果；需相同负载、控制变量优化前后复测吞吐/请求尾延迟。

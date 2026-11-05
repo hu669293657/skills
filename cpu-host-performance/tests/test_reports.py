@@ -77,3 +77,74 @@ class ReportTests(unittest.TestCase):
         for text in (html(m),render_md(m,diagnose(m))):
             self.assertNotIn('唤醒总计 <b>0',text)
             self.assertNotIn('唤醒总计 **0',text)
+
+class ReportDisclosureTests(unittest.TestCase):
+    def test_full_core_table_collapsed_with_all_records_and_tools(self):
+        from analyzer.report_sections import core_table
+        h = core_table(sample(256), True)
+        self.assertRegex(h, r'<details\b[^>]*class="[^"]*data-details')
+        self.assertNotRegex(h, r'<details[^>]*\bopen\b')
+        self.assertIn('256', h)
+        self.assertIn('data-table-search', h)
+        self.assertIn('data-table-sort', h)
+        self.assertIn('<td>255</td>', h)
+
+    def test_one_combined_frequency_idle_chart_embeds_policy_unique_data(self):
+        from analyzer.report_sections import frequency_section
+        from analyzer.frequency_analysis import analyze_frequency
+        from analyzer.idle_analysis import analyze_idle
+        m = sample()
+        ev = [Event(1, 7, 'cpu_frequency', fields={'cpu_id': 0, 'state': 1000000}), Event(3, 7, 'cpu_frequency', fields={'cpu_id': 0, 'state': 2000000})]
+        m['frequency'] = analyze_frequency(m, ev)
+        m['idle'] = analyze_idle(m, [Event(2, 0, 'cpu_idle', fields={'state': 1}), Event(4, 0, 'cpu_idle', fields={'state': -1})])
+        h = frequency_section(m, True)
+        self.assertEqual(h.count('id="frequency-idle"'), 1)
+        match = re.search(r'<script type="application/json" id="frequency-idle-data">(.*?)</script>', h, re.S)
+        d = json.loads(match.group(1))
+        self.assertEqual(len([s for s in d['series'] if s['kind'] == 'frequency']), 1)
+        self.assertEqual(d['window'], [0, 10])
+        self.assertTrue(any(v is None for s in d['series'] if s['kind'] == 'idle' for _, v in s['points']))
+        for marker in ('fi-numa', 'fi-cpu', 'fi-policy', 'fi-series', 'fi-tooltip', 'MHz', 'Idle Residency'):
+            self.assertIn(marker, h)
+
+    def test_collection_evidence_controls_supplementation(self):
+        from analyzer.npu_report import affinity_html, binding_html
+        integrity = {'actions': [{'category': 'npu_process', 'status': 'PARSE_FAILED', 'reason': '原始输出存在；格式未识别', 'action': '扩展解析器并用已有原始文件重分析', 'recollect': False, 'command': ''}]}
+        h = affinity_html({'rows': []}, integrity) + binding_html({'rows': []}, integrity)
+        self.assertIn('格式未识别', h)
+        self.assertNotIn('最小补采集', h)
+        self.assertNotIn('--hostbound', h)
+
+    def test_numa_capacity_distance_and_memory_evidence_are_separate(self):
+        from analyzer.report_sections import topology_section
+        m=sample(64)
+        m['topology']={'nodes':[{'node':0,'cpus':list(range(32)),'distance':[10,20],'memory_kb':{'MemTotal':67108864,'MemFree':33554432},'errors':{}},{'node':1,'cpus':list(range(32,64)),'distance':[20,10],'memory_kb':{'MemTotal':67108864,'MemFree':16777216},'errors':{}}],'distance_node_order':[0,1],'cpu_count':64,'node_count':2}
+        h=topology_section(m,True)
+        self.assertIn('64',h)
+        self.assertIn('64.00 GiB',h)
+        self.assertIn('10, 20',h)
+        self.assertIn('<details',h)
+        self.assertIn('实际页',h)
+
+    def test_irq_sources_beyond_top_ten_remain_offline(self):
+        m=sample()
+        names=[('irq_source_%d'%i,i+1,.001*(i+1)) for i in range(15)]
+        m['irq'].update(top_names=names[:10],all_names=names)
+        h=html(m)
+        self.assertIn('irq_source_14',h)
+        self.assertIn('全部硬中断来源',h)
+
+    def test_npu_cards_keep_conclusions_visible_and_fold_full_evidence(self):
+        from tests.test_npu_affinity import metrics, snapshots
+        from analyzer.npu_report import affinity_html
+        m=metrics(snapshots(),measured=True)
+        h=affinity_html(m['npu_affinity'])
+        self.assertIn('<details class="npu-evidence">',h)
+        self.assertNotRegex(h,r'<details[^>]*class="npu-evidence"[^>]*\bopen\b')
+        first=h.index('<details class="npu-evidence">')
+        self.assertIn('建议CPU / NUMA',h[:first])
+        self.assertIn('0-11',h[:first])
+        self.assertIn('当前 allowed CPU',h[:first])
+        self.assertIn('原因',h[first:])
+        self.assertIn('验证方法',h[first:])
+        self.assertIn('此PID全部线程亲和证据',h[first:])

@@ -79,3 +79,55 @@ class FrequencyTests(unittest.TestCase):
         f=data(start={'policies':[{'id':'policy0','cpus':[0],'errors':{'scaling_cur_freq':'permission denied'}}]},cap={'exists':False})['frequency']
         self.assertEqual(f['status'],'UNSUPPORTED')
         self.assertIn('scaling_cur_freq',str(f['domains'][0].get('errors')))
+
+    def test_malformed_static_and_poll_shapes_do_not_crash(self):
+        from analyzer.frequency_analysis import analyze_frequency
+        for raw in ({'policies':123},{'policies':[{}]},[],{'policies':[{'id':'p','cpus':[None]}]}):
+            with self.subTest(raw=raw):
+                m={'snapshot':{'hostbound/frequency_start.json':json.dumps(raw),'hostbound/frequency_samples.jsonl':'[]\n{"policies":123}\n{"policies":[{}]}'},'t_start':0,'t_end':10,'events_ok':True}
+                f=analyze_frequency(m,[])
+                self.assertGreater(f['invalid_sidecar_records'],0)
+                self.assertTrue(f['reasons'])
+
+    def test_sysfs_weighting_is_bounded_to_trace_window(self):
+        from analyzer.frequency_analysis import analyze_frequency
+        m={'snapshot':{'hostbound/frequency_start.json':json.dumps(policy()),'hostbound/frequency_samples.jsonl':'\n'.join(json.dumps({'ts':t,'policies':[{'id':'policy0','scaling_cur_freq':v}]}) for t,v in [(-5,1000000),(2,2000000),(12,3000000)])},'t_start':0,'t_end':10,'events_ok':True}
+        f=analyze_frequency(m,[])
+        p=f['domains'][0]
+        self.assertEqual(p['observed_sec'],10)
+        self.assertEqual(p['average_mhz'],1800)
+        self.assertEqual(p['highest_mhz'],2000)
+        self.assertTrue(all(0<=t<=10 for t,_ in p['series']))
+        self.assertEqual(f['clock_alignment'],'UNVERIFIED')
+
+    def test_aliased_policies_do_not_double_count(self):
+        p=policy();p['policies'].append(dict(p['policies'][0],id='policy-alias'))
+        f=data(start=p,samples=[{'ts':0,'policies':[{'id':'policy0','scaling_cur_freq':2000000},{'id':'policy-alias','scaling_cur_freq':2000000}]},{'ts':10,'policies':[{'id':'policy0','scaling_cur_freq':2000000},{'id':'policy-alias','scaling_cur_freq':2000000}]}])['frequency']
+        self.assertEqual(len(f['domains']),1)
+        self.assertEqual(f['sample_count'],2)
+
+    def test_incompatible_trace_clock_disables_sysfs_overlay(self):
+        from analyzer.frequency_analysis import analyze_frequency
+        m={'snapshot':{'hostbound/frequency_start.json':json.dumps(policy()),'hostbound/frequency_samples.jsonl':json.dumps({'ts':2,'policies':[{'id':'policy0','scaling_cur_freq':2000000}]}),'hostbound/trace_clock.txt':'global'},'t_start':0,'t_end':10,'events_ok':True}
+        f=analyze_frequency(m,[])
+        self.assertEqual(f['clock_alignment'],'INCOMPATIBLE')
+        self.assertIsNone(f['domains'][0]['average_mhz'])
+        self.assertEqual(f['domains'][0]['series'],[])
+
+    def test_entirely_invalid_trace_falls_back_to_healthy_sysfs_per_domain(self):
+        from analyzer.frequency_analysis import analyze_frequency
+        m={'snapshot':{'hostbound/frequency_start.json':json.dumps(policy(cpuinfo_max_freq=3000000)),
+                       'hostbound/trace_clock.txt':'mono',
+                       'hostbound/frequency_samples.jsonl':'\n'.join(json.dumps({'ts':t,'policies':[{'id':'policy0','scaling_cur_freq':v}]}) for t,v in [(0,2000000),(5,2500000),(10,2500000)])},
+           't_start':0,'t_end':10,'events_ok':True}
+        f=analyze_frequency(m,[Event(1,0,'cpu_frequency',fields={'cpu_id':0,'state':'bad'})])
+        self.assertEqual(f['status'],'SYSFS_AVAILABLE')
+        self.assertEqual(f['event_status'],'COLLECTION_FAILED')
+        self.assertEqual(f['invalid_trace_samples'],1)
+        p=f['domains'][0]
+        self.assertEqual(p['source'],'sysfs')
+        self.assertEqual(p['clock_alignment'],'MONOTONIC')
+        self.assertEqual(p['reliability'],'PARTIAL')
+        self.assertEqual(p['sample_count'],3)
+        self.assertEqual(p['average_mhz'],2250)
+        self.assertEqual(p['raw_trace_errors'][0]['state'],'bad')

@@ -5,10 +5,13 @@ Candidates describe correlation; they never establish NPU performance causality.
 from bisect import bisect_right
 from collections import defaultdict
 from .evidence import read_json
+from .process_evidence import process_batch
 
 
 def _stats(text):
     out={}
+    if not isinstance(text,str):
+        return out
     for line in (text or '').splitlines():
         parts=line.split()
         if len(parts)==2:
@@ -18,12 +21,14 @@ def _stats(text):
 
 
 def cgroup_deltas(snapshot):
-    batches=[read_json(snapshot,'process_'+stage+'.json',{}) or {} for stage in ('start','end')]
+    batches=[process_batch(snapshot,stage) for stage in ('start','end')]
     maps=[]
     for batch in batches:
         rows={}
         for p in batch.get('processes',[]):
-            for row in p.get('cgroup_cpu',[]):
+            for row in p.get('cgroup_cpu',[]) if isinstance(p.get('cgroup_cpu',[]),list) else []:
+                if not isinstance(row,dict) or 'path' not in row:
+                    continue
                 path=row['path']
                 item=rows.setdefault(path,dict(row,tgids=[]))
                 if p['tgid'] not in item['tgids']: item['tgids'].append(p['tgid'])
@@ -42,7 +47,7 @@ def cgroup_deltas(snapshot):
             else:
                 quota=float(row['cpu.cfs_quota_us']);period=float(row['cpu.cfs_period_us'])
                 if quota<0: quota=None
-        except (KeyError,ValueError): pass
+        except (KeyError,ValueError,TypeError,AttributeError): pass
         throttled=delta('throttled_usec')
         if row.get('version')==1:
             nanos=delta('throttled_time');throttled=nanos/1000 if nanos is not None else None
@@ -94,10 +99,28 @@ def analyze_contention(m):
                                               'causality':'UNPROVEN','evidence':['runnable wait + same CPU running interval',
                                                 'affinity snapshot corroborates scope' if allowed is not None else 'affinity unavailable; target_cpu is scheduling evidence']})
                 out['overlap_sec']+=dt;out['cpus'].add(cpu)
-                if len(out['windows'])<20:
-                    out['windows'].append({'start':max(lo,s['start']),'end':min(hi,s['end']),'cpu':cpu,'wait_kind':w['kind']})
+                out['windows'].append({'start':max(lo,s['start']),'end':min(hi,s['end']),'cpu':cpu,'wait_kind':w['kind']})
     values=sorted(candidates.values(),key=lambda x:-x['overlap_sec'])
     for c in values: c['cpus']=sorted(c['cpus'])
+    ai_workers = {t['identity'] for t in rows.values() if t.get('npu_ids') or t.get('category') == 'AI_WORKLOAD'}
+    ai_competitors = {c['contender_identity'] for c in values if c['target_identity'] in ai_workers}
+    process_tasks = {t['identity']: t for t in m.get('process_analysis', {}).get('tasks', [])}
+    for key in ai_competitors:
+        row = rows[key]
+        row['competes_with_ai'] = True
+        row.setdefault('evidence', []).append('Runnable AI wait overlaps this task running on the same CPU; causality unproven')
+        if row.get('category') != 'AI_WORKLOAD':
+            row['category'] = 'COMPETITOR'
+        if key in process_tasks:
+            process_tasks[key]['competes_with_ai'] = True
+            process_tasks[key]['category'] = row['category']
+    if 'system_summary' in m.get('process_analysis', {}):
+        tasks = m['process_analysis']['tasks']
+        m['process_analysis']['system_summary'].update({
+            'ai_threads': sum(t.get('category') == 'AI_WORKLOAD' for t in tasks),
+            'competitor_threads': sum(t.get('category') == 'COMPETITOR' for t in tasks),
+            'unrelated_threads': sum(t.get('category') == 'UNRELATED' for t in tasks),
+            'unknown_threads': sum(t.get('category') == 'UNKNOWN' for t in tasks)})
     # Report affinity intersections only for workload threads seen by scheduler; no quadratic all-system scan.
     active=[t for t in rows.values() if t.get('related') and t.get('runtime_sec') is not None and t.get('allowed_cpus')]
     affinity_total=len(active)
@@ -113,12 +136,17 @@ def analyze_contention(m):
         ranks[name]=[t['identity'] for t in sorted(rows.values(),key=lambda t:-(t.get(field) or 0)) if t.get(field) is not None][:20]
     device=read_json(m['snapshot'],'device_windows.json',{}) or {}
     correlations=[]
-    if device.get('clock')=='mono' and m.get('metadata',{}).get('trace_clock')=='mono':
+    if isinstance(device,dict) and device.get('clock')=='mono' and m.get('metadata',{}).get('trace_clock')=='mono':
         for c in values:
-            for window in device.get('windows',[]):
+            for window in device.get('windows',[]) if isinstance(device.get('windows'),list) else []:
+                if not isinstance(window,dict) or not all(isinstance(window.get(k),(int,float)) for k in ('start','end')):
+                    continue
                 if window.get('npu_id') in c['npu_ids'] and any(max(window['start'],w['start'])<min(window['end'],w['end']) for w in c['windows']):
                     correlations.append({'target_tid':c['target_tid'],'npu_id':window['npu_id'],'window':window,'causality':'UNPROVEN'})
-    return {'candidates':values,'rankings':ranks,'affinity_overlaps':overlaps,'affinity_scope':{'active_workload_threads':affinity_total,'compared_threads':len(active),'truncated':affinity_total>len(active),'reason':'按已观测等待排序，最多512个活跃关联线程做成对Affinity比较；全线程Affinity仍保留在thread_metrics'},'cgroups':cgroup_deltas(m['snapshot']),
+    return {'candidates':values,'rankings':ranks, 'ai_workers': sorted(ai_workers, key=lambda key: -(rows[key].get('runqueue_wait_sec') or 0)),
+            'ai_competitors': sorted(ai_competitors, key=lambda key: -(rows[key].get('runtime_sec') or 0)),
+            'system_top': ranks['runtime'], 'display_limits': {'system_top':20,'candidate_preview_windows':3,'all_threads':'collapsed; full JSON retained'},
+            'affinity_overlaps':overlaps,'affinity_scope':{'active_workload_threads':affinity_total,'compared_threads':len(active),'truncated':affinity_total>len(active),'reason':'按已观测等待排序，最多512个活跃关联线程做成对Affinity比较；全线程Affinity仍保留在thread_metrics'},'cgroups':cgroup_deltas(m['snapshot']),
             'workers':[t['identity'] for t in rows.values() if t.get('npu_ids')],
             'hot_cores':[{'cpu':c,'util':pc['util'],'threads':[s['tid'] for s in per_cpu[c] if s['tid']>0]} for c,pc in m['per_cpu'].items() if (pc.get('util') or 0)>=90],
             'device_correlation':{'status':'ALIGNED' if correlations else ('NOT_PROVIDED' if not device else 'NO_PROVEN_OVERLAP_OR_CLOCK_ALIGNMENT'), 'matches':correlations},

@@ -2,6 +2,8 @@
 from html import escape
 from .report_explanation import fmt
 from .npu_affinity import _topology, cpu_list
+from .report_tables import disclose_table
+from .frequency_idle_chart import render_frequency_idle
 
 
 def _text(value):
@@ -10,9 +12,11 @@ def _text(value):
     return str(value)
 
 
-def table(headers,rows,html=False):
+def table(headers,rows,html=False,title="完整明细",force=False):
+    rows=list(rows)
     if html:
-        return '<div class="core-table-scroll"><table><thead><tr>'+''.join('<th>%s</th>'%escape(x) for x in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>%s</td>'%escape(_text(x)) for x in row)+'</tr>' for row in rows)+'</tbody></table></div>'
+        markup = '<div class="core-table-scroll"><table><thead><tr>'+''.join('<th>%s</th>'%escape(x) for x in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>%s</td>'%escape(_text(x)) for x in row)+'</tr>' for row in rows)+'</tbody></table></div>'
+        return disclose_table(markup,title,len(rows),force)
     def clean(x):return _text(x).replace('|','\\|').replace('\n',' ')
     return '| '+' | '.join(headers)+' |\n|'+'|'.join('---' for _ in headers)+'|\n'+'\n'.join('| '+' | '.join(clean(x) for x in row)+' |' for row in rows)+'\n'
 
@@ -32,20 +36,17 @@ def frequency_section(m,html=False):
     for p in f.get('domains',[]):
         rows.append([p['id'],cpu_list(p['cpus']),fmt(p['current_mhz'],' MHz'),fmt(p['average_mhz'],' MHz'),fmt(p['minimum_mhz'],' MHz'),fmt(p['highest_mhz'],' MHz'),fmt(p['maximum_mhz'],' MHz'),fmt(p['low_frequency_ratio'],'%'),p.get('governor'),p['source']+' / '+p['reliability'],p['sample_count'],str(p.get('errors',{}))])
     if rows:
-        out.append(table(['策略域','相关CPU','当前','时间加权平均','窗口最低','窗口最高','硬件最大参考','低频时间占比','Governor','来源 / 可靠性','样本数','接口读取限制'],rows,html))
+        out.append(table(['策略域','相关CPU','当前','时间加权平均','窗口最低','窗口最高','硬件最大参考','低频时间占比','Governor','来源 / 可靠性','样本数','接口读取限制'],rows,html,title='全部CPU Frequency策略域',force=html))
     else:out.append(paragraph('没有可用策略域数据；频率缺失时不显示0 MHz。',html))
     out.append(paragraph(f.get('note',''),html))
     out.append(paragraph('低频占比仅在cpuinfo_max_freq可靠参考存在时计算（≤其50%，经验筛选）；首个样本前不外推。窗口无频率转换不表示降频。当前值来自结束快照，平均值仅覆盖已观测样本持续区间。',html))
-    if html:
-        for p in f.get('domains',[]):
-            values=p['series']
-            if not values:continue
-            lo=min(t for t,v in values);hi=max(t for t,v in values);vmax=max(v for t,v in values)*1.1
-            points=' '.join('%.2f,%.2f'%(45+900*(t-lo)/(hi-lo or 1),140-110*v/(vmax or 1)) for t,v in values)
-            out.append('<div class="chart"><p>%s · %s · 时间戳 %.3f~%.3f 秒</p><svg viewBox="0 0 1000 180" role="img" aria-label="策略域频率趋势"><text x="5" y="20" fill="#9eaec2" font-size="12">MHz</text><polyline points="%s" fill="none" stroke="#68b8ff" stroke-width="2"/>'%(escape(p['id']),escape(p['source']),lo,hi,points))
-            for t,v in values:
-                out.append('<circle cx="%.2f" cy="%.2f" r="2.5" fill="#62d6a5"><title>t=%.6f / %.2f MHz</title></circle>'%(45+900*(t-lo)/(hi-lo or 1),140-110*v/(vmax or 1),t,v))
-            out.append('<text x="45" y="168" fill="#9eaec2" font-size="12">%.1f ~ %.1f MHz；已知持续 %.3f s；样本 %d</text></svg></div>'%(p['minimum_mhz'],p['highest_mhz'],p['observed_sec'],p['sample_count']))
+    idle=m.get('idle',{})
+    out.append(heading('CPU Idle Residency',html))
+    out.append(paragraph('Idle状态：%s；来源：%s；可靠性：%s。%s'%(idle.get('status','NO_EVENTS'),idle.get('source','ftrace:power/cpu_idle'),idle.get('reliability','UNKNOWN'),'；'.join(idle.get('reasons',[]))),html))
+    out.append(paragraph(idle.get('note','没有可用cpu_idle事件；缺失值为N/A。swapper近似空闲率另见第6节。'),html))
+    if html: out.append(render_frequency_idle(m))
+    out.append(table(['CPU','整窗Idle Residency','已知Idle秒','有效覆盖','整窗Idle下界','各C-state持续秒'],[
+        [p['cpu'],fmt(p.get('residency_percent'),'%'),fmt(p.get('idle_sec'),' s'),fmt(p.get('coverage_percent'),'%'),fmt(p.get('idle_lower_bound_percent'),'%'),'; '.join('state%s: %.6f s'%(x['state'],x['residency_sec']) for x in p.get('states',[])) or 'N/A'] for p in idle.get('cpus',[])],html,title='全部CPU Idle Residency',force=html))
     pmu=f.get('pmu',{})
     out.append(paragraph('PMU：%s；%s'%(pmu.get('status','NOT_VALIDATED'),pmu.get('reason','未验证')),html))
     return ''.join(out) if html else '\n'.join(out)
@@ -56,10 +57,21 @@ def thread_section(m,html=False):
     out=[heading('Process / Thread Discovery',html)]
     out.append(paragraph('已发现进程 %d，任务身份 %d，关联TGID %s。%s'%(len(a.get('processes',[])),len(a.get('tasks',[])),a.get('related_tgids',[]),a.get('note','')),html))
     if a.get('errors'):out.append(paragraph('快照读取失败/退出竞争 %d 项；错误保留在report_data.json。'%len(a['errors']),html))
+    summary=a.get('system_summary',{})
+    if summary: out.append(paragraph('系统进程 %s / 线程 %s；AI线程 %s；同核竞争线程 %s；非关联 %s；未知 %s；角色置信度 %s。'%(summary.get('total_processes'),summary.get('total_threads'),summary.get('ai_threads'),summary.get('competitor_threads'),summary.get('unrelated_threads'),summary.get('unknown_threads'),summary.get('confidence_counts')),html))
+    by_id={t['identity']:t for t in rows}
+    for key,label,fallback in [('ai_workers','AI Worker Top 10',ct.get('workers',[])),('ai_competitors','AI竞争线程 Top 10',[]),('system_top','系统线程 CPU Runtime Top 10',[])]:
+        ids=ct.get(key,fallback)
+        chosen=[by_id[x] for x in ids if x in by_id]
+        if key=='system_top' and not chosen: chosen=sorted(rows,key=lambda t:-(t.get('runtime_sec') or 0))
+        out.append(heading(label,html))
+        out.append(table(['进程','TGID','TID','类别','角色/置信度','NPU','Runtime','Runqueue Wait','Wait P99','CPU','关系证据'],[
+            [t.get('process_name') or t.get('name'),t.get('tgid'),t['tid'],t.get('category','UNKNOWN'),str(t.get('role'))+' / '+str(t.get('confidence')),t.get('npu_ids'),fmt(t.get('runtime_sec'),' s'),fmt(t.get('runqueue_wait_sec'),' s'),fmt(t.get('wait_p99_ms'),' ms'),t.get('cpus'),'; '.join(t.get('relation_evidence',[]))] for t in chosen[:10]],html))
+    out.append(paragraph('AI Worker需要NPU PID/TGID、后代关系或运行证据支持；竞争线程需同核可运行等待时间重叠。仅线程名称/相同Affinity不足以确认角色或竞争因果。',html))
     mapping=[]
     for t in rows:
-        mapping.append([t.get('process_name'),t.get('tgid'),t['tid'],t.get('ppid'),t['identity'],t.get('role'),t.get('npu_ids',[]),cpu_list(t.get('allowed_cpus') or []) if t.get('allowed_cpus') is not None else None,t.get('last_cpu'),t.get('mems_allowed_list'),t.get('task_group'),t.get('confidence'),'; '.join(t.get('evidence',[]))])
-    out.append(table(['进程','TGID','TID','PPID','任务身份/starttime','角色','NPU关联','Affinity快照','PSR快照','Mems_allowed','Task Group','角色置信度','证据'],mapping,html))
+        mapping.append([t.get('process_name'),t.get('tgid'),t['tid'],t.get('ppid'),t['identity'],t.get('category','UNKNOWN'),t.get('role'),t.get('npu_ids',[]),cpu_list(t.get('allowed_cpus') or []) if t.get('allowed_cpus') is not None else None,t.get('last_cpu'),t.get('mems_allowed_list'),t.get('task_group'),t.get('confidence'),fmt(t.get('runtime_sec'),' s'),fmt(t.get('runtime_share'),'%'),fmt(t.get('cpu_utilization'),'%'),fmt(t.get('runqueue_wait_sec'),' s'),fmt(t.get('wait_p50_ms'),' ms'),fmt(t.get('wait_p95_ms'),' ms'),fmt(t.get('wait_p99_ms'),' ms'),t.get('wait_samples'),t.get('context_switches'),t.get('wakeups'),t.get('runnable_switch_out'),t.get('migrations'),t.get('cpus'),t.get('data_quality'),'; '.join(t.get('relation_evidence',[])),'; '.join(t.get('evidence',[]))])
+    out.append(table(['进程','TGID','TID','PPID','任务身份/starttime','类别','角色','NPU关联','Affinity快照','PSR快照','Mems_allowed','Task Group','角色置信度','CPU Runtime','Runtime份额','线程利用率','Runqueue Wait','Wait P50','Wait P95','Wait P99','唤醒样本','上下文切换','成功唤醒','Runnable切出','Migration','观测CPU','数据质量','关系证据','采样证据'],mapping,html,title='全部进程/线程映射',force=html))
     out.append(heading('CPU Contention Analysis',html))
     out.append(paragraph(ct.get('note',''),html))
     by_id={t['identity']:t for t in rows}
@@ -68,7 +80,9 @@ def thread_section(m,html=False):
         for key in ct.get('rankings',{}).get(name,[]):
             t=by_id[key]
             rank.append([t.get('process_name') or t.get('name'),t.get('tgid'),t['tid'],t.get('npu_ids',[]),fmt(t['runtime_sec'],' s'),fmt(t.get('runtime_share'),'%'),fmt(t.get('cpu_utilization'),'%'),fmt(t.get('runqueue_wait_sec'),' s'),fmt(t.get('wait_p50_ms'),' ms'),fmt(t.get('wait_p95_ms'),' ms'),fmt(t.get('wait_p99_ms'),' ms'),t['wait_samples'],t.get('context_switches'),t.get('wakeups'),t.get('runnable_switch_out'),t.get('migrations'),t['cpus'],t.get('data_quality')])
-        out.append(table(['Process','TGID','TID','NPU','CPU Runtime','Runtime份额','线程利用率','Runqueue Wait','Wait P50','Wait P95','Wait P99','唤醒样本','上下文切换','成功唤醒','Runnable切出','Migration','观测CPU','数据质量'],rank,html))
+        headers=['Process','TGID','TID','NPU','CPU Runtime','Runtime份额','线程利用率','Runqueue Wait','Wait P50','Wait P95','Wait P99','唤醒样本','上下文切换','成功唤醒','Runnable切出','Migration','观测CPU','数据质量']
+        if html and len(rank)>10: out.append(table(headers,rank[:5],html))
+        out.append(table(headers,rank,html,title=label+' 全部记录',force=html and len(rank)>10))
     out.append(paragraph('Runtime份额以全体任务已观测runtime为分母，线程利用率以采集窗口为分母；Runtime含任务上下文内IRQ，不等同纯用户态CPU。Runqueue Wait为已完成成功唤醒+R/R+切出的等待区间下界，Wait P99仅含成功唤醒；未配对等待不填零。',html))
     _,nodes,_=_topology(m.get('snapshot',{}));c2n={c:n for n,cs in nodes.items() for c in cs}
     out.append(heading('NPU Worker CPU 竞争情况与证据链',html));chains=[]
@@ -79,7 +93,7 @@ def thread_section(m,html=False):
     out.append(table(['NPU','Worker/关联TGID','TID','角色','观测CPU','NUMA','Wait P99','候选与重叠'],chains,html))
     candidates=ct.get('candidates',[])
     out.append(table(['目标TID/TGID','候选TID/TGID','CPU','NUMA','重叠ms','时间窗证据','置信度','因果'],[
-        ['%s/%s'%(c['target_tid'],c['target_tgid']),'%s/%s'%(c['contender_tid'],c['contender_tgid']),c['cpus'],sorted({c2n[x] for x in c['cpus'] if x in c2n}),fmt(c['overlap_sec']*1000),str(c['windows'][:3])+'（其余窗口见JSON，最多保存20个例证）； '+'; '.join(c['evidence']),c['confidence'],c['causality']] for c in candidates],html))
+        ['%s/%s'%(c['target_tid'],c['target_tgid']),'%s/%s'%(c['contender_tid'],c['contender_tgid']),c['cpus'],sorted({c2n[x] for x in c['cpus'] if x in c2n}),fmt(c['overlap_sec']*1000),str(c['windows'])+'； '+'; '.join(c['evidence']),c['confidence'],c['causality']] for c in candidates],html))
     out.append(heading('热点CPU与关联线程',html))
     out.append(table(['CPU','NUMA','利用率','TID'],[[r['cpu'],c2n.get(r['cpu']),fmt(r['util'],'%'),sorted(set(r['threads']))] for r in ct.get('hot_cores',[])],html))
     out.append(heading('CPU Affinity 重叠（配置相关性）',html))
@@ -97,8 +111,44 @@ def thread_section(m,html=False):
 def core_table(m,html=False):
     _,nodes,_=_topology(m.get('snapshot',{}));c2n={c:n for n,cs in nodes.items() for c in cs}
     return table(['CPU','NUMA','观测秒','利用率','空闲率','切换/秒','唤醒/秒','R切出/秒','迁移/秒','硬中断','软中断'],[
-        [c,c2n.get(c),fmt(p.get('observed_sec'),' s'),fmt(p.get('util'),'%'),fmt(p.get('idle_ratio'),'%'),fmt(p.get('cs_rate')),fmt(p.get('wakeup_rate')),fmt(p.get('runnable_switch_out_rate')),fmt(p.get('migration_rate')),fmt(p.get('irq_ratio'),'%'),fmt(p.get('softirq_ratio'),'%')] for c,p in sorted(m.get('per_cpu',{}).items())],html)
+        [c,c2n.get(c),fmt(p.get('observed_sec'),' s'),fmt(p.get('util'),'%'),fmt(p.get('idle_ratio'),'%'),fmt(p.get('cs_rate')),fmt(p.get('wakeup_rate')),fmt(p.get('runnable_switch_out_rate')),fmt(p.get('migration_rate')),fmt(p.get('irq_ratio'),'%'),fmt(p.get('softirq_ratio'),'%')] for c,p in sorted(m.get('per_cpu',{}).items())],html,title='全部CPU核心明细',force=html)
 
 
 def coverage_section(m,html=False):
     return heading('可选工具证据覆盖（缺失不等于正常）',html)+table(['工具','状态','证据文件','限制'],[[r['name'],r['status'],r['evidence'],r['note']] for r in m.get('optional_tools',[])],html)
+
+
+def topology_section(m,html=False):
+    topology=m.get('topology',{})
+    nodes=topology.get('nodes',[])
+    count=topology.get('cpu_count',len(m.get('per_cpu',{})))
+    out=[paragraph('CPU 总数 %s；NUMA 节点 %s；距离矩阵列顺序 %s。'%(count,topology.get('numa_count',topology.get('node_count',len(nodes))),topology.get('distance_node_order',[])),html)]
+    if not nodes:
+        _,mapped,_=_topology(m.get('snapshot',{}))
+        nodes=[{'node':node,'cpus':cpus} for node,cpus in sorted(mapped.items())]
+    def gib(value):
+        return fmt(value/1048576.,' GiB') if isinstance(value,(int,float)) else 'N/A'
+    rows=[]
+    for node in nodes:
+        memory=node.get('memory_kb',{})
+        rows.append([node.get('node'),cpu_list(node.get('cpus',[])),gib(node.get('total_kb',memory.get('MemTotal'))),gib(node.get('free_kb',memory.get('MemFree'))),node.get('distance_by_node') or node.get('distance'),node.get('errors',{})])
+    out.append(table(['NUMA','CPU列表','内存容量','内存空闲','节点距离','读取限制'],rows,html,title='全部NUMA拓扑与容量',force=html))
+    out.append(paragraph('CPU许可范围、PSR/trace运行位置、Mems_allowed许可内存节点、numa_maps/numastat实际页分布分别核验。节点距离是拓扑成本提示，实际页不在本地不能单独证明跨节点访问导致性能损失；相关任务证据见2.3节。',html))
+    return ''.join(out) if html else '\n'.join(out)
+
+
+def interrupt_tables(m,kind,html=False):
+    from .metrics import EVENT_EXPLANATIONS, _explain_irq_name
+    data=m.get(kind,{})
+    key='names' if kind=='irq' else 'actions'
+    label='硬中断来源' if kind=='irq' else '软中断类型'
+    values=data.get('all_'+key,data.get('top_'+key,[]))
+    rows=[[name,count,fmt(seconds*1000,' ms'),_explain_irq_name(name) if kind=='irq' else EVENT_EXPLANATIONS.get(name,'参考内核文档')] for name,count,seconds in values]
+    headers=['中断源' if kind=='irq' else '软中断类型','次数','累计耗时','说明']
+    if not rows: return ''
+    out=[]
+    if len(rows)>5:
+        out.append(paragraph('按累计耗时排列的 Top 5；完整来源与次数保留在展开表格。',html))
+        out.append(table(headers,rows[:5],html))
+    out.append(table(headers,rows,html,title='全部'+label,force=html and len(rows)>5))
+    return ''.join(out) if html else '\n'.join(out)

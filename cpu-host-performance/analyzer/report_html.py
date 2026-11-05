@@ -8,8 +8,9 @@ import re
 from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
 from .diagnosis import THRESHOLDS
 from .npu_report import affinity_html, binding_html
-from .report_explanation import explanations_html, fmt
-from .report_sections import frequency_section, thread_section, core_table, coverage_section
+from .report_explanation import explanations_html, fmt, collection_actions_html, collection_integrity_html
+from .report_tables import enhance_long_tables, table_script
+from .report_sections import frequency_section, thread_section, core_table, coverage_section, topology_section, interrupt_tables
 from .core_balance import render_core_balance
 
 
@@ -44,11 +45,11 @@ border-radius:10px;padding:12px 14px}
 padding:20px 22px;margin:16px 0}
 .status-hero .big{font-size:26px;font-weight:700;margin:4px 0 10px}
 table{width:100%;border-collapse:collapse;margin:8px 0;font-size:13px}
-table{display:block;max-width:100%;overflow-x:auto}p,td,li{overflow-wrap:anywhere}
+table{display:block;max-width:100%;overflow-x:auto}p,li{overflow-wrap:anywhere}
 .wrap,.card,.finding,.numa-group,.npu-card{min-width:0;max-width:100%}
 th{background:var(--panel2);color:var(--muted);text-align:left;padding:7px 10px;
 border:1px solid var(--border);font-weight:600;white-space:nowrap}
-td{padding:7px 10px;border:1px solid var(--border);vertical-align:top}
+td{padding:7px 10px;border:1px solid var(--border);vertical-align:top;overflow-wrap:normal;word-break:normal;min-width:4.5em}
 td.num,th.num{text-align:right;font-family:Consolas,monospace}
 .finding{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--gray);
 border-radius:8px;padding:14px 18px;margin:12px 0}
@@ -67,7 +68,7 @@ ol.pri{margin:8px 0 0 22px}ol.pri li{margin:5px 0}
 .numa-group{margin:16px 0;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
 .numa-title{font-size:16px;font-weight:650;margin-bottom:12px;color:#e6edf3}
 .numa-title span{font-size:12px;font-weight:400;color:var(--muted);margin-left:10px}
-.npu-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.npu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:12px}
 .npu-card{min-width:0;border:1px solid var(--border);border-top:3px solid var(--orange);border-radius:9px;background:var(--bg);padding:14px}
 .npu-card.good{border-top-color:var(--green)}.npu-card.danger{border-top-color:var(--red)}
 .npu-heading{display:flex;gap:8px;justify-content:space-between;align-items:start;flex-wrap:wrap}
@@ -76,6 +77,9 @@ ol.pri{margin:8px 0 0 22px}ol.pri li{margin:5px 0}
 .npu-process{margin:12px 0;font-size:14px}.npu-process strong{margin-left:8px;color:#e6edf3}
 .npu-process small{display:block;color:var(--muted);font-size:11px;margin-top:3px}
 .npu-process-entry{margin-top:10px}.npu-process-entry+.npu-process-entry{border-top:1px solid var(--border);padding-top:12px}
+.npu-evidence{margin-top:12px;border-top:1px solid var(--border);padding-top:8px}
+.npu-evidence>summary{cursor:pointer;color:#a9d1ff;font-size:12px;padding:3px 0}
+.npu-evidence[open]>summary{margin-bottom:10px}
 .numa-verdict{font-size:12px;color:#f39a9a;margin:8px 0}.numa-verdict.local-numa{color:#6dd69a}
 .numa-verdict.unknown-numa{color:#efc36a}
 .aff-line{display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;font-size:12px;margin:6px 0}
@@ -87,6 +91,21 @@ pre{white-space:pre;overflow:auto;background:#090e15;border:1px solid var(--bord
 .code-panel pre{max-height:440px}
 @media(max-width:700px){.npu-grid{grid-template-columns:1fr}.wrap{padding:0 12px}}
 @media print{body{background:#fff;color:#111}.card,.kpi,.finding,.chart,.status-hero{border-color:#ccc}}
+
+.data-details{margin:12px 0;border:1px solid var(--border);border-radius:8px;background:var(--panel)}
+.data-details>summary,.fi-legend>summary{cursor:pointer;padding:10px 12px;color:#a9d1ff;font-weight:600}
+.data-details[open]>summary{border-bottom:1px solid var(--border)}
+.table-tools,.fi-controls{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px;font-size:12px}
+.table-tools input,.table-tools select,.table-tools button,.fi-controls input,.fi-controls select,.fi-controls button{background:#182333;color:#dce3ea;border:1px solid #40516a;border-radius:5px;padding:6px;max-width:100%}
+.table-tools input{min-width:170px}.table-tools select{max-width:190px}
+.data-details table{margin:0}.data-details tbody tr[hidden]{display:none!important}
+.data-details .core-table-scroll{max-height:650px;overflow:auto}
+#frequency-idle svg{display:block;width:100%;min-width:560px}#fi-plot{overflow:auto}
+#fi-series{max-height:230px;overflow:auto;display:flex;flex-wrap:wrap;gap:8px;padding:10px}
+#fi-series label{font-size:12px;display:flex;align-items:center;gap:5px;padding:3px 6px;border:1px solid var(--border);border-radius:4px}
+#fi-tooltip{white-space:pre-wrap;font:12px/1.7 Consolas,monospace;min-height:52px;margin-top:8px}
+@media print{.table-tools,.fi-controls,.fi-legend{display:none}.data-details{break-inside:avoid}}
+
 /* ---- 左侧固定导航目录 ---- */
 :root{--tocpad:216px}
 html{scroll-behavior:smooth}
@@ -217,18 +236,19 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
             esc(p["type"]), esc(p.get("explanation", ""))))
     else:
         A("<p>未发现需要根因判断的问题。</p>")
-    A(affinity_html(m.get("npu_affinity", {})))
+    A(affinity_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
     # ---------- 3. 建议 ----------
     A("<h2>3. 优化建议</h2>")
     pri = {"CRITICAL": "P0（立即处理）", "WARNING": "P1（尽快处理）", "INFO": "P2（择机处理）", "OK": "—"}
-    A(binding_html(m.get("npu_affinity", {})))
+    A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
+    A(collection_actions_html(m.get("collection_integrity", {})))
     shown = False
     for f in diag["findings"]:
-        if f["severity"] in ("INFO", "OK"):
+        if f["severity"] in ("INFO", "OK") and not f.get('priority'):
             continue
         shown = True
         A("<div class='finding' style='border-left-color:%s'>" % sev_color.get(f["severity"], "#6b7280"))
-        A("<h3>%s — %s</h3><ol class='pri'>" % (pri[f["severity"]], esc(f["title"])))
+        A("<h3>%s — %s</h3><ol class='pri'>" % (esc(f.get('priority') or pri[f["severity"]]), esc(f["title"])))
         for r in f["recommendation"]:
             A("<li>%s</li>" % esc(r))
         A("</ol></div>")
@@ -285,35 +305,14 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A("<h2>8. IRQ / SoftIRQ 分析</h2>")
     A("<h3>8.1 硬中断</h3>")
     A("<p>硬中断全机观测占比 <b>%s</b>；单核最高 %s；配对次数 %s。</p>" % (fmt(irq.get("total_ratio"),"%"),fmt(irq.get("max_cpu_ratio"),"%"),fmt(irq.get("total_count"),digits=0)))
-    if irq.get("top_names"):
-        A("<table><tr><th>中断源</th><th class='num'>次数</th><th class='num'>累计耗时 ms</th><th>说明</th></tr>")
-        for n, cnt, t in irq["top_names"]:
-            A("<tr><td class='evt'>%s</td><td class='num'>%s</td><td class='num'>%.1f</td><td>%s</td></tr>"
-              % (esc(n), format(cnt, ","), t * 1000, esc(_explain_irq_name(n))))
-        A("</table>")
+    A(interrupt_tables(m,"irq",True))
     A("<h3>8.2 软中断</h3>")
     A("<p>软中断全机观测占比 <b>%s</b>；单核最高 %s；配对次数 %s。</p>" % (fmt(soft.get("total_ratio"),"%"),fmt(soft.get("max_cpu_ratio"),"%"),fmt(soft.get("total_count"),digits=0)))
-    if soft.get("top_actions"):
-        A("<table><tr><th>软中断类型</th><th class='num'>次数</th><th class='num'>累计耗时 ms</th><th>说明</th></tr>")
-        for n, cnt, t in soft["top_actions"]:
-            A("<tr><td class='evt'>%s</td><td class='num'>%s</td><td class='num'>%.1f</td><td>%s</td></tr>"
-              % (esc(n), format(cnt, ","), t * 1000,
-                 esc(EVENT_EXPLANATIONS.get(n, "未收录软中断类型，参考内核文档。"))))
-        A("</table>")
+    A(interrupt_tables(m,"softirq",True))
     A("<p class='note'>各核中断分布见第 6 节表格与上方图表。</p>")
     # ---------- 9. Freq / Idle ----------
     A("<h2>9. CPU Frequency / Idle 分析</h2>")
     A(frequency_section(m,True))
-    idle = m.get("idle", {})
-    if idle.get("available"):
-        avgs = {c:v for c,v in (idle.get("per_cpu_ratio") or {}).items() if v is not None}
-        if avgs:
-            A("<p>各核空闲占比：平均 %.1f%%，最高 %.1f%%（%s），最低 %.1f%%（%s）。%s</p>" % (
-                sum(avgs.values()) / len(avgs), max(avgs.values()), esc(max(avgs, key=avgs.get)),
-                min(avgs.values()), esc(min(avgs, key=avgs.get)),
-                "多数核心大量空闲，负载分布问题见问题详情。" if (sum(avgs.values()) / len(avgs)) >= 70 else ""))
-    else:
-        A("<p>trace 中无 cpu_idle 事件，空闲比基于 swapper 任务近似。</p>")
     # ---------- 10. Task ----------
     A("<h2>10. Task / Thread 分析</h2>")
     A(thread_section(m,True))
@@ -343,6 +342,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("</table>")
     # ---------- 11. Affinity / NUMA ----------
     A("<h2>11. Affinity / NUMA 分析</h2>")
+    A(topology_section(m,True))
     numa_txt = (m.get("snapshot", {}) or {}).get("numa.txt", "")
     if numa_txt and "node" in numa_txt:
         nn = numa_txt.count("== /sys/devices/system/node/node") if "== " in numa_txt else None
@@ -356,6 +356,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A(_time_window_html(m, esc))
     # ---------- 13. 数据说明与指标解释 ----------
     A("<h2>13. 数据说明与指标解释</h2>")
+    A(collection_integrity_html(m.get("collection_integrity", {})))
     A(coverage_section(m,True))
     A("<h3>数据概况</h3><div class='card'>")
     A("<p>trace 时间范围：%.3f ~ %.3f（相对秒），时长 %.1f 秒</p>" % (m.get("t_start", 0), m.get("t_end", 0), st["duration"]))
@@ -403,7 +404,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
             A("</div>")
     A("<div class='footer'>HostBound 性能诊断 Skill 生成 ｜ 仅标准库渲染，可离线打开</div>")
     A("</div></body></html>")
-    return _inject_toc("\n".join(L))
+    return _inject_toc(enhance_long_tables("\n".join(L))).replace("</body>", table_script()+"</body>", 1)
 
 # ---------- 小工具 ----------
 def _kpi(value, name, bad=False, warn_level=None):

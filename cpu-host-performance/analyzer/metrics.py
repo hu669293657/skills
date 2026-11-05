@@ -128,12 +128,14 @@ def compute_metrics(td):
     """Orchestrate evidence modules; v1 fields stay available in explicit units."""
     from .npu_affinity import analyze_npu_affinity
     from .evidence import read_json, optional_tools
-    from .process_analysis import analyze_processes
+    from .process_analysis import analyze_processes, resolve_task
     from .scheduling import analyze_scheduling
     from .interrupt_analysis import analyze_interrupts
     from .frequency_analysis import analyze_frequency, legacy_frequency
     from .contention_analysis import analyze_contention
     from .timeline import build_timeseries, task_compatibility
+    from .collection_integrity import analyze_collection_integrity
+    from .topology import analyze_topology
     events=sorted(td.events,key=lambda e:e.ts)
     lo=events[0].ts if events else 0.0
     hi=events[-1].ts if events else lo
@@ -168,14 +170,23 @@ def compute_metrics(td):
     if not m['governor']: m['governor']=','.join(sorted({p['governor'] for p in m['frequency']['domains'] if p.get('governor')})) or None
     m['contention']=analyze_contention(m)
     m['tasks']=task_compatibility(m)
+    m['tasks']['observed_cpus_by_identity']={}
     for ev in events:
         if ev.etype=='sched_switch' and ev.cpu is not None:
             tid=int(ev.fields.get('next_pid',-1))
             if tid>0:
                 values=m['tasks']['observed_cpus_by_tid'].setdefault(tid,[])
                 if ev.cpu not in values: values.append(ev.cpu)
+                identity=resolve_task(m['process_analysis'],tid,ev.ts)
+                if identity:
+                    scoped=m['tasks']['observed_cpus_by_identity'].setdefault(identity['identity'],[])
+                    if ev.cpu not in scoped: scoped.append(ev.cpu)
     m['timeseries']=build_timeseries(m,events)
     m['npu_affinity']=analyze_npu_affinity(m)
+    m['topology']=analyze_topology(m)
+    m['collection_integrity']=analyze_collection_integrity(m, getattr(td, 'source_files', {}))
+    m['source_files']=getattr(td, 'source_files', {})
+    m['npu_affinity']['collection_integrity']=m['collection_integrity']
     return m
 
 def _to_int(v):

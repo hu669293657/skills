@@ -57,6 +57,7 @@ class TraceData(object):
         self.warnings = []        # 解析告警 (中文)
         self.parse_stats = {"total": 0, "parsed": 0, "failed": 0}
         self.trace_root = ""      # 临时解压根目录
+        self.source_files = {}    # 包内路径 -> 真实存在/大小/读取错误；供Manifest对账
 
 # ---------------------------------------------------------------
 # ftrace 文本解析
@@ -247,6 +248,23 @@ def _load_dir_into_td(dirpath, td):
     """目录 (或解压后目录) -> 找 trace 文本与快照。"""
     found_trace = []
     snapshot = {}
+    from .collection_integrity import evidence_path
+    declared = set()
+    declared_traces = set()
+    # Discover manifest evidence paths before classifying unknown .json/.log
+    # files as trace. A vendor raw output must never pollute trace parse stats.
+    for root, _dirs, files in os.walk(dirpath):
+        if 'collection_manifest.json' not in files:
+            continue
+        try:
+            with io.open(os.path.join(root, 'collection_manifest.json'), encoding='utf-8') as stream:
+                manifest = json.load(stream)
+            for item in manifest.get('entries', []):
+                if isinstance(item, dict) and item.get('raw_path'):
+                    (declared_traces if item.get('category') == 'trace' else declared).add(evidence_path(item['raw_path']))
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass  # analyzer reports a malformed manifest without discarding raw data
+    declared -= declared_traces
     for root, _dirs, files in os.walk(dirpath):
         for fn in files:
             fp = os.path.join(root, fn)
@@ -256,14 +274,22 @@ def _load_dir_into_td(dirpath, td):
             # Collector archives include a cpu_trace/ wrapper; normalize the evidence
             # directory at any depth so PID/TID snapshots survive archive loading.
             parts = rel.split('/')
+            canonical = evidence_path(rel)
+            try:
+                size = os.path.getsize(fp)
+                td.source_files[canonical] = {'exists': True, 'size': size, 'empty': size == 0}
+            except OSError as exc:
+                td.source_files[canonical] = {'exists': True, 'size': None, 'empty': None, 'error': str(exc)}
             hb_rel = '/'.join(parts[parts.index('hostbound'):]) if 'hostbound' in parts[:-1] else ''
             is_hostbound_snapshot = bool(hb_rel) and (fn.endswith((".txt", ".json", ".jsonl", ".tsv")))
-            if fn in _SNAPSHOT_FILES or is_hostbound_snapshot:
+            if fn in _SNAPSHOT_FILES or is_hostbound_snapshot or canonical in declared:
+                key = hb_rel if is_hostbound_snapshot else (canonical if canonical in declared else fn)
                 try:
                     with io.open(fp, "r", encoding="utf-8", errors="replace") as f:
-                        snapshot[hb_rel if is_hostbound_snapshot else fn] = f.read()
-                except Exception:
-                    snapshot[hb_rel if is_hostbound_snapshot else fn] = ""
+                        snapshot[key] = f.read()
+                except OSError as exc:
+                    snapshot[key] = ""
+                    td.source_files[canonical].update(error=str(exc), permission_denied=isinstance(exc, PermissionError))
             else:
                 low = fn.lower()
                 if low.startswith("trace") or low.endswith(".trace") or low.endswith(".log") or low.endswith(".json"):

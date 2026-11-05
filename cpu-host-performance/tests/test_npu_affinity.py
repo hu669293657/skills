@@ -1,4 +1,5 @@
 import re
+import json
 from pathlib import Path
 import tempfile
 import tarfile
@@ -9,6 +10,7 @@ from analyzer.parser import TraceData, Event, load_input, cleanup_temp
 from analyzer.metrics import compute_metrics
 from analyzer.diagnosis import diagnose
 from analyzer.npu_report import affinity_html
+from analyzer.npu_affinity import cpus
 from analyzer.report import render_md, render_html, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN
 
 
@@ -33,30 +35,63 @@ def snapshots():
     return s
 
 
-def metrics(s):
+def add_complete_identity(s):
+    """A full /proc fixture, including the identity and cpuset of every TID."""
+    s = dict(s)
+    processes, threads = [], []
+    for pid in range(4115, 4123):
+        processes.append({'tgid': pid, 'ppid': 1, 'name': 'python3', 'cmdline': 'vllm worker',
+                          'starttime': pid*100, 'namespace_pids': [pid],
+                          'cpuset_cpus_effective': list(range(192))})
+        raw = s.get('hostbound/pid_%d_thread_affinity.txt' % pid, '')
+        allowed = {int(t): list(cpus(v))
+                   for t, v in re.findall(r"pid (\d+)'s current affinity list: ([\d,\-]+)", raw)}
+        for index, tid in enumerate((pid, pid+10000)):
+            threads.append({'tid': tid, 'tgid': pid, 'name': 'worker', 'starttime': pid*100+index,
+                            'allowed_cpus': allowed.get(tid),
+                            'cpuset_cpus_effective': list(range(192)), 'namespace_pids': [tid]})
+    value = json.dumps({'processes': processes, 'threads': threads})
+    s['hostbound/process_start.json'] = value
+    s['hostbound/process_end.json'] = value
+    s['trace_overrun.txt'] = '0'
+    return s
+
+
+def workload_events():
+    return [Event(ts, cpu, 'sched_switch', fields={'prev_pid': 0 if ts == 0 else pid,
+                   'prev_comm': 'swapper' if ts == 0 else 'python3',
+                   'next_pid': pid if ts == 0 else 0, 'next_comm': 'python3' if ts == 0 else 'swapper'})
+            for cpu, pid in enumerate(range(4115, 4123), 30) for ts in (0, 1)]
+
+
+def metrics(s, measured=False):
     td = TraceData()
-    td.snapshot = s
+    td.snapshot = add_complete_identity(s) if measured else s
     td.format_name = 'synthetic ftrace'
     td.events = [Event(0, 30, 'sched_switch', fields={'prev_pid': '0', 'prev_comm': 'swapper/30', 'next_pid': '4115', 'next_comm': 'python3'}),
                  Event(1, 30, 'sched_switch', fields={'prev_pid': '4115', 'prev_comm': 'python3', 'next_pid': '0', 'next_comm': 'swapper/30'})]
+    if measured:
+        td.events = workload_events()
     return compute_metrics(td)
 
 
 class NpuAffinityTests(unittest.TestCase):
-    def analyze(self, s=None):
-        result = metrics(s if s is not None else snapshots()).get('npu_affinity', {})
+    def analyze(self, s=None, measured=False):
+        result = metrics(s if s is not None else snapshots(), measured=measured).get('npu_affinity', {})
         self.assertIn('rows', result, 'NPU snapshots must be converted into report evidence')
         return result
 
     def test_shared_affinity_is_split_without_leaving_advertised_cpus(self):
-        result = self.analyze()
+        result = self.analyze(measured=True)
         self.assertEqual([(r['npu'], r['pid'], r['target']) for r in result['rows']], [
             (0, 4115, '144-155'), (1, 4116, '0-11'), (2, 4117, '156-167'), (3, 4118, '12-23'),
             (4, 4119, '96-107'), (5, 4120, '48-59'), (6, 4121, '108-119'), (7, 4122, '60-71')])
         self.assertEqual(result['rows'][0]['state'], 'REMOTE_OBSERVED')
         self.assertEqual(result['rows'][0]['observed'], '30')
         self.assertEqual(result['rows'][0]['numa'], [3])
-        self.assertIn('taskset -acp 144-155 4115', result['commands'])
+        self.assertIn('taskset -pc 144-155 4115', result['commands'])
+        self.assertIn('taskset -pc 144-155 14115', result['commands'])
+        self.assertIn('trap on_error EXIT', result['commands'])
 
     def test_local_last_cpu_does_not_prove_affinity_is_confined(self):
         s = snapshots()
@@ -102,16 +137,16 @@ class NpuAffinityTests(unittest.TestCase):
 
     def test_smt_siblings_stay_in_one_partition(self):
         s = snapshots()
-        s['hostbound/lscpu_parse.txt'] = '# CPU,Core,Socket,Node,Online\n' + '\n'.join('%d,%d,0,%d,Y' % (c, (c%48)%12, c//48) for c in range(192))
-        rows = self.analyze(s)['rows']
+        s['hostbound/lscpu_parse.txt'] = '# CPU,Core,Socket,Node,Online\n' + '\n'.join('%d,%d,0,%d,Y' % (c, (c%48)//24*12+c%12, c//48) for c in range(192))
+        rows = self.analyze(s, measured=True)['rows']
         self.assertEqual(rows[1]['target'], '0-5,12-17')
         self.assertEqual(rows[3]['target'], '6-11,18-23')
 
     def test_disjoint_logical_pools_with_shared_smt_cores_are_blocked(self):
         s = snapshots()
         s['hostbound/npu_smi_topology.txt'] = s['hostbound/npu_smi_topology.txt'].replace('NPU1 X HCCS 0-23', 'NPU1 X HCCS 0-11').replace('NPU3 X HCCS 0-23', 'NPU3 X HCCS 12-23')
-        s['hostbound/lscpu_parse.txt'] = '# CPU,Core,Socket,Node,Online\n' + '\n'.join('%d,%d,0,%d,Y' % (c, (c%48)%12, c//48) for c in range(192))
-        result = self.analyze(s)
+        s['hostbound/lscpu_parse.txt'] = '# CPU,Core,Socket,Node,Online\n' + '\n'.join('%d,%d,0,%d,Y' % (c, (c%48)//24*12+c%12, c//48) for c in range(192))
+        result = self.analyze(s, measured=True)
         self.assertTrue(all(r['blockers'] for r in result['rows'] if r['npu'] in (1, 3)))
         self.assertNotRegex(result['commands'], r'taskset -acp [^\n]* 411[68](?:\s|$)')
 
@@ -161,7 +196,7 @@ class NpuAffinityTests(unittest.TestCase):
         self.assertEqual(rows[0].get('chips'), [0, 1])
 
     def test_report_merges_cause_and_moves_advice_before_details(self):
-        m = metrics(snapshots())
+        m = metrics(snapshots(), measured=True)
         diag = diagnose(m)
         md = render_md(m, diag)
         html = render_html(m, diag, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN)
@@ -173,7 +208,7 @@ class NpuAffinityTests(unittest.TestCase):
         for report in [md, html]:
             self.assertIn('4115', report)
             self.assertIn('144-155', report)
-            self.assertIn('taskset -acp 144-155 4115', report)
+            self.assertIn('taskset -pc 144-155 4115', report)
             self.assertIn('宿主机', report)
 
     def test_npu_mismatch_is_a_configuration_risk_in_diagnosis(self):
@@ -188,11 +223,15 @@ class NpuAffinityTests(unittest.TestCase):
             base = Path(tmp)
             collection = base/'cpu_trace'
             collection.mkdir()
-            for name, text in snapshots().items():
+            for name, text in add_complete_identity(snapshots()).items():
                 p = collection/name
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(text, encoding='utf-8')
-            (collection/'trace.txt').write_text('<idle>-0 [030] d..2 100.000000: sched_switch: prev_comm=swapper/30 prev_pid=0 next_comm=python3 next_pid=4115\npython3-4115 [030] d..2 101.000000: sched_switch: prev_comm=python3 prev_pid=4115 next_comm=swapper/30 next_pid=0\n', encoding='utf-8')
+            lines = []
+            for ev in workload_events():
+                lines.append('task-1 [%03d] d..2 %.6f: sched_switch: prev_comm=%s prev_pid=%d next_comm=%s next_pid=%d' %
+                             (ev.cpu, 100+ev.ts, ev.fields['prev_comm'], ev.fields['prev_pid'], ev.fields['next_comm'], ev.fields['next_pid']))
+            (collection/'trace.txt').write_text('\n'.join(lines)+'\n', encoding='utf-8')
             archive = base/'case.zip'
             with zipfile.ZipFile(archive, 'w') as z:
                 for p in collection.rglob('*'):
@@ -205,7 +244,7 @@ class NpuAffinityTests(unittest.TestCase):
                     td = load_input(str(source))
                     try:
                         self.assertIn('hostbound/pid_4115_thread_affinity.txt', td.snapshot)
-                        self.assertIn('taskset -acp 144-155 4115', compute_metrics(td)['npu_affinity']['commands'])
+                        self.assertIn('taskset -pc 144-155 4115', compute_metrics(td)['npu_affinity']['commands'])
                     finally:
                         cleanup_temp(td)
 
