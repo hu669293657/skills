@@ -343,8 +343,8 @@ def analyze_npu_affinity(m):
                        reasons=[], risks=['调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。',
                                           'taskset 只约束目标线程，不排除其他进程或 IRQ 使用这些 CPU。'],
                        expected_improvement='待验证：减少范围外运行或已观测同核等待；不估算未经测量的吞吐收益。',
-                       verification=['逐 TID taskset -pc 与有效 cpuset 核验', '同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡'],
-                       rollback='原 affinity 保存在采集快照 thread_rows；需要恢复时依据原掩码逐 TID 生成 taskset 命令。',
+                       verification=['读回主进程各线程 affinity 并核验有效 cpuset', '同负载复采比较 runnable wait P99、吞吐/时延和 Device 空泡'],
+                       rollback='由现场执行器保存原 affinity 并据日志恢复。',
                        thread_rows=ev.get('thread_rows', []), _candidate=candidate,
                        memory_locality=_memory_locality(snapshot, pid, ev, local_nodes) if pid else {})
             rows.append(row)
@@ -464,8 +464,7 @@ def analyze_npu_affinity(m):
         if not row['reasons']:
             row['reasons'] = ['当前证据不足以提出安全的具体 CPU 掩码。']
     notes.append('不按卡数或 NUMA 节点等分 CPU；不默认预留系统核。完整运行/等待证据支持互斥核心组；调度证据不足时仅在拓扑、身份和 cpuset 均已核验后给共享本地亲和池方案，不承诺隔离或性能收益。')
-    children, child_evidence = _child_binding_actions(rows, m, online) if context.get('execution_context') == 'host' else ([], [])
-    actions.extend(children)
+    _, child_evidence = _child_binding_actions(rows, m, online) if context.get('execution_context') == 'host' else ([], [])
     return {'rows': rows, 'notes': notes, 'host_context': context,
             'children': child_evidence,
             'commands': _binding_script(actions, context) if actions else '',
@@ -474,18 +473,15 @@ def analyze_npu_affinity(m):
             'coverage': '显式 NPU CPU 映射/宿主机进程身份/全线程 affinity 与 cpuset/实际 NUMA 页分布/运行与等待证据'}
 
 def _binding_script(actions, context):
-    """Only concrete taskset settings; preserve already suitable narrow masks."""
+    """Emit one process-wide command when it preserves existing local masks."""
     lines = []
     for row in actions:
-        pid, target, ev = row['pid'], row['target'], row.get('evidence', {})
-        allowed = ev.get('allowed', {})
+        pid, target = row['pid'], row['target']
         target_set = cpus(target)
-        preserve = {tid for tid, values in allowed.items() if values and values <= target_set}
-        if preserve:
-            for tid in sorted(set(allowed) - preserve):
-                lines.append('taskset -pc %s %d' % (target, tid))
-        else:
-            lines.append('taskset -apc %s %d' % (target, pid))
+        masks = row.get('evidence', {}).get('allowed', {}).values()
+        if any(mask and mask < target_set for mask in masks):
+            continue
+        lines.append('taskset -apc %s %d' % (target, pid))
     return '\n'.join(dict.fromkeys(lines))
 
 

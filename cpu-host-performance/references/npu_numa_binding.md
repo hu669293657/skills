@@ -1,5 +1,7 @@
 # NPU、NUMA 与宿主机绑核规则
 
+实际执行、业务性能判定与恢复统一使用 [绑核闭环操作说明](binding_workflow.md) 的 `scripts/ascend_bind.py`。本页下述 taskset 为可审阅建议；报告 `bind_cpu.sh` 默认只读预览，显式执行委托 journal 入口，不再直接依次 taskset。执行器保存当前原掩码和稳定身份，失败尽力恢复；恢复不完整会明确报出。
+
 实现：`analyzer/npu_parser.py`、`npu_affinity.py`、`topology.py`；展示：`npu_report.py`。采集/Manifest 缺失处理统一见 [采集契约](collection_contract.md)。
 
 ## 证据语义
@@ -34,11 +36,11 @@ NPU 亲和 CPU 可能只是某节点的一部分，超出该范围仍可能处�
 
 ## 执行与内存
 
-报告第三部分只生成具体 `taskset` 设置命令。整进程使用 `taskset -apc CPU_LIST PID`，指定线程使用 `taskset -pc CPU_LIST TID`；CPU 列表和身份必须有本次证据支持。第二区域保留身份、cpuset、NUMA、线程掩码与阻碍；第三部分代码块不含辅助脚本、Python、查询、备份/回滚和启动示例。
+报告第三部分为每个已核验的占卡主进程生成一条 `taskset -apc CPU_LIST PID`。CPU 列表和宿主机 PID 取自本次采集。
 
-`-a` 包括该进程所有现有线程，不递归处理子进程。前后快照 PPID 与 starttime 均稳定的子进程可以继承父进程建议分区，但必须独立核验其所有 TID 的有效 cpuset；有自己 NPU 归属的子进程采用自己的分区。每个需要变更的子 PID 另列一条命令。若部分线程已有合规窄掩码，则保留这些线程，只给待调整 TID 的具体命令。单核建议需独立目标证据，不能仅凭线程名称将全部线程分别塞入单核。
+`-a` 覆盖目标进程现有线程。启动器、未占卡子进程和各线程用于清单展示；有独立 NPU 归属的进程按自己的主 PID 评估。若各线程的有效 cpuset 或现有窄掩码要求不同目标，该主 PID 标为待处理。
 
-命令由用户授权后在原宿主机执行；直接命令不包含自动身份预检、原子线程集合锁定、失败回滚或未来任务的持续约束。执行前确认 PID/TID、cpuset 与采集窗口未变。原 affinity 保留在采集快照中；用户需要恢复时再按原掩码生成具体 taskset 命令。
+命令由用户授权后在原宿主机执行；直接命令不包含自动身份预检、原子线程集合锁定、失败回滚或未来任务的持续约束。执行前确认 PID/TID、cpuset 与采集窗口未变。采集快照保留原 affinity；实际闭环执行仍主动记录变更前的实时 affinity，恢复统一使用 state.json，不以旧快照覆盖现场较新的策略。
 
 taskset 不迁移已分配内存、不改变内存策略、不提供重启持久化。`numactl --physcpubind=... --membind=... COMMAND` 仅是新任务启动策略，需要独立内存证据，不是现有 PID 的迁移命令。
 
@@ -54,4 +56,4 @@ taskset 不迁移已分配内存、不改变内存策略、不提供重启持久
 
 ## HTML第三部分与脚本交付
 
-2.3仅展示当前NPU/NUMA摘要；完整对象清单和执行动作由metrics.binding_plan输出。逐TID已核验时生成具体taskset -pc；缺有效cpuset可保守使用原allowed子集，不能用其他线程/进程的cpuset替代。旧raw包缺TID出生时间时，若宿主机、boot、进程starttime和显式NPU映射存在且无身份冲突，允许生成带现场全线程CPU核验的taskset -apc脚本。脚本先验证所有对象再应用；不因缺字段退回任意单核或示例PID。现有合规掩码保留并可复现命令。
+2.3 展示当前 NPU/NUMA 摘要。第三节和脚本以 metrics.binding_plan 为准。旧包只要具备完整线程掩码、主进程身份、宿主机上下文与显式 NPU 映射，即可输出待现场核验的主进程命令。缺逐线程 cpuset 时，以各自的 allowed 作为安全边界。

@@ -184,7 +184,7 @@ class NpuSafetyTests(unittest.TestCase):
         import re
         commands = metrics(snapshots(), measured=True)['npu_affinity']['commands']
         self.assertTrue(commands)
-        self.assertTrue(all(re.fullmatch(r'taskset -(?:apc|pc) [0-9,-]+ [1-9][0-9]*', line)
+        self.assertTrue(all(re.fullmatch(r'taskset -apc [0-9,-]+ [1-9][0-9]*', line)
                             for line in commands.splitlines()))
 
 

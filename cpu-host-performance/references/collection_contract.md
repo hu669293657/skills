@@ -30,7 +30,7 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 | EXECUTION_FAILED | 工具存在但执行失败/超时/身份变化 | 保留返回码/错误原文，解决具体失败原因 |
 | UNKNOWN | 旧包没有请求/能力记录 | 不伪造成功或未请求，先审查原始目录 |
 
-`metrics.collection_integrity.entries[].collector_status` 是原始声明，`status` 是收到证据后的对账结果。ftrace 单独列出事件存在性、解析统计与丢失状态；未知丢失不能当0。HostBound 单独列出各状态数量和缺失类别。`actions` 解释具体缺失、原因、可解决性及条件；只有明确未请求常规数据、实际事件丢失等可由复采补足的场景才生成复采命令。常规复采示例无需 `--hostbound`。
+`metrics.collection_integrity.entries[].collector_status` 是原始声明，`status` 是收到证据后的对账结果。ftrace 单独列出事件存在性、解析统计与丢失状态；未知丢失不能当0。HostBound 单独列出各状态数量和缺失类别。`actions` 解释具体缺失、原因、可解决性及条件；只有明确未请求常规数据、实际事件丢失等可由复采补足的场景才生成复采命令。常规复采默认 `--buffer-size 16384` KiB/CPU。采集元数据分别记录请求与实际读回的缓冲区大小。
 
 ## 拓扑、身份与诊断约束
 
@@ -38,7 +38,7 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 - NPU→CPU 需要明确 CPU Affinity 字段。只有 HCCS/PCIe 或 Logic/Physical ID 时映射未知；不输出猜测命令。
 - 调度字段是 TID；TGID 来自 proc 或可证明的 clone 关系。使用 boot_id、starttime、进程/线程前后快照及生命周期隔离 PID 复用。未确认宿主机命名空间时不生成可执行方案。
 - 当前 CPU、allowed CPUs、有效 cpuset、Mems_allowed 与实际 numa_maps 页分布有不同语义。各 TID 的 cgroup 可能不同，需要逐线程核对。
-- 绑核计划只使用在线 CPU 与所有相关 TID 有效 cpuset 的交集，保留 SMT 完整组和 Worker 分区互斥。共享池没有完整运行/等待需求证据时不平均分配。若显式原始池完全一致、全部CPU归同一NUMA且全TID cpuset允许完整在线池，可给共享本地亲和池命令；不缩成随意子集、不声称隔离。任务已合规则保留掩码。报告给出直接 taskset 命令，执行时应确认身份、线程集合与 cpuset 仍与快照一致；直接命令本身不包含自动预检或回滚。
+- 绑核计划只使用在线 CPU 与所有相关 TID 有效 cpuset 的交集，保留 SMT 完整组和 Worker 分区互斥。共享池没有完整运行/等待需求证据时不平均分配。若显式原始池完全一致、全部CPU归同一NUMA且全TID cpuset允许完整在线池，可给共享本地亲和池命令；不缩成随意子集、不声称隔离。任务已合规则保留掩码。报告只给占卡主进程的 taskset -apc 命令，执行时应确认身份、线程集合与 cpuset 仍与快照一致；直接命令本身不包含自动预检或回滚。
 - CPU 绑定不迁移现有内存页。启动命令 `numactl --physcpubind=... --membind=... COMMAND` 仅在有独立内存策略证据时讨论，不作为运行 PID 的迁移命令。
 - 允许跨节点、单次 PSR 或页分布偏离只是潜在风险。已分配页不等于远端访问流量；风险升级需要关联迁移、实际内存访问、等待及性能退化证据。建议不直接修改全局调度参数。
 - AI HIGH 置信度来自稳定 NPU PID 归属；父子/cgroup/命令等关联分别标注 MEDIUM/LOW。高CPU或名称匹配不能单独认定 AI/竞争。竞争候选需要 AI 可运行等待与其他任务同 CPU 执行窗口交集，因果标记保持 UNPROVEN。
@@ -50,6 +50,6 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 
 单文件采集使用 `/proc/uptime` 的 boottime 时间戳；频率样本和进程快照声明 `clock=boottime`，优先选择 ftrace `boot` 时钟。内核不支持 boot 时钟时保留数据但不叠加不同域时间线。旧版 Python 采集包的 monotonic/mono 组合继续兼容。
 
-展示契约：HTML每类明细最多100条，完整指标和原始证据保留于report_data.json。截断只发生在渲染层；2.3不生成逐PID全部线程亲和证据表。资源速率依赖同钟不同时间点与非回退计数，缺失显示N/A；MemAvailable不能用MemFree替代，磁盘分区与整盘不累加，短窗口及磁盘busy%本身不证明资源瓶颈。
+展示契约：HTML每类明细最多100条，完整指标和原始证据保留于report_data.json。截断只发生在渲染层；2.3不生成逐PID全部线程亲和证据表。第5节用一张图展示最可能影响任务的资源占用与压力。资源速率依赖同钟不同时间点与非回退计数，缺失显示N/A；MemAvailable不能用MemFree替代，磁盘分区与整盘不累加，短窗口及磁盘busy%本身不证明资源瓶颈。
 
 HTML与JSON/绑核脚本直接生成，不再生成MD报告。2.3不展示逐卡原始证据展开区或建议CPU/NUMA占位。第三节metrics.binding_plan包含完整AI对象清单、命令、待核验原因和Bash脚本；展示最多100条，完整脚本/JSON不截断。

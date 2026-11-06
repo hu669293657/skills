@@ -1,6 +1,6 @@
 ---
 name: "cpu-host-performance"
-description: "Linux 训练/推理 HostBound 定位（怀疑 Host/CPU 侧拖慢 NPU/GPU）。当用户需要现场采集或离线分析 ftrace、Ascend Host 快照、可选 GIL/函数 PMU/msprof 数据来定位 Host 侧瓶颈时使用，覆盖 acl_thread、release_thread、SQ/CQ、IRQ、NUMA、CPU affinity/抢占、Python GIL、函数长尾、Host/Device overlap。不用于 Prof 数据的性能分析与比对（用 cluster-analysis / prof-compare / cluster-compare）；不用于只分析 NPU 算子本身；不用于报错/中断等故障日志排查（用 issue-analyzer）。"
+description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，需要采集/分析 ftrace、Host 快照、GIL/PMU/msprof，或需要 Rank/线程识别、NUMA 感知绑核、同负载性能验证与回滚时。适用 acl_thread、release_thread、DataLoader、HCCL、IRQ、CPU affinity、调度等待、Python GIL 和 Host/Device overlap；不用于仅 NPU 算子分析、通用 Prof 比对或故障日志排错。"
 ---
 
 # HostBound 性能诊断
@@ -9,11 +9,24 @@ description: "Linux 训练/推理 HostBound 定位（怀疑 Host/CPU 侧拖慢 N
 
 ## 固定交付
 
-最终交付物为 `<output-dir>/hostbound_report.html`、`report_data.json` 和 `bind_cpu.sh`。HTML直接从指标生成，单文件、离线可打开、中文；不生成Markdown报告。绑核脚本只生成，实际执行须用户授权。
+诊断交付物为 `<output-dir>/hostbound_report.html`、`report_data.json` 和 `bind_cpu.sh`。HTML直接从指标生成，单文件、离线可打开、中文；不生成Markdown报告。默认仅诊断/规划；`bind_cpu.sh` 默认只读预检/预览，显式执行委托同一 journal 执行器。闭环实验另保存 `plan.json`、`state.json`、前后业务指标及 `verification.json`。实际绑核与自动回滚须在用户已授权的范围内，不能把本地优化 skill 的请求当作对生产主机的执行授权。
+
+## 绑核闭环入口
+
+涉及绑核优化、Rank、执行、性能验证或恢复时，先读 [闭环操作与数据契约](references/binding_workflow.md)。统一入口为 `python3 scripts/ascend_bind.py`，执行器要求 Linux 宿主机、完整 Skill 目录、Python 3.8+；现场采集的单 Bash 无 Python 契约保持。
+
+1. **Trace 诊断**：用原入口采集/分析稳定业务窗口，保留原包与 report_data.json；按下文证据规则区分 Host 风险与已确认 HostBound。诊断允许数据不足，执行计划不允许填补未知身份/拓扑。
+2. **识别与计划**：`plan --report-data ... --pid ROOT_PID --output plan.json` 只读发现占卡主 PID、白名单 Rank 标签及主进程的全部线程，逐 TID 核对 cpuset。预览脚本用 `--main-pid` 指定确切的占卡主 PID。LOCAL_RANK/visible devices 仅作标签，不推断全局 NPU；同进程多卡且池不同则阻断。名称仅作角色线索。输出 plan 后查看所有 workers/actions/pools/warnings。
+3. **NUMA 分配**：默认 locality，保留合规窄掩码；显式 partition 仅为均分实验候选，按全部 NPU 和完整 SMT sibling 组分片，不以当前活跃卡数量扩大池。缺映射、跨 NUMA、空交集或冲突拒绝计划；不固定预留 Main/ACL/Release 核数。
+4. **执行**：先确认框架 binder 已关闭或不存在，记录 `--framework-binding disabled|absent`。`apply --plan ... --state ...` 只预检；授权后 `--execute` 全量预检、写入原掩码日志、按主 PID 执行 `taskset -apc`、逐线程读回和审计；失败尽力自动恢复。用户已经授权该实验时按范围继续，不逐命令重复确认。
+5. **性能验证**：同负载复采并由业务提供 before/after 指标（默认各至少3轮、每轮去热身后30样本），用 verify 比较主指标中位数和坏尾、核验 after Trace 的目标身份/affinity 及 plan_id。绑核读回只证明配置生效；无业务数据/样本不足/缺配置证据为 INCONCLUSIVE。保存实际调度、竞争和 NUMA 辅证。
+6. **恢复/保留**：收益达标且坏尾合格才建议保留；无收益/退化建议 rollback。`verify --rollback-on-fail --execute` 才授权任何非 PASS 自动恢复；`rollback --state ... --execute` 可单独恢复。记录每项恢复/退出/复用/冲突/失败；新任务继承状态无法精确还原时明确 UNTRACKED / RESTORE_INCOMPLETE。PID 重启或拓扑变化重新诊断/规划，不沿用旧身份。
+
+不默认执行 IRQ/dev 绑核、停 irqbalance、migratepages、强制内存绑定、训练启动或全局调优。有限 watch 仅审计，发现漂移/新任务即停止并恢复已跟踪项，不持续抢写框架策略。`taskset` 按 PID 枚举线程，执行器在调用前后核验身份和线程集合。
 
 报告采用 13 节顺序：1 结论摘要；2 问题证据总表与根因判断；3 优化建议；4 问题详情；5 机器资源与 CPU 总体状态；6 各核心负载；7 调度；8 IRQ/SoftIRQ；9 频率/Idle；10 Task/Thread；11 Affinity/NUMA；12 时间窗口；13 数据说明与指标解释。
 
-机器资源风险的概览、具体依据和详细判断统一在第5节展示；摘要/根因/问题详情仅保留跳转引用，不重复展开资源风险。第10节保留新版线程排名，移除旧版“Top运行时间任务”和“Top迁移任务”两张重复小表。第13节指标与事件/术语字典统一放在一个默认收起、支持无JS展开的帮助块。
+第5节用一张离线资源图展示占用、等待压力与可能的性能限制。先筛选会影响当前任务的资源，再用可用快照计算指标。整机展示 CPU 忙碌与等待、内存峰值、磁盘 I/O 和最紧张挂载点；识别到任务资源限额时，再展示对应限额或限流。用颜色和文字区分正常、留意、紧张与缺数据。该节只展示图与简短图注，原始记录保留在 report_data.json。摘要与其他章节引用第5节。第10节保留新版线程排名，移除旧版“Top运行时间任务”和“Top迁移任务”两张重复小表。第13节指标与事件/术语字典统一放在一个默认收起、支持无JS展开的帮助块。
 
 第二部分必须直接解释CPU平均利用率、单核最高利用率、全机上下文切换率、调度延迟P99、硬中断总占比、软中断总占比，并呈现根因判断/候选证据链，以及 NPU 任务与 NUMA 亲和性。HTML 按 NUMA 分组、每张 NPU 一张任务卡，列出主进程（按显存占用最高推定）、所有占卡宿主机 PID、线程数、NPU 亲和 CPU、当前线程 allowed CPU、ftrace 观测 CPU、PSR 最近运行核、“观测 NUMA → 亲和 NUMA”、CPU 绑定状态。2.3只展示当前亲和摘要，移除“依据、来源、内存与线程证据”展开区和“建议CPU / NUMA”字段；AI对象清单、目标CPU、缺项及执行命令统一放第三部分。根因不再单列尾部章节，具体优化动作统一放在第三部分。
 
@@ -25,9 +38,9 @@ description: "Linux 训练/推理 HostBound 定位（怀疑 Host/CPU 侧拖慢 N
 sudo bash scripts/cpu_trace_collect.sh
 ```
 
-采集必须在物理机/宿主机运行。现场只需复制 `scripts/cpu_trace_collect.sh` 一个文件；所有采集逻辑内嵌 Bash/awk，不依赖 Python、jq、相邻脚本或 Analyzer。目标环境为 Linux、Bash 4+、awk 与常见核心工具（cat、cp、date、getconf、tar 等）；`npu-smi`、lscpu、numactl、numastat、pstree 等按能力探测，缺失/权限不足分别记入 Manifest。Python 只在离线分析机器需要。
+采集必须在物理机/宿主机运行。现场只需复制 `scripts/cpu_trace_collect.sh` 一个文件；所有采集逻辑内嵌 Bash/awk，不依赖 Python、jq、相邻脚本或 Analyzer。目标环境为 Linux、Bash 4+、awk 与常见核心工具（cat、cp、date、getconf、tar 等）；`npu-smi`、lscpu、numactl、numastat、pstree 等按能力探测，缺失/权限不足分别记入 Manifest。采集阶段不需要 Python；离线分析需要 Python，现场闭环执行需要完整 Skill 与 Python 3.8+。
 
-默认 3 秒、全量安全 ftrace、HostBound、全部进程/线程前后快照、NPU 原始表、CPU/NUMA/IRQ/频率/Idle/cgroup/NUMA 页分布，并记录机器资源原始快照。CPU、内存、Swap、回收/OOM、磁盘容量/inode、块设备容量与I/O、PSI压力、任务内存/pids限额纳入第5节；容量与压力只形成候选，不单独证明业务劣化。进程快照记录 PPID、TGID、TID、starttime、namespace、逐线程有效 cpuset 与 NUMA 页汇总，便于离线发现 AI 主进程、子进程和线程。`--duration` 调整时长，`--pid` 增加明确宿主机根 TGID 并保存其 NUMA 原始文件；`--hostbound`/`--discover` 为兼容参数。`--no-hostbound` 关闭进程/NPU采集；`--minimal` 仅精简 ftrace 事件，保留安全快照和低频轮询。每次在输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/`，压缩包同名；重复执行不会覆盖旧数据，也不要求用户换目录。
+默认 3 秒、全量安全 ftrace、HostBound、全部进程/线程前后快照、NPU 原始表、CPU/NUMA/IRQ/频率/Idle/cgroup/NUMA 页分布，并记录机器资源原始快照。资源快照覆盖 CPU、内存/换页/OOM、磁盘容量/inode/I/O 和 PSI，任务 cgroup 快照补充 CPU/内存/PID 限额。默认 `--buffer-size 16384` KiB/CPU，实测丢失时按该配置重采并对比丢失计数。进程快照记录 PPID、TGID、TID、starttime、namespace、逐线程有效 cpuset 与 NUMA 页汇总，便于离线发现 AI 主进程、子进程和线程。`--duration` 调整时长，`--pid` 增加明确宿主机根 TGID 并保存其 NUMA 原始文件；`--hostbound`/`--discover` 为兼容参数。`--no-hostbound` 关闭进程/NPU采集；`--minimal` 仅精简 ftrace 事件，保留安全快照和低频轮询。每次在输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/`，压缩包同名；重复执行不会覆盖旧数据，也不要求用户换目录。
 
 采集或完整性判断时读取 [采集契约与缺失状态](references/collection_contract.md)。先核对 `metrics.collection_integrity`：ftrace 的解析/丢失与 HostBound/NPU/NUMA 的文件/语义完整性独立呈现。`collector_status` 保留采集端声明，`status` 是 Analyzer 对实际包内文件的对账结果。仅 `actions[].recollect=true` 才提供相应复采命令；解析失败先修复解析器，未打包先取回已有文件，工具缺失/权限不足先说明条件，无活动进程不要求重复采集。
 
@@ -64,12 +77,12 @@ python3 tools/tool_router.py --signals python,gil,irq,numa,device-gap
 ## 优化与安全边界
 
 - 先保留原始采集包、affinity、IRQ 和 NUMA 快照，再提出优化方案。
-- `host_analyzer` 是优化执行器，不是诊断器。禁止自动执行 `taskset`、`migratepages`、写 `/proc/irq/*/smp_affinity` 或停止 `irqbalance`。
+- `host_analyzer` 是可选的独立外部优化工具，不是诊断器。默认不执行系统变更；用户授权 CPU 绑核实验后使用上述 journal 执行器。`migratepages`、IRQ affinity 和 irqbalance 不随 CPU 实验自动执行。
 - 优化必须由用户确认，并以前后相同负载、同一窗口的复采结果验证；无收益或副作用须给出回滚方案。
-- 第三部分先展示AI进程与线程清单，包含NPU主进程、可验证的父/子进程、Python、ACL下发、回收、数据加载、分词及通信角色；角色名称只作线索，不等同根因。随后代码块只放带实际 CPU 列表和宿主机 PID/TID 的 `taskset` 设置命令：整进程使用 `taskset -apc CPU_LIST PID`，指定线程使用 `taskset -pc CPU_LIST TID`。例如 `taskset -apc 32-63 4001` 或目标有依据时 `taskset -pc 32 4001`。CPU、PID、TID 必须来自本次证据，例子中的数字不能作为默认值。
-- `-a` 处理指定进程的所有现有线程，不递归处理已有子进程。使用前后快照中的稳定 PPID 关系递归识别子进程，对每个需要变更且 cpuset 允许的宿主机子 PID 单独列出命令；有自身 NPU 映射的子进程使用自己的方案。身份/关系变化或 cpuset 不允许时，在证据部分说明缺项。
-- 已知线程有独立目标或已有合规窄掩码需要保留时，使用具体 TID 命令；只有证据支持单核目标才给单核。仅有线程名不能推出单核分配。代码块保持可直接复制的命令行，不附 Python、循环、查询、环境变量、备份/回滚框架或 numactl 示例。简短执行条件置于代码块外；完整 `bind_cpu.sh` 包含必要的宿主机/进程/线程身份与实时可用CPU核验，所有预检通过后才执行，现场不依赖Python。已合规项也输出保持原掩码的幂等命令，避免把“无需变更”混为“没有命令”。
-- 离线生成命令无需申请执行权限；实际绑核仍需用户授权。采集快照保留原 affinity，用户明确需要回滚时才生成相应具体恢复命令。`taskset` 不迁移既有内存页。
+- 第三部分先列 NPU 主进程、可验证的父子进程和线程角色。每个已核验的占卡主进程只给一条具体的 `taskset -apc CPU_LIST PID`。该命令作用于指定 PID 的全部现有线程。启动器、未占卡子进程及辅助线程仅作清单展示。
+- 先核对主进程的宿主机身份、NPU 本地 CPU 范围和全线程的有效 cpuset。所有线程须可安全共用同一目标掩码。遇到需要保留的不同窄掩码或不兼容的 cpuset 时，将该 PID 标为待处理。
+- `bind_cpu.sh` 默认 Bash 预检和预览。`--apply` 委托现场执行器重新发现主进程和线程，先保存原 affinity，再按主 PID 调用 `taskset -apc` 并读回。恢复时按日志逐线程恢复原掩码。完整操作见闭环契约。
+- 离线生成命令无需申请执行权限；实际绑核仍需用户授权。执行器在任何变更前主动保存当前真实 affinity 和稳定身份用于恢复，不能仅依赖较旧采集快照。`taskset` 不迁移既有内存页。
 - 纯拓扑偏离只能是潜在配置风险。提高 NUMA 性能风险需相互关联的跨节点运行迁移、实际内存位置/远端访问、明显等待与性能证据；页分布本身不能证明远端访存流量。不机械建议修改全局调度参数。复采根据 Manifest 的原因和可解决性判断，常规完整入口不再依赖额外开关。
 
 ## 离线分析
@@ -102,4 +115,4 @@ python3 <Skill路径>/analyzer/analyze_cpu_trace.py <采集包或trace> --output
 
 ## 旧包绑核兼容
 
-以metrics.binding_plan为第三部分和脚本的唯一交付依据。缺逐TID cpuset但有已观测allowed时，可对每个已核验线程仅使用其原allowed与明确NPU亲和池/online的交集，不把进程cpuset外推到所有线程。旧raw包有host/boot_id/进程starttime和明确NPU映射、缺TID出生时间且所有已观测线程掩码一致时，输出进程级taskset -apc方案；异构窄掩码保持不变，能独立核验的线程单独列命令，不能核验的线程列缺项；完整脚本执行时核验进程身份和当前所有线程，HTML清单标记待现场核验。身份冲突、未知NPU映射或未确认命名空间仍逐项说明，不填示例PID/CPU。按稳定PPID关系追溯AI启动/父进程和子进程，各自核验CPU范围；同PID多卡且CPU池不同，缺TID/rank分工时仍阻断，不替所有线程猜并集。单核仅在已有窄掩码或有效交集实际为单核时输出。
+报告和预览以 metrics.binding_plan 为准。旧包已确认宿主机身份、主进程 starttime、显式 NPU 映射和完整线程掩码时，可生成待现场核验的主进程命令。缺逐线程 cpuset 时，以该线程当前 allowed 与 NPU 本地在线 CPU 的交集为边界。执行前用新 plan.json 核验现场线程，使用 state.json 恢复。身份冲突、未知 NPU 映射、不同安全掩码或同一 PID 使用不同 NPU CPU 池时，在清单标出具体阻碍。

@@ -27,6 +27,7 @@ class CollectionShellTests(unittest.TestCase):
         self.assertIn('--discover',r.stdout)
         self.assertIn('--no-hostbound',r.stdout)
         self.assertIn('default: 3 s',r.stdout)
+        self.assertIn('默认 16384',r.stdout)
 
     def test_missing_option_value_fails_promptly(self):
         for flag in ('--duration', '--output', '--pid', '--frequency-interval'):
@@ -91,11 +92,15 @@ hb_command(){
                 text=text.replace('# END standalone evidence','# END standalone evidence\n'+fake_commands,1)
                 script=base/'collect.sh';script.write_text(text,encoding='utf-8',newline='\n')
                 args=['--no-hostbound','--duration','1','--output',(base/'out').as_posix()]
-                if minimal:args.append('--minimal')
+                if minimal:args.extend(['--minimal','--buffer-size','8192'])
                 r=self.run_bash(script,*args)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr)
                 snap=next(p for p in (base/'out').glob('cpu_trace_*') if p.is_dir())
                 self.assertEqual((snap/'trace_overrun.txt').read_text().strip(),'4')
+                requested = 8192 if minimal else 16384
+                metadata=(snap/'metadata.txt').read_text(encoding='utf-8')
+                self.assertIn('buffer_size_requested_kb: %d'%requested,metadata)
+                self.assertIn('buffer_size_effective_kb: %d'%requested,metadata)
                 caps=(snap/'hostbound/capabilities.tsv').read_text()
                 self.assertIn('power/cpu_frequency\t1\t1\t%d\t%d'%(0 if minimal else 1,0 if minimal else 1),caps)
                 self.assertTrue((base/'cleanup.log').exists())

@@ -47,6 +47,16 @@ def fixture(base):
 
 
 class StandaloneTests(unittest.TestCase):
+    def test_rank_environment_is_whitelisted_without_secrets(self):
+        with tempfile.TemporaryDirectory() as d:
+            base=Path(d);proc,sys,out=fixture(base)
+            put(proc,'4001/environ','LOCAL_RANK=3\x00RANK=11\x00ASCEND_RT_VISIBLE_DEVICES=7,2\x00API_KEY=SECRET\x00')
+            self.run_library(base,proc,sys,out,'hb_snapshot process "$SNAP/start.json"\n')
+            raw=(out/'start.json').read_text();data=json.loads(raw)
+            env=next(p for p in data['processes'] if p['tgid']==4001)['rank_env']
+            self.assertEqual(env,{'LOCAL_RANK':'3','RANK':'11','ASCEND_RT_VISIBLE_DEVICES':'7,2'})
+            self.assertNotIn('SECRET',raw)
+
     def run_library(self, base, proc, sys, out, commands):
         code=(REPO/'scripts/cpu_trace_collect.sh').read_text(encoding='utf-8')
         library=code.split('# BEGIN standalone evidence')[1].split('# END standalone evidence')[0]
@@ -216,4 +226,5 @@ rmdir(){ :; }
             run_analysis(str(archive),str(base/'report'),quiet=True)
             metrics=json.loads((base/'report/report_data.json').read_text(encoding='utf-8'))['metrics']
             self.assertIn('taskset -apc 32-63 4001',metrics['npu_affinity']['commands'],str(metrics['npu_affinity']))
-            self.assertIn('taskset -apc 32-63 4002',metrics['npu_affinity']['commands'])
+            self.assertNotIn(' 4002',metrics['npu_affinity']['commands'])
+            self.assertEqual(metrics['binding_plan']['commands'],'taskset -apc 32-63 4001')

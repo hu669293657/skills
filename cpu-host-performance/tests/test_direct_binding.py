@@ -4,7 +4,7 @@ from analyzer.npu_affinity import _binding_script
 
 
 class DirectBindingTests(unittest.TestCase):
-    def test_process_and_verified_child_are_separate_commands(self):
+    def test_each_verified_main_process_gets_one_command(self):
         actions = [dict(pid=4001, target='32-63', evidence={}),
                    dict(pid=4002, target='32-63', evidence={})]
         commands = _binding_script(actions, {'boot_id': 'fixture'})
@@ -14,9 +14,11 @@ class DirectBindingTests(unittest.TestCase):
     def test_narrow_compliant_thread_is_preserved(self):
         actions = [dict(pid=4001, target='32', evidence={
             'allowed': {4001: set(range(64)), 4002: {32}}})]
-        self.assertEqual(_binding_script(actions, {}), 'taskset -pc 32 4001')
+        self.assertEqual(_binding_script(actions, {}), 'taskset -apc 32 4001')
+        actions[0]['target'] = '32-35'
+        self.assertEqual(_binding_script(actions, {}), '')
 
-    def test_known_descendant_gets_own_command_and_cpuset_is_checked(self):
+    def test_descendant_without_npu_ownership_gets_no_command(self):
         import json
         from tests.test_npu_affinity import snapshots, add_complete_identity, workload_events
         from analyzer.parser import TraceData
@@ -34,7 +36,7 @@ class DirectBindingTests(unittest.TestCase):
                 cpuset_cpus_effective=list(range(192))))
             td.snapshot[name] = json.dumps(batch)
         commands = compute_metrics(td)['npu_affinity']['commands']
-        self.assertIn('taskset -apc 144-155 6000',commands)
+        self.assertNotIn(' 6000',commands)
         for phase in ('start','end'):
             name = 'hostbound/process_%s.json' % phase
             batch = json.loads(td.snapshot[name])

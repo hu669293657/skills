@@ -1,5 +1,9 @@
 # CPU Host 性能分析 Skill
 
+新增统一绑核闭环：`python3 scripts/ascend_bind.py --help`。流程为 Trace 诊断 → 现场 NPU/Rank 标签/子进程线程识别 → NUMA 计划 → journal 执行与读回 → 同负载业务 A/B + Trace 验证 → 回滚。默认只读；实际执行需显式 `--execute`。完整命令、指标 JSON 格式、状态和限制见 [绑核闭环操作说明](references/binding_workflow.md)。
+
+`bind_cpu.sh` 现在默认仅预检/预览；其 `--apply` / `--rollback` 委托同一个 Python 执行器，需要完整 Skill 目录和 Python 3.8+。原采集器仍为独立 Bash，无 Python/jq 依赖。新进程/线程或 affinity 漂移会要求重新规划，不自动追随重启 Rank；不默认改变 IRQ 或迁移内存页。
+
 面向 openEuler / Kunpeng / Ascend 训练与推理的只读采集、离线分析与证据报告。升级保留原有入口、13节报告、NPU/NUMA亲和性与安全绑核建议，增加频率多源降级、进程线程发现、竞争候选与全核交互图。
 
 ## 采集
@@ -23,10 +27,10 @@ sudo bash scripts/cpu_trace_collect.sh --no-hostbound --duration 10 --output /tm
 sudo bash scripts/cpu_trace_collect.sh --minimal --frequency-interval 2 --duration 10 --output /tmp/cpu-case-004
 
 # 限制采集CPU、buffer（KB/核）
-sudo bash scripts/cpu_trace_collect.sh --duration 10 --cpu-list 128-159 --buffer-size 4096 --output /tmp/cpu-case-005
+sudo bash scripts/cpu_trace_collect.sh --duration 10 --cpu-list 128-159 --buffer-size 16384 --output /tmp/cpu-case-005
 ```
 
-`--hostbound` 和 `--discover` 保留兼容，正常完整采集无需添加。`--minimal` 是主动选择的事件精简模式，并不关闭常规安全快照。每次在指定输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/` 及同名 tar.gz；可连续重复执行，不覆盖旧数据。默认 sysfs 轮询1秒，最小0.2秒；每个 policy 读取一次。默认 buffer 为4096KB/核，256核约1GiB；实际内核占用、文字导出大小和全机线程快照耗时需现场核验。30秒是 trace 业务窗口，完整命令还包括前后快照及打包时间。
+`--hostbound` 和 `--discover` 保留兼容，正常完整采集无需添加。`--minimal` 是主动选择的事件精简模式，并不关闭常规安全快照。每次在指定输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/` 及同名 tar.gz；可连续重复执行，不覆盖旧数据。默认 sysfs 轮询1秒，最小0.2秒；每个 policy 读取一次。默认 buffer 为 16384 KiB/CPU，256 个 CPU 约 4 GiB；请求值和内核读回值记录在采集元数据中。实际内核占用、文字导出大小和全机线程快照耗时需现场核验。30秒是 trace 业务窗口，完整命令还包括前后快照及打包时间。
 
 采集使用私有 `instances/cpu_host_<collector-pid>`，不清空全局 trace 或覆盖其他工具配置。tracefs/实例不支持或无权限时停止 tracing，保留已获取的只读快照、Manifest 和错误信息，可直接分析 `cpu_trace/` 降级报告。正常结束、失败和信号退出都会清理私有实例。SIGKILL/断电可能遗留实例，应由管理员核验后处理。
 
@@ -49,14 +53,14 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 支持 tar.gz、zip、目录、ftrace/trace-cmd文本、Chrome/Perfetto JSON。输出：
 
 - `hostbound_report.html`：固定入口，单文件离线打开，无CDN/外部JS。
-- `bind_cpu.sh`：带必要身份和CPU预检的具体绑核脚本，Bash/awk，无Python依赖；只生成，不自动执行。
+- `bind_cpu.sh`：默认 Bash/awk 身份与CPU预检/预览；显式执行委托 Python 3.8+ journal 执行器（完整 Skill 目录）。
 - `report_data.json`：schema_version=2，包含单位、任务身份、指标、原始快照、等待/运行区间、候选证据和诊断。
 
 也允许分析只有频率/进程sidecar的目录：生成明确缺失调度数据的降级报告。解压累计默认上限512MiB；较大可信采集包请先解压到新的专用目录，再以目录分析。归档路径穿越、链接和设备成员被拒绝。
 
 ## 报告阅读
 
-固定13节：1摘要；2关键指标解释/候选证据链/NPU亲和性；3优化建议；4发现详情；5机器资源与CPU总体状态；6全CPU负载；7调度；8中断；9频率/Idle；10进程线程与竞争；11Affinity/NUMA；12时间窗口；13数据覆盖。资源风险的具体内容统一在第5节，其余章节保留跳转；第10节移除旧版运行时间/迁移Top小表，保留新版排名；第13节词典默认折叠为一个帮助区。
+固定13节：1摘要；2关键指标解释/候选证据链/NPU亲和性；3优化建议；4发现详情；5机器资源与CPU总体状态；6全CPU负载；7调度；8中断；9频率/Idle；10进程线程与竞争；11Affinity/NUMA；12时间窗口；13数据覆盖。第5节用一张离线图展示主要资源占用、压力与任务限额，颜色区分紧张、留意、正常与缺数据；第10节移除旧版运行时间/迁移Top小表，保留新版排名；第13节词典默认折叠为一个帮助区。
 
 第二节直接解释CPU平均利用率、单核最高利用率、上下文切换率、调度延迟P99、硬中断总占比、软中断总占比。每项有当前值、公式、关注原因、动态解读、诊断限制和可信度。阈值为可审查的经验筛选值，不是官方性能标准。
 
@@ -79,7 +83,8 @@ HTML每类明细最多展示100条，并保留总记录数；长表默认收缩�
 
 第10节首先展示 AI 进程、潜在竞争者和系统任务摘要，Top N 之外及无关进程进入可展开列表。TID→TGID→PPID→cgroup→NPU 的关联附 HIGH/MEDIUM/LOW 置信度；名称只作线索。完整线程身份、运行/等待、Affinity、全部竞争重叠窗口和原始快照保留在 JSON。
 
-CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；若共同的完整在线本地亲和池、宿主机身份和全TID cpuset均已核验，则生成共享池taskset命令（不承诺隔离）；每个执行方案校验身份和CPU范围；互斥分区仍需完整负载/SMT证据。已合规线程也给出保持原掩码的命令。缺cpuset时只使用逐线程已观测allowed子集；旧包缺TID出生但有进程身份且掩码一致时使用待现场核验的进程级方案；异构窄掩码保持不变。第三部分代码块只提供具体 taskset 命令：整进程 `taskset -apc CPU_LIST PID`，指定线程 `taskset -pc CPU_LIST TID`。`-a` 不包含子进程，已知且证据完整的子 PID 分别列出；已有合规窄掩码予以保留。HTML命令块不附辅助代码；下载脚本带必要的现场预检，无Python或自动调优操作。直接命令执行前需确认身份与资源配置仍与快照一致；taskset 不迁移现有内存页。
+CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；若共同的完整在线本地亲和池、宿主机身份和全TID cpuset均已核验，则生成共享池taskset命令（不承诺隔离）；每个执行方案校验身份和CPU范围；互斥分区仍需完整负载/SMT证据。第三部分仅对已核验的占卡主进程生成 `taskset -apc CPU_LIST PID`，每个 PID 一条。启动器和未占卡子进程仅展示。若各线程需保留不同掩码或无法共用目标，跳过该 PID 并标明原因。缺逐线程 cpuset 时使用当前 allowed 作为安全边界。下载脚本默认预检与预览，显式执行在现场重建计划、记录原掩码、按主 PID 执行并读回。
+
 
 竞争候选必须有可运行等待与同核运行时间重叠，Affinity只作旁证。NPU直接归属与父子关联不同；单纯Python名称、CPU高、共享Affinity、R/R+都不能认定根因。没有同域Device窗口时仅报告Host侧风险。详见 [数据契约、算法与限制](references/analysis_v2.md)。
 
@@ -106,7 +111,7 @@ python3 examples/generate_synthetic.py --output /tmp/cpu-synthetic-demo
 
 ## 安全与兼容性
 
-只读/proc、sysfs、cgroup、taskset查询与npu-smi；不会修改业务Affinity、IRQ、Governor或NUMA配置，不启动训练/推理/PMU。离线生成的优化命令仅为建议，执行须用户确认并保存/回滚配置。
+默认只读 /proc、sysfs、cgroup 和 npu-smi，诊断/plan/preview 不改 affinity。显式授权 --execute 才执行逐 TID CPU 亲和变更，并保存 journal、读回和恢复结果；IRQ、Governor、内存策略不随 CPU 实验修改，不启动训练/推理/PMU。
 
 /proc 前后快照并非原子，短命任务可能只有生命周期而无TGID；无clone证据时保留未知，PID复用和命名空间不明时阻止跨身份关联。丢失 trace 只报告已观测下界。Affinity 成对比较按等待排序最多512个活跃关联线程，截断范围会明示；完整线程身份、Affinity 和竞争时间窗口仍保留在 JSON。内存页位置不等于实测远端访存流量，仅拓扑偏离不提升为 P1。
 

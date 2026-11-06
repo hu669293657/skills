@@ -11,7 +11,7 @@ _EXPLANATION = ('allowed CPU 是调度许可范围；PSR 是采样时最近运�
                 '红色表示观测到非亲和 CPU/绑定范围偏离。CPU 绑定与内存页 NUMA 分布分别核验，'
                 '亲和性风险不等于已确认的 HostBound 根因。主进程按占卡显存最高推定，所有占卡 PID 均保留。')
 _OPERATIONS = ('在原宿主机以有权限的账户执行，PID/TID 与采集时身份及 cpuset 需保持一致。'
-               'taskset -apc 作用于指定进程的所有现有线程；已知子进程单独列出，taskset -pc 作用于指定线程。'
+               'taskset -apc 作用于指定进程的所有现有线程。现有子进程与辅助任务仅作清单展示。'
                '新建线程/子进程通常继承创建者当时的 affinity；taskset 不迁移既有内存页。')
 
 
@@ -69,19 +69,20 @@ def binding_html(data, integrity=None, plan=None):
     tasks = plan.get('tasks', [])
     parts = ['<h3>AI 进程与线程清单</h3>', '<p>%s</p>' % escape(plan.get('note', '根据已采集的NPU、进程和线程关系整理。'))]
     if tasks:
-        parts.append(table(['NPU','PID/TGID','TID','父PID','对象','名称','角色','当前CPU','绑定CPU','NUMA','状态 / 原因'], [
-            [row.get('npu_ids'),row['pid'],row['tid'],row.get('ppid'),row['object_type'],row['name'],row['role'],row['current_cpu'],row['target_cpu'] or '无法确定',row['numa'],row['status']+'；'+row['reason']]
+        parts.append(table(['NPU','PID/TGID','TID','父PID','Rank / Local Rank（环境标签）','对象','名称','角色','当前CPU','绑定CPU','NUMA','状态 / 原因'], [
+            [row.get('npu_ids'),row['pid'],row['tid'],row.get('ppid'),'%s / %s'%(row.get('rank') or '未知',row.get('local_rank') or '未知'),row['object_type'],row['name'],row['role'],row['current_cpu'],row['target_cpu'] or '无法确定',row['numa'],row['status']+'；'+row['reason']]
             for row in tasks], True, title='AI 进程与线程清单'))
     else:
         parts.append('<p>未识别到可关联的 AI 对象；不能用任意 Python 进程或示例 PID 代替。</p>')
     parts += ['<h3>具体绑核命令与脚本</h3><p>%s</p>' % escape(_OPERATIONS)]
-    commands = (plan.get('commands') or data.get('commands') or '').splitlines()
+    commands = ((plan.get('commands') if plan else data.get('commands')) or '').splitlines()
     if commands:
         parts.append('<div class="code-panel"><button type="button" class="copy-code" onclick="copyBinding(this)">复制绑核命令</button><pre><code>%s</code></pre></div>' % escape('\n'.join(commands[:DISPLAY_LIMIT])))
         if len(commands) > DISPLAY_LIMIT:
             parts.append('<p>仅展示前100 / %d条命令；完整脚本与JSON保留全部命令。</p>' % len(commands))
         if plan.get('script'):
-            parts.append('<p><a download="bind_cpu.sh" href="data:text/x-shellscript;charset=utf-8,%s">下载完整绑核脚本 bind_cpu.sh</a>（包含宿主机、PID/TID 身份及当前 CPU 范围核验；全部预检通过后才应用。）</p>' % quote(plan['script'], safe=''))
+            parts.append('<p><a download="bind_cpu.sh" href="data:text/x-shellscript;charset=utf-8,%s">下载绑核入口 bind_cpu.sh</a>（默认只预览。--apply 委托 Skill 的 scripts/ascend_bind.py，现场重新核验并生成计划、保存回滚日志、执行与读回；需 Python 3.8+ 及完整 Skill 目录。）</p>' % quote(plan['script'], safe=''))
+            parts.append('<p>闭环顺序：本报告诊断 → plan 自动识别实际 NPU / Rank 标签 / 子进程线程 → NUMA 计划 → apply → 同负载复采及业务样本 verify → 无收益或异常 rollback。角色名称不能证明专核需求；Rank 标签不能代替实际设备归属。用 bash bind_cpu.sh --help 查看执行与回滚方式；详细指标格式见 Skill 的 references/binding_workflow.md。</p>')
     else:
         parts.append('<p>没有通过身份/CPU核验的执行项。逐对象的缺项与原因已在上表列出；缺少原始事实时不生成虚构命令。</p>')
     return ''.join(parts)

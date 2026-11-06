@@ -46,6 +46,11 @@ def process_batch(snapshot, stage):
                 if item.get('cgroup') is not None and not isinstance(item['cgroup'], str):
                     errors.append('process_%s.json:%s cgroup is not text' % (stage, field))
                     item['cgroup'] = ''
+                if 'rank_env' in item:
+                    env=item['rank_env'] if isinstance(item['rank_env'],dict) else {}
+                    keys=('RANK','LOCAL_RANK','WORLD_SIZE','LOCAL_WORLD_SIZE','GROUP_RANK',
+                          'ASCEND_RT_VISIBLE_DEVICES','ASCEND_VISIBLE_DEVICES','CUDA_VISIBLE_DEVICES')
+                    item['rank_env']={k:v for k,v in env.items() if k in keys and isinstance(v,str) and len(v)<=256}
             except (ValueError, TypeError, KeyError, OverflowError):
                 errors.append('process_%s.json:%s row lacks valid numeric identity/CPU fields' % (stage, field))
                 continue

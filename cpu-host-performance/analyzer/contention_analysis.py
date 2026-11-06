@@ -54,7 +54,7 @@ def cgroup_deltas(snapshot):
         result.append({'path':path,'version':row.get('version'),'tgids':row.get('tgids',[]),
                        'quota_cpus':quota/period if quota is not None and period else None,
                        'quota_status':'LIMITED' if quota is not None else ('UNLIMITED' if row.get('cpu.max','').startswith('max ') or row.get('cpu.cfs_quota_us')=='-1' else 'UNKNOWN'),
-                       'nr_throttled_delta':delta('nr_throttled'),'throttled_usec_delta':throttled,
+                       'nr_periods_delta':delta('nr_periods'), 'nr_throttled_delta':delta('nr_throttled'),'throttled_usec_delta':throttled,
                        'evidence':'process_start/end.json cgroup ancestor cpu.max/cpu.stat deltas',
                        'confidence':'MEDIUM' if throttled is not None else 'LOW',
                        'note':'前后快照包围trace窗口；计数为整个cgroup而非单线程；throttled时间不能视为整机饱和。'})

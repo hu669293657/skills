@@ -29,6 +29,13 @@ def entry(category='npu_info', status='COLLECTED', **extra):
 
 
 class IntegrityTests(unittest.TestCase):
+    def test_buffer_overrun_recollection_uses_larger_per_cpu_buffer(self):
+        from analyzer.collection_integrity import analyze_collection_integrity
+        result = analyze_collection_integrity({'buffer_overrun': 3990000, 'buffer_overrun_known': True}, {})
+        action = next(row for row in result['actions'] if row['status'] == 'LOST_EVENTS')
+        self.assertIn('--buffer-size 16384', action['command'])
+        self.assertEqual(result['ftrace']['lost_events'], 3990000)
+
     def test_absent_declared_raw_is_not_included_and_not_blindly_recollected(self):
         data = result([entry()])
         self.assertEqual(data['entries'][0]['status'], 'NOT_INCLUDED')

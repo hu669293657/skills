@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-def fixture():
+def fixture(narrow=False):
     from analyzer.parser import TraceData, Event
     from analyzer.metrics import compute_metrics
     procs=[];threads=[]
@@ -18,7 +18,7 @@ def fixture():
         threads.append(dict(tid=pid,tgid=pid,name=name,starttime=pid*10,namespace_pids=[pid],
                             allowed_cpus=list(range(64)),cpuset_cpus_effective=list(range(64))))
     threads.append(dict(tid=4002,tgid=4001,name='acl_thread',starttime=40020,namespace_pids=[4002],
-                        allowed_cpus=[32],cpuset_cpus_effective=list(range(64))))
+                        allowed_cpus=[32] if narrow else list(range(64)),cpuset_cpus_effective=list(range(64))))
     td=TraceData();td.events=[Event(0,32,'sched_switch',fields={'prev_pid':0,'next_pid':4001}),
                              Event(3,32,'sched_switch',fields={'prev_pid':4001,'next_pid':0})]
     batch=json.dumps(dict(processes=procs,threads=threads))
@@ -69,7 +69,7 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
     def test_partial_thread_birth_data_preserves_known_narrow_masks(self):
         from analyzer.npu_affinity import analyze_npu_affinity
         from analyzer.binding_plan import build_binding_plan
-        m=fixture()
+        m=fixture(narrow=True)
         for phase in ('start','end'):
             key='hostbound/process_%s.json'%phase;batch=json.loads(m['snapshot'][key])
             for row in batch['threads']:
@@ -77,8 +77,8 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
             m['snapshot'][key]=json.dumps(batch)
         m['npu_affinity']=analyze_npu_affinity(m)
         plan=build_binding_plan(m)
-        self.assertIn('taskset -pc 32 4002',plan['commands'])
-        self.assertNotIn('taskset -apc 32-35 4001',plan['commands'])
+        self.assertFalse(plan['commands'])
+        self.assertTrue(any('掩码不同' in row['reason'] for row in plan['tasks']))
 
     def test_script_checks_all_identities_before_any_taskset(self):
         bash=shutil.which('bash') or 'C:/Program Files/Git/bin/bash.exe'
@@ -95,6 +95,7 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
                     fields=['0']*40;fields[0]='S';fields[19]=str(birth)
                     put(proc/str(ident)/'stat','%d (worker) '%ident+' '.join(fields))
                 put(proc/str(pid)/'task'/str(tid)/'status','Tgid:\t%d\nCpus_allowed_list:\t0-63\n'%pid)
+            put(proc/'4001/task/4002/status','Tgid:\t4001\nCpus_allowed_list:\t0-63\n')
             bindir=base/'bin';put(bindir/'taskset','#!/bin/bash\nprintf "%s\\n" "$*" >> "$BIND_TEST_LOG"\n')
             put(bindir/'systemd-detect-virt','#!/bin/bash\nexit 1\n')
             path=('/'+bindir.drive[0].lower()+bindir.as_posix()[2:]) if os.name=='nt' else bindir.as_posix()
@@ -104,8 +105,9 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
             file=base/'bind.sh';file.write_text(wrapper+script,encoding='utf-8',newline='\n')
             result=subprocess.run([bash,str(file)],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=30)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-            self.assertIn('-pc 32 4002',log.read_text())
-            log.unlink();put(proc/'4101/stat','4101 (reused) S '+'0 '*40)
+            self.assertIn('taskset -apc 32-35 4001',result.stdout)
+            self.assertFalse(log.exists(),'default preview must never change affinity')
+            put(proc/'4001/task/4002/status','Tgid:\t4001\nCpus_allowed_list:\t32\n')
             result=subprocess.run([bash,str(file)],capture_output=True,text=True,timeout=30)
             self.assertNotEqual(result.returncode,0)
             self.assertFalse(log.exists(),'all prechecks must precede any affinity change')
@@ -126,16 +128,13 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
         self.assertNotIn('npu-evidence',html)
         self.assertIn('NPU 0',html)
 
-    def test_plan_lists_ai_family_and_gives_actual_thread_commands(self):
+    def test_plan_lists_ai_family_but_only_binds_main_pid(self):
         m=fixture();plan=m.get('binding_plan',{})
         self.assertTrue(plan.get('tasks'))
         tids={r['tid'] for r in plan['tasks']}
         self.assertTrue({3900,4001,4002,4101}<=tids)
         self.assertNotIn(9001,tids)
-        self.assertIn('taskset -pc 32 4002',plan['commands'])
-        self.assertIn('taskset -pc 32-35 4001',plan['commands'])
-        self.assertIn('taskset -pc 32-35 4101',plan['commands'])
-        self.assertIn('taskset -pc 32-35 3900',plan['commands'])
+        self.assertEqual(plan['commands'],'taskset -apc 32-35 4001')
         from analyzer.npu_report import binding_html
         html=binding_html(m['npu_affinity'],plan=m['binding_plan'])
         self.assertIn('AI 进程与线程清单',html)
@@ -153,8 +152,7 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
             m['snapshot'][key]=json.dumps(batch)
         m['npu_affinity']=analyze_npu_affinity(m)
         plan=build_binding_plan(m)
-        self.assertIn('taskset -pc 32 4002',plan['commands'])
-        self.assertIn('taskset -pc 32-35 4001',plan['commands'])
+        self.assertEqual(plan['commands'],'taskset -apc 32-35 4001')
 
     def test_legacy_raw_snapshot_produces_guarded_process_commands(self):
         from tests.test_npu_affinity import metrics,snapshots
@@ -172,4 +170,4 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
             generate_reports(m,diagnose(m),d)
             names={p.name for p in Path(d).iterdir()}
             self.assertEqual(names,{'hostbound_report.html','report_data.json','bind_cpu.sh'})
-            self.assertIn('taskset -pc 32 4002',(Path(d)/'bind_cpu.sh').read_text(encoding='utf-8'))
+            self.assertIn('taskset -apc 32-35 4001',(Path(d)/'bind_cpu.sh').read_text(encoding='utf-8'))

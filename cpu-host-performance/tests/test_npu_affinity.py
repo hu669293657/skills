@@ -205,7 +205,7 @@ class NpuAffinityTests(unittest.TestCase):
         self.assertIn('问题详情',sections[3][1])
         self.assertIn('4115',html)
         self.assertIn('144-155',html)
-        self.assertIn('taskset -pc 144-155 4115',html)
+        self.assertIn('taskset -apc 144-155 4115',html)
         self.assertIn('宿主机',html)
 
     def test_npu_mismatch_is_a_configuration_risk_in_diagnosis(self):

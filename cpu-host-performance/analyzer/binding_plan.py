@@ -3,6 +3,7 @@ import re
 from collections import defaultdict
 from .npu_affinity import _pid_evidence, cpus, cpu_list, _get, _topology
 from .process_evidence import process_batch
+from hostbind.planner import thread_target
 
 
 def _role(name, process, tid, pid, direct):
@@ -71,6 +72,8 @@ def build_binding_plan(m):
             reason = '缺少明确的 NPU→CPU/NUMA 映射'
         elif len({tuple(sorted(values)) for values in mapped}) > 1:
             reason = '同进程使用不同 NPU CPU 池；缺少 TID/rank 分工，不能替所有线程选择并集'
+        elif sum(bool(pool & values) for values in nodes.values()) != 1:
+            reason = 'NPU 亲和 CPU 跨 NUMA 节点'
         elif not online:
             reason = '缺少在线 CPU 范围'
         if (ev['identity_status'] == 'AMBIGUOUS' or not ev['namespace_ok'] or
@@ -154,63 +157,45 @@ def build_binding_plan(m):
         tids = raw_threads.get(pid, [])
         if not tids:
             tids = [dict(tid=pid, tgid=pid, name=p.get('name'), allowed_cpus=[], starttime=None)]
-        is_legacy = all(not str(t.get('starttime', '')).isdigit() for t in tids)
         masks = [set(t.get('allowed_cpus') or ev['allowed'].get(t['tid'], set())) for t in tids]
-        uniform_masks = bool(masks and masks[0] and all(values == masks[0] for values in masks))
-        bulk = None
-        if is_legacy and uniform_masks and ev['complete'] and desired and not problem:
-            # Old packages know the process birth but not individual TID births.
-            # Bind the verified process, validating *live* members in the script.
-            bulk_target = masks[0] if masks[0] <= desired else desired
-            command = 'taskset -apc %s %d' % (cpu_list(bulk_target), pid)
-            bulk = dict(pid=pid, tid=pid, target=cpu_list(bulk_target), scope='process',
-                        process_starttime=ev['starttime'], thread_starttime=None, command=command)
-            actions.append(bulk)
-        for t in sorted(tids, key=lambda t: (t['tid'] != pid, t['tid'])):
+        targets = [thread_target(mask, t['cpuset_cpus_effective'] if t.get('cpuset_cpus_effective') is not None
+                                 else ev['thread_cpuset'].get(t['tid']) or None, desired)
+                   for t, mask in zip(tids, masks)]
+        if not problem and pid not in roots:
+            problem = '关联进程或辅助任务，仅展示'
+        if not problem and (not ev['complete'] or {t['tid'] for t in tids} != set(ev['tids'])):
+            problem = '主进程线程清单不完整'
+        if not problem and (not targets[0] or not all(targets)):
+            problem = '部分线程没有可用的本地 CPU'
+        if not problem and any(target != targets[0] for target in targets):
+            problem = '各线程的安全目标掩码不同，无法用同一主进程掩码保留已有亲和策略'
+        target = targets[0] if not problem else set()
+        command = ''
+        if target:
+            command = 'taskset -apc %s %d' % (cpu_list(target), pid)
+            actions.append(dict(pid=pid, tid=pid, target=cpu_list(target), scope='process',
+                                process_starttime=ev['starttime'], thread_starttime=ev['starttime'],
+                                command=command))
+        npu_ids = sorted({npu for root in root_ids for npu in roots[root]['npu_ids']})
+        for t, allowed in sorted(zip(tids, masks), key=lambda pair: (pair[0]['tid'] != pid, pair[0]['tid'])):
             tid = t['tid']
-            thread_birth = t.get('starttime')
-            if tid == pid and not str(thread_birth).isdigit():
-                thread_birth = ev['starttime']
-            allowed = set(t.get('allowed_cpus') or ev['allowed'].get(tid, set()))
-            target = set(desired)
-            note = problem
-            source = 'NPU 亲和池；已知窄掩码保留'
-            cpuset = t.get('cpuset_cpus_effective')
-            if not target and not root_reason:
-                target = set(allowed) & online
-                source = '复现当前亲和范围；未获得独立的优化分区证据'
-            if allowed and allowed <= target:
-                target = allowed
-            elif isinstance(cpuset, list) and cpuset:
-                target &= set(cpuset)
-            elif not bulk:
-                target &= allowed
-                source = '有效 cpuset 未提供；仅使用已观测 allowed CPU 子集'
-            if not target and not note:
-                note = '未得到该线程可用的目标 CPU 交集'
-            command = ''
-            if bulk:
-                command = bulk['command'] if tid == pid else '由主进程命令覆盖'
-                target = cpus(bulk['target'])
-                source = '旧包缺逐线程出生时间；完整脚本在执行前核验进程及当前全部线程'
-            elif target and not note and str(thread_birth).isdigit():
-                command = 'taskset -pc %s %d' % (cpu_list(target), tid)
-                actions.append(dict(pid=pid, tid=tid, target=cpu_list(target), scope='thread',
-                    process_starttime=ev['starttime'], thread_starttime=str(thread_birth), command=command))
-            elif not note:
-                note = '缺少逐线程身份，无法生成该 TID 的独立执行命令'
-            npu_ids = sorted(set().union(*(set(roots[r]['npu_ids']) for r in root_ids))) if root_ids else []
+            thread_birth = t.get('starttime') or (ev['starttime'] if tid == pid else None)
             inventory.append(dict(pid=pid, tid=tid, ppid=p.get('ppid'), name=t.get('name') or p.get('name') or '',
+                process_starttime=ev['starttime'], thread_starttime=thread_birth,
+                rank=(p.get('rank_env') or {}).get('RANK'),
+                local_rank=(p.get('rank_env') or {}).get('LOCAL_RANK'),
+                rank_note='环境标签；子进程可能继承，不用于推断全局 NPU ID',
                 role=_role(t.get('name'), p, tid, pid, pid in roots),
                 object_type='NPU 主进程' if tid == pid and pid in roots else ('AI 线程' if tid != pid else ('AI 启动/父进程' if pid in ancestors else ('AI 子进程' if root_ids else 'AI 关联进程'))),
                 npu_ids=npu_ids, current_cpu=cpu_list(allowed), target_cpu=cpu_list(target),
                 numa=sorted(n for n, values in nodes.items() if values & target),
-                command=command, status='BLOCKED' if note else ('RUNTIME_CHECK_REQUIRED' if bulk else 'READY'),
-                reason=note or source))
+                command=command if tid == pid else '',
+                status=('BLOCKED' if pid in roots else 'OBSERVED') if problem else 'RUNTIME_CHECK_REQUIRED',
+                reason=problem or '由主进程统一绑定，执行前核验当前全部线程'))
     commands = '\n'.join(dict.fromkeys(a['command'] for a in actions))
     return dict(tasks=inventory, actions=actions, commands=commands,
                 script=render_binding_script(actions, context),
-                note='角色按 NPU/父子关系和名称线索整理，不凭线程名称任意分配单核；仅当现有窄掩码或有效目标为单核时输出单核命令。')
+                note='绑核以已核验的占卡主进程为单位，关联进程与线程仅作清单展示。')
 
 
 _SCRIPT_HELPERS = r'''
@@ -248,22 +233,48 @@ subset(){
   awk -v want="$1" -v have="$2" 'function expand(s,a, t,n,i,r,c){gsub(/,/," ",s);n=split(s,t," ");for(i=1;i<=n;i++){split(t[i],r,"-");for(c=r[1]+0;c<=(r[2]==""?r[1]:r[2]);c++)a[c]=1}} BEGIN{expand(want,w);expand(have,h);n=0;for(c in w){n++;if(!(c in h))exit 1}exit(n?0:1)}'
 }
 check_thread(){
-  local pid=$1 tid=$2 birth=$3 target=$4 group ceiling
+  local pid=$1 tid=$2 target=$3 group ceiling current
   group=$(awk '/^Tgid:/ {print $2}' "/proc/$pid/task/$tid/status") || fail "TID $tid 已退出"
   [[ "$group" == "$pid" ]] || fail "TID $tid 不再属于 PID $pid"
-  [[ -z "$birth" || "$(starttime "$tid")" == "$birth" ]] || fail "TID $tid 已被复用"
   subset "$target" "$(cat /sys/devices/system/cpu/online)" || fail "目标 CPU 已离线"
   ceiling=$(effective_cpus "$tid")
-  [[ -n "$ceiling" ]] || ceiling=$(awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/task/$tid/status")
+  current=$(awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/task/$tid/status")
+  [[ -n "$ceiling" ]] || ceiling=$current
   subset "$target" "$ceiling" || fail "TID $tid 当前 cpuset/亲和范围不允许目标 CPU"
+  if subset "$current" "$target" && ! subset "$target" "$current"; then
+    fail "TID $tid 当前窄掩码需保留，请重新分析"
+  fi
 }
 '''
 
 
 def render_binding_script(actions, context):
-    lines = ['#!/usr/bin/env bash', 'set -euo pipefail', '# 仅在本次采集的宿主机执行；所有预检成功后才应用命令。']
+    lines = ['#!/usr/bin/env bash', 'set -euo pipefail', '# 默认只读预检/预览；执行与回滚委托给带 journal 的闭环入口。']
     if not actions:
         return '\n'.join(lines + ['echo "未获得可执行绑核项，请查看 HTML 中逐对象的原因。"', 'exit 1']) + '\n'
+    pids=','.join(str(p) for p in sorted({int(a['pid']) for a in actions}))
+    lines += [r'''usage(){
+  echo 'Preview: bash bind_cpu.sh'
+  echo 'Apply: bash bind_cpu.sh --apply /path/cpu-host-performance /tmp/unique-state.json disabled|absent'
+  echo 'Rollback: bash bind_cpu.sh --rollback /path/cpu-host-performance /tmp/unique-state.json'
+}
+case "${1:-}" in
+  --help|-h) usage; exit 0;;
+  --rollback)
+    [[ $# == 3 ]] || { usage; exit 2; }
+    exec python3 "$2/scripts/ascend_bind.py" rollback --state "$3" --execute;;
+  --apply)
+    [[ $# == 4 ]] || { usage; exit 2; }
+    [[ "$4" == disabled || "$4" == absent ]] || { usage; exit 2; }
+    skill=$2; state=$3
+    here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    [[ -f "$here/report_data.json" ]] || { echo 'Keep report_data.json next to this script' >&2; exit 2; }
+    python3 "$skill/scripts/ascend_bind.py" plan --report-data "$here/report_data.json" \
+      --main-pid __HOSTBIND_PIDS__ --framework-binding "$4" --output "$state.plan.json"
+    exec python3 "$skill/scripts/ascend_bind.py" apply --plan "$state.plan.json" --state "$state" --execute;;
+  '') ;;
+  *) usage; exit 2;;
+esac'''.replace('__HOSTBIND_PIDS__',pids)]
     boot = str(context.get('boot_id', '')).replace("'", "'\"'\"'")
     lines += [_SCRIPT_HELPERS.strip(),
               '[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || fail "请在宿主机执行"',
@@ -273,15 +284,11 @@ def render_binding_script(actions, context):
         if context.get(key):
             expected = str(context[key]).replace("'", "'\"'\"'")
             lines.append("[[ \"$(readlink %s)\" == '%s' ]] || fail 'PID 命名空间不匹配'" % (path, expected))
-    checked = set()
     for action in actions:
         pid = action['pid']
-        if pid not in checked:
-            lines.append('check_process %d %s' % (pid, action['process_starttime']));checked.add(pid)
-        if action['scope'] == 'process':
-            lines += ['for task in /proc/%d/task/[0-9]*; do' % pid,
-                      '  check_thread %d "${task##*/}" "" %s' % (pid, action['target']), 'done']
-        else:
-            lines.append('check_thread %d %d %s %s' % (pid, action['tid'], action['thread_starttime'], action['target']))
-    lines += ['# 具体绑核命令'] + list(dict.fromkeys(a['command'] for a in actions))
+        lines += ['check_process %d %s' % (pid, action['process_starttime']),
+                  'for task in /proc/%d/task/[0-9]*; do' % pid,
+                  '  check_thread %d "${task##*/}" %s' % (pid, action['target']), 'done']
+    lines += ['echo "PREVIEW: no affinity changes; use --apply for journaled execution."',
+              "cat <<'HOSTBIND_PLAN'"] + list(dict.fromkeys(a['command'] for a in actions)) + ['HOSTBIND_PLAN']
     return '\n'.join(lines) + '\n'

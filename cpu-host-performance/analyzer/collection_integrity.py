@@ -14,7 +14,7 @@ from .npu_parser import parse_npu_info, parse_npu_mapping, parse_npu_topology
 SUCCESS = {'COLLECTED', 'NO_ACTIVE_PROCESS'}
 CORE = ('cpu_topology', 'npu_info', 'npu_mapping', 'npu_topology', 'processes',
         'numa_process', 'irq', 'softirq', 'proc_stat', 'schedstat', 'frequency', 'idle')
-DEFAULT_COMMAND = 'sudo bash scripts/cpu_trace_collect.sh --duration 3 --output /tmp/cpu-host-$(date +%Y%m%d_%H%M%S)'
+DEFAULT_COMMAND = 'sudo bash scripts/cpu_trace_collect.sh --duration 3 --buffer-size 16384 --output /tmp/cpu-host-$(date +%Y%m%d_%H%M%S)'
 
 
 def evidence_path(path):
@@ -232,7 +232,7 @@ def analyze_collection_integrity(m, source_files=None):
               'status': 'COLLECTED' if m.get('events_ok') else 'UNAVAILABLE_OR_PARSE_FAILED'}
     if m.get('buffer_overrun'):
         actions.append({'category': 'trace', 'status': 'LOST_EVENTS', 'reason': '实测 trace buffer 丢失/溢出 %d 条。' % m['buffer_overrun'],
-                        'action': '先核对丢失所在 CPU、导出错误和内存预算；需要完整调度时间线时可调整 buffer/窗口后重采。',
+                        'action': '先核对丢失所在 CPU、导出错误和内存预算；需要完整调度时间线时，以 16384 KiB/CPU 重采并核对丢失计数。',
                         'recollect': True, 'command': DEFAULT_COMMAND,
                         'requirements': 'root、私有 trace instance；增大 --buffer-size 前检查内存预算。'})
     hb = [r for r in entries if r.get('category') not in ('trace', 'external_tools', 'manifest')]

@@ -220,7 +220,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<p><span class='lbl'>影响：</span>%s</p>" % esc(p["impact"]))
         A("<p class='note'>完整优化方案与可复制命令见第三部分。</p></div>")
     elif primary_resource:
-        A("<div class='card'><p>主要发现为机器资源风险；<a href='#sec-5'>风险依据与判断统一见第5节</a>。</p></div>")
+        A("<div class='card'><p>主要发现为机器资源风险；<a href='#sec-5'>查看第5节资源图</a>。</p></div>")
     else:
         A("<div class='card'><p>未发现明显的 CPU Host 侧问题。若业务性能仍异常，建议从 NPU/IO/框架侧继续排查。</p></div>")
     if m.get("warnings"):
@@ -239,7 +239,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<p><span class='lbl'>候选判断</span> → <span class='evt'>%s</span>（%s）</p></div>" % (
             esc(p["type"]), esc(p.get("explanation", ""))))
     elif primary_resource:
-        A("<p>主要候选来自机器资源证据；<a href='#sec-5'>详见第5节</a>。</p>")
+        A("<p>机器资源可能限制性能；<a href='#sec-5'>详见第5节</a>。</p>")
     else:
         A("<p>未发现需要根因判断的问题。</p>")
     A(affinity_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
@@ -254,21 +254,10 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     elif not resource_findings:
         A("<p>未发现问题。</p>")
     if resource_findings:
-        A("<p>机器资源风险及其依据已统一移至<a href='#sec-5'>第5节</a>。</p>")
+        A("<p>机器资源状态见<a href='#sec-5'>第5节</a>。</p>")
     # ---------- 5. 总体状态 ----------
     A("<h2>5. 机器资源与 CPU 总体状态</h2>")
     A(resource_section(m, True))
-    for finding in resource_findings[:100]:
-        A(_finding_html(finding, esc, sev_color, sev_cn))
-    ps = m.get("proc_stat") or {}
-    if ps:
-        A("<div class='card'><p>/proc/stat 快照（开机以来累计）：user %.1f%%、system %.1f%%、iowait %.1f%%、"
-          "irq %.1f%%、softirq %.1f%%、idle %.1f%%、steal %.1f%%。</p>" % (
-              ps.get("user", 0), ps.get("system", 0), ps.get("iowait", 0),
-              ps.get("irq", 0), ps.get("softirq", 0), ps.get("idle", 0), ps.get("steal", 0)))
-        A("<p class='note'>注意：trace 只能区分 busy/idle；user/system/iowait 为开机累计值，仅供参考。</p></div>")
-    else:
-        A("<p>无 /proc/stat 快照，总体占用以 trace 计算为准。</p>")
     # ---------- 6. Core Balance ----------
     A("<h2>6. CPU Core Balance（各核心负载）</h2>")
     A(render_core_balance(m))

@@ -33,7 +33,7 @@ def generate(output):
         processes.append({'tgid':pid,'ppid':ppid,'name':name,'cmdline':cmd,'cgroup':cgroup,'starttime':pid*100,'kernel_thread':kernel,
                           'namespace_pids':[pid], 'allowed_cpus':list(range(256)), 'mems_allowed_list':'0-7',
                           'numa_maps': {'available': True, 'node_pages': {str(max(0,min(7,pid-4000))): 100}, 'node_kb': {}},
-                          'cgroup_cpu':[{'path':'/sys/fs/cgroup'+cgroup,'version':2,'cpuset.cpus.effective':'0-255','cpu.max':'400000 100000' if cgroup=='/ascend/job' else 'max 100000','cpu.stat':'nr_throttled 10\nthrottled_usec 10000'}]})
+                          'cgroup_cpu':[{'path':'/sys/fs/cgroup'+cgroup,'version':2,'cpuset.cpus.effective':'0-255','cpu.max':'400000 100000' if cgroup=='/ascend/job' else 'max 100000','cpu.stat':'nr_periods 200\nnr_throttled 10\nthrottled_usec 10000'}]})
     def thread(tid,tgid,name,cpus):
         threads.append({'tid':tid,'tgid':tgid,'ppid':next(p['ppid'] for p in processes if p['tgid']==tgid),'name':name,
                         'starttime':tid*100,'last_cpu':cpus[0],'allowed_cpus':cpus,'mems_allowed_list':'0-7','state':'S',
@@ -114,7 +114,10 @@ def generate(output):
     js('process_start.json',{'ts':999.9,'processes':processes,'threads':threads})
     finish=json.loads(json.dumps(processes))
     for p in finish:
-        if p['cgroup']=='/ascend/job':p['cgroup_cpu'][0]['cpu.stat']='nr_throttled 14\nthrottled_usec 90000'
+        if p['cgroup']=='/ascend/job':
+            p['cgroup_cpu'][0].update({'cpu.stat':'nr_periods 300\nnr_throttled 14\nthrottled_usec 90000',
+                'memory.current':str(62*1024**3), 'memory.max':str(64*1024**3),
+                'pids.current':'180', 'pids.max':'2048'})
     js('process_end.json',{'ts':1010.1,'processes':finish,'threads':threads})
     js('frequency_start.json',{'ts':999.95,'policies':policies});js('frequency_end.json',{'ts':1010.01,'policies':policies})
     write('hostbound/frequency_samples.jsonl','\n'.join(json.dumps({'ts':1000+i,'policies':[dict(p,scaling_cur_freq=1200000 if p['id']=='policy128' and i<9 else 2600000) for p in policies]}) for i in range(11)))
@@ -130,6 +133,7 @@ def generate(output):
              '/proc/meminfo':'MemTotal: 536870912 kB\nMemAvailable: %d kB\nMemFree: 1000000 kB\nSwapTotal: 16777216 kB\nSwapFree: 8000000 kB\n'%avail,
              '/proc/vmstat':'pswpin %d\npswpout %d\noom_kill 0\n'%(100 if phase=='start' else 300,100 if phase=='start' else 500),
              '/proc/diskstats':'259 0 nvme0n1 1000 0 %d 300 2000 0 100000 400 0 %d 1000\n'%(sectors,io_ms),
+             '/proc/pressure/cpu':'some avg10=0.5 avg60=0.4 avg300=0.3 total=%d\n'%(stall//20),
              '/proc/pressure/memory':'some avg10=5.0 avg60=2.0 avg300=1.0 total=%d\n'%stall,
              '/proc/pressure/io':'some avg10=10.0 avg60=3.0 avg300=1.0 total=%d\n'%stall}
         js('resource_'+phase+'.json',{'ts':ts,'clock':'boottime','files':{key:{'text':value,'status':'COLLECTED'} for key,value in raw.items()}})

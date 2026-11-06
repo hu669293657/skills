@@ -91,15 +91,17 @@ class ReportDisclosureTests(unittest.TestCase):
         self.assertEqual(m['tasks']['top_runtime'],original)
         self.assertEqual(m['tasks']['top_migration'][0][2],7)
 
-    def test_resource_risk_details_are_centralized_in_section_five(self):
+    def test_section_five_only_shows_resource_chart(self):
         m=sample()
         marker='RESOURCE_RISK_UNIQUE_EVIDENCE'
         m['resources'].update(available=True,risks=[{'type':'MEMORY_PRESSURE','title':'内存风险测试',
             'evidence':marker,'evidence_state':'POTENTIAL','note':'资源候选需验证'}])
         h=html(m)
         five=h.split("<h2 id='sec-5'>",1)[1].split("<h2 id='sec-6'>",1)[0]
-        self.assertIn(marker,five)
-        self.assertNotIn(marker,h.replace(five,''))
+        self.assertEqual(five.count('<svg'),1)
+        self.assertNotIn('<table',five)
+        self.assertNotIn('/proc/stat',five)
+        self.assertNotIn(marker,h)
         self.assertNotIn('2.4 机器资源风险',h)
         self.assertEqual(len(m['resources']['risks']),1)
 

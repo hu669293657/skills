@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# 仅在本次采集的宿主机执行；所有预检成功后才应用命令。
+# 默认只读预检/预览；执行与回滚委托给带 journal 的闭环入口。
+usage(){
+  echo 'Preview: bash bind_cpu.sh'
+  echo 'Apply: bash bind_cpu.sh --apply /path/cpu-host-performance /tmp/unique-state.json disabled|absent'
+  echo 'Rollback: bash bind_cpu.sh --rollback /path/cpu-host-performance /tmp/unique-state.json'
+}
+case "${1:-}" in
+  --help|-h) usage; exit 0;;
+  --rollback)
+    [[ $# == 3 ]] || { usage; exit 2; }
+    exec python3 "$2/scripts/ascend_bind.py" rollback --state "$3" --execute;;
+  --apply)
+    [[ $# == 4 ]] || { usage; exit 2; }
+    [[ "$4" == disabled || "$4" == absent ]] || { usage; exit 2; }
+    skill=$2; state=$3
+    here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    [[ -f "$here/report_data.json" ]] || { echo 'Keep report_data.json next to this script' >&2; exit 2; }
+    python3 "$skill/scripts/ascend_bind.py" plan --report-data "$here/report_data.json" \
+      --main-pid 4001,4002,4003,4004,4005,4006,4007 --framework-binding "$4" --output "$state.plan.json"
+    exec python3 "$skill/scripts/ascend_bind.py" apply --plan "$state.plan.json" --state "$state" --execute;;
+  '') ;;
+  *) usage; exit 2;;
+esac
 fail(){ printf '%s\n' "$*" >&2; exit 1; }
 starttime(){ local s; s=$(cat "/proc/$1/stat") || return 1; s=${s##*) }; set -- $s; printf '%s' "${20}"; }
 check_process(){ [[ "$(starttime "$1")" == "$2" ]] || fail "PID $1 已退出或被复用，请重新采集"; }
@@ -35,65 +57,56 @@ subset(){
   awk -v want="$1" -v have="$2" 'function expand(s,a, t,n,i,r,c){gsub(/,/," ",s);n=split(s,t," ");for(i=1;i<=n;i++){split(t[i],r,"-");for(c=r[1]+0;c<=(r[2]==""?r[1]:r[2]);c++)a[c]=1}} BEGIN{expand(want,w);expand(have,h);n=0;for(c in w){n++;if(!(c in h))exit 1}exit(n?0:1)}'
 }
 check_thread(){
-  local pid=$1 tid=$2 birth=$3 target=$4 group ceiling
+  local pid=$1 tid=$2 target=$3 group ceiling current
   group=$(awk '/^Tgid:/ {print $2}' "/proc/$pid/task/$tid/status") || fail "TID $tid 已退出"
   [[ "$group" == "$pid" ]] || fail "TID $tid 不再属于 PID $pid"
-  [[ -z "$birth" || "$(starttime "$tid")" == "$birth" ]] || fail "TID $tid 已被复用"
   subset "$target" "$(cat /sys/devices/system/cpu/online)" || fail "目标 CPU 已离线"
   ceiling=$(effective_cpus "$tid")
-  [[ -n "$ceiling" ]] || ceiling=$(awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/task/$tid/status")
+  current=$(awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/task/$tid/status")
+  [[ -n "$ceiling" ]] || ceiling=$current
   subset "$target" "$ceiling" || fail "TID $tid 当前 cpuset/亲和范围不允许目标 CPU"
+  if subset "$current" "$target" && ! subset "$target" "$current"; then
+    fail "TID $tid 当前窄掩码需保留，请重新分析"
+  fi
 }
 [ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || fail "请在宿主机执行"
 if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; then fail "请在宿主机执行"; fi
 [[ "$(cat /proc/sys/kernel/random/boot_id)" == 'SYNTHETIC-NOT-A-REAL-BOOT-ID' ]] || fail '宿主机或启动周期已变化'
-check_process 3000 300000
-check_thread 3000 3000 300000 2-3
-check_process 3100 310000
-check_thread 3100 3100 310000 4-5
-check_process 4000 400000
-check_thread 4000 4000 400000 0-31
-check_thread 4000 5000 500000 0-15
 check_process 4001 400100
-check_thread 4001 4001 400100 32-63
-check_thread 4001 5001 500100 32-63
+for task in /proc/4001/task/[0-9]*; do
+  check_thread 4001 "${task##*/}" 32-63
+done
 check_process 4002 400200
-check_thread 4002 4002 400200 64-95
-check_thread 4002 5002 500200 64-95
+for task in /proc/4002/task/[0-9]*; do
+  check_thread 4002 "${task##*/}" 64-95
+done
 check_process 4003 400300
-check_thread 4003 4003 400300 96-127
-check_thread 4003 5003 500300 96-127
+for task in /proc/4003/task/[0-9]*; do
+  check_thread 4003 "${task##*/}" 96-127
+done
 check_process 4004 400400
-check_thread 4004 4004 400400 128-159
-check_thread 4004 5004 500400 128-159
+for task in /proc/4004/task/[0-9]*; do
+  check_thread 4004 "${task##*/}" 128-159
+done
 check_process 4005 400500
-check_thread 4005 4005 400500 160-191
-check_thread 4005 5005 500500 160-191
+for task in /proc/4005/task/[0-9]*; do
+  check_thread 4005 "${task##*/}" 160-191
+done
 check_process 4006 400600
-check_thread 4006 4006 400600 192-223
-check_thread 4006 5006 500600 192-223
+for task in /proc/4006/task/[0-9]*; do
+  check_thread 4006 "${task##*/}" 192-223
+done
 check_process 4007 400700
-check_thread 4007 4007 400700 224-255
-check_thread 4007 5007 500700 224-255
-check_process 6000 600000
-check_thread 6000 6000 600000 6-7
-# 具体绑核命令
-taskset -pc 2-3 3000
-taskset -pc 4-5 3100
-taskset -pc 0-31 4000
-taskset -pc 0-15 5000
-taskset -pc 32-63 4001
-taskset -pc 32-63 5001
-taskset -pc 64-95 4002
-taskset -pc 64-95 5002
-taskset -pc 96-127 4003
-taskset -pc 96-127 5003
-taskset -pc 128-159 4004
-taskset -pc 128-159 5004
-taskset -pc 160-191 4005
-taskset -pc 160-191 5005
-taskset -pc 192-223 4006
-taskset -pc 192-223 5006
-taskset -pc 224-255 4007
-taskset -pc 224-255 5007
-taskset -pc 6-7 6000
+for task in /proc/4007/task/[0-9]*; do
+  check_thread 4007 "${task##*/}" 224-255
+done
+echo "PREVIEW: no affinity changes; use --apply for journaled execution."
+cat <<'HOSTBIND_PLAN'
+taskset -apc 32-63 4001
+taskset -apc 64-95 4002
+taskset -apc 96-127 4003
+taskset -apc 128-159 4004
+taskset -apc 160-191 4005
+taskset -apc 192-223 4006
+taskset -apc 224-255 4007
+HOSTBIND_PLAN

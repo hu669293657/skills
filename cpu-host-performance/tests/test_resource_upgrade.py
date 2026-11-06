@@ -23,8 +23,9 @@ class UpgradeTests(unittest.TestCase):
         from analyzer.report_sections import resource_section
         r=analyze_resources({'snapshot':{'hostbound/resources/lsblk.txt':'NAME="sda" SIZE="1099511627776" TYPE="disk" ROTA="0" MOUNTPOINT="/data"'}})
         text=resource_section({'resources':r})
-        self.assertIn('sda',text)
-        self.assertIn('1024.00 GiB',text)
+        self.assertIn('缺数据',text)
+        self.assertNotIn('sda',text)
+        self.assertEqual(r['storage_inventory'][0]['name'],'sda')
         for value in (123,['bad']):
             source={'ts':1,'clock':'boottime','files':{'/proc/meminfo':{'text':value}}}
             result=analyze_resources({'snapshot':{'hostbound/resource_start.json':json.dumps(source)}})
@@ -131,4 +132,8 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(result['filesystems'][0]['inode_used_percent'],99)
         self.assertAlmostEqual(result['pressure']['memory']['some']['stall_percent'],10)
         self.assertTrue(result['risks'])
+        from analyzer.report_sections import resource_section
+        chart = resource_section({'resources': result}, html=True)
+        for expected in ('CPU · 平均忙碌', '90.0%', '内存 · 峰值占用', '96.0%', '紧张', '/data', '99.0%'):
+            self.assertIn(expected, chart)
 

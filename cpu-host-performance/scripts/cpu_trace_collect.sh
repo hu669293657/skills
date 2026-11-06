@@ -130,7 +130,7 @@ CPU Host 性能采集工具 (统一入口: 默认全量 ftrace + HostBound + 进
 用法: sudo bash $0 [选项]
   -t, --duration <秒>     采集时长, 默认 3 (default: 3 s)
   -o, --output <目录>     输出目录, 默认当前目录
-  -b, --buffer-size <KB>  单核 buffer 大小, 默认 4096
+  -b, --buffer-size <KB>  单核 buffer 大小, 默认 16384
   -c, --cpu-list <列表>   CPU 列表, 如 1,2,3 或 0-47 (默认全量)
   -m, --minimal           精简模式: 仅 sched_switch；sysfs 频率仍低频轮询
   -p, --pid <PID[,PID]>   追加 HostBound 只读快照: NUMA/NPU 拓扑、IRQ、目标进程与
@@ -239,6 +239,14 @@ hb_snapshot(){
     return "{\"available\":true,\"node_pages\":" mapjson(pages) ",\"node_kb\":" mapjson(kb) ",\"unknown_page_size_pages\":" mapjson(unknown) ",\"mapping_count\":" np ",\"policies\":" mapjson(policies) "}"
   }
   function error(id,reason){errcount++;errs=errs (errs==""?"":",") "{\"id\":" q(id) ",\"reason\":" q(reason) "}"}
+  function rankenv(p, savedrs,entry,pos,key,value,o,sep){
+    savedrs=RS;RS=sprintf("%c",0);o="{";sep=""
+    while((getline entry < (p "/environ"))>0){
+      pos=index(entry,"=");if(!pos)continue;key=substr(entry,1,pos-1);value=substr(entry,pos+1)
+      if(key~/^(RANK|LOCAL_RANK|WORLD_SIZE|LOCAL_WORLD_SIZE|GROUP_RANK|ASCEND_RT_VISIBLE_DEVICES|ASCEND_VISIBLE_DEVICES|CUDA_VISIBLE_DEVICES)$/ && length(value)<=256){o=o sep q(key) ":" q(value);sep=","}
+    }
+    close(p "/environ");RS=savedrs;return o "}"
+  }
   BEGIN{CONVFMT="%.17g";OFMT="%.17g";mountinfo=readfile(pr "/self/mountinfo");for(i=1;i<32;i++)esc[sprintf("%c",i)]=sprintf("\\u%04x",i);begin=stamp();pc=0;tc=0;count=0}
   NR%2==1{type=$0;next}
   {
@@ -251,7 +259,7 @@ hb_snapshot(){
       row="{\"tgid\":" tgid ",\"starttime\":" sprintf("%.0f",saved) ",\"state\":" q(state) ",\"ppid\":" ppid ",\"flags\":" sprintf("%.0f",flags) ",\"last_cpu\":" cpu ",\"utime_ticks\":" ut ",\"stime_ticks\":" st ",\"cpu_time_sec\":" ((ut+st)/ticks)
       row=row ",\"name\":" q(status(s,"Name")) ",\"namespace_pids\":" cpus(status(s,"NSpid")) ",\"allowed_cpus\":" allowed(s,"Cpus_allowed_list") ",\"cpus_allowed_list\":" q(status(s,"Cpus_allowed_list")) ",\"mems_allowed_list\":" q(status(s,"Mems_allowed_list"))
       row=row ",\"cgroup\":" q(cg) ",\"cgroup_cpu\":" cgrows ",\"cpuset_cpus_effective\":" (type=="T" && source!="task"?"null":effcpu) ",\"cpuset_mems_effective\":" (type=="T" && source!="task"?"null":effmem) ",\"identity_started_at\":" identity_begin
-      if(type=="P"){cmd=readfile(path "/cmdline");gsub(sprintf("%c",0)," ",cmd);row=row ",\"pid\":" id ",\"cmdline\":" q(cmd) ",\"threads\":" (status(s,"Threads")+0) ",\"kernel_thread\":" (int(flags/2097152)%2?"true":"false") ",\"numa_maps\":" numa(path)}
+      if(type=="P"){cmd=readfile(path "/cmdline");gsub(sprintf("%c",0)," ",cmd);row=row ",\"pid\":" id ",\"cmdline\":" q(cmd) ",\"rank_env\":" rankenv(path) ",\"threads\":" (status(s,"Threads")+0) ",\"kernel_thread\":" (int(flags/2097152)%2?"true":"false") ",\"numa_maps\":" numa(path)}
       else row=row ",\"tid\":" id ",\"cgroup_source\":" q(source)
       if(!stat(path) || start!=saved){error(id,"identity_changed_during_snapshot");next}
       row=row ",\"identity_verified_at\":" stamp() "}"
@@ -441,7 +449,7 @@ hb_poll(){
 # END standalone evidence
 
 # ---------- 参数解析 ----------
-DURATION=3; OUTDIR="."; BUFFER_SIZE=4096; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=1; DISCOVER=1; FREQ_INTERVAL=1
+DURATION=3; OUTDIR="."; BUFFER_SIZE=16384; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=1; DISCOVER=1; FREQ_INTERVAL=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--duration|-o|--output|-b|--buffer-size|-c|--cpu-list|-p|--pid|--frequency-interval)
@@ -467,8 +475,8 @@ if ! awk -v x="$FREQ_INTERVAL" 'BEGIN {exit !(x ~ /^[0-9]+([.][0-9]+)?$/ && x>=0
   err "frequency-interval 必须 >=0.2 秒"; exit 1
 fi
 [[ -z "$CPU_LIST" || "$CPU_LIST" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || { err "CPU列表格式错误"; exit 1; }
-if [[ "$DURATION" =~ ^[0-9]+$ ]] && [[ "$BUFFER_SIZE" =~ ^[0-9]+$ ]] && (( DURATION>=1 )); then :; else
-  err "时长必须为 ≥1 的纯数字, buffer 必须为纯数字"; exit 1; fi
+if [[ "$DURATION" =~ ^[0-9]+$ ]] && [[ "$BUFFER_SIZE" =~ ^[0-9]+$ ]] && (( DURATION>=1 && 10#$BUFFER_SIZE>=1 )); then :; else
+  err "时长和 buffer 必须是 ≥1 的纯数字"; exit 1; fi
 # PID 合法性: 逗号分隔的正整数 (不校验进程是否存在, 采集阶段自动跳过)
 (( HOSTBOUND )) && DISCOVER=1
 for _p in ${PID_LIST//,/ }; do
@@ -573,8 +581,15 @@ printf '%s\n' "$TRACE_CLOCK" > "$SNAP/hostbound/trace_clock.txt"
 # ---------- 环境初始化 ----------
 echo 0 > "$TRACE_DIR/tracing_on" 2>/dev/null
 echo nop > "$TRACE_DIR/current_tracer" 2>/dev/null
-echo "$BUFFER_SIZE" > "$TRACE_DIR/buffer_size_kb" 2>/dev/null \
-  && ok "buffer_size_kb = $BUFFER_SIZE" || warn "设置 buffer 失败, 使用默认值"
+if ! { printf '%s\n' "$BUFFER_SIZE" > "$TRACE_DIR/buffer_size_kb"; } 2>/dev/null; then
+  warn "未能写入 $BUFFER_SIZE KiB/CPU 缓冲区，请检查内存与 tracefs"
+fi
+BUFFER_EFFECTIVE=$(cat "$TRACE_DIR/buffer_size_kb" 2>/dev/null || echo unknown)
+if [[ "$BUFFER_EFFECTIVE" != "$BUFFER_SIZE" ]]; then
+  warn "请求 buffer $BUFFER_SIZE KiB/CPU，实际读回 $BUFFER_EFFECTIVE KiB/CPU"
+else
+  ok "buffer_size_kb = $BUFFER_EFFECTIVE"
+fi
 echo > "$TRACE_DIR/trace" 2>/dev/null
 
 for ev in $EVENT_LIST; do
@@ -748,6 +763,8 @@ cpu_list_input: ${CPU_LIST:-all}
 hostbound_pid: ${PID_LIST:-none}
 enabled_events:$ENABLED_EVENTS
 trace_clock: $TRACE_CLOCK
+buffer_size_requested_kb: $BUFFER_SIZE
+buffer_size_effective_kb: $BUFFER_EFFECTIVE
 frequency_trace_unit: kHz
 frequency_interval_sec: $FREQ_INTERVAL
 process_discovery: $DISCOVER

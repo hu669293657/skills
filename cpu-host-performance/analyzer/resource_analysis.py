@@ -148,9 +148,14 @@ def analyze_resources(m):
         stressed = (pressure['memory'].get('some', {}).get('stall_percent') or 0) > 1 or any((vm.get(k) or 0) > 0 for k in ('pswpin_delta', 'pswpout_delta', 'oom_kill_delta'))
         risk('MEMORY_PRESSURE', '可用内存偏低' + ('且伴随内存压力' if stressed else ''),
              '窗口最低 MemAvailable %.2f%%，结束值 %s%%；PSI %s；交换/OOM增量 %s' % (memory['minimum_available_percent'], memory['available_percent'], pressure['memory'], vm), 'OBSERVED_CANDIDATE' if stressed else 'POTENTIAL')
-    if (vm.get('oom_kill_delta') or 0) > 0 and not any(r['type'] == 'MEMORY_PRESSURE' for r in risks):
-        risk('MEMORY_PRESSURE', '资源窗口发生 OOM kill', str(vm), 'OBSERVED_CANDIDATE')
-    if cpu['busy_percent'] is not None and cpu['busy_percent'] >= 90:
+    if not any(r['type'] == 'MEMORY_PRESSURE' for r in risks):
+        if (vm.get('oom_kill_delta') or 0) > 0:
+            risk('MEMORY_PRESSURE', '资源窗口发生 OOM kill', str(vm), 'OBSERVED_CANDIDATE')
+        elif (pressure['memory'].get('some', {}).get('stall_percent') or 0) > 1:
+            risk('MEMORY_PRESSURE', '资源窗口存在内存等待', str(pressure['memory']), 'OBSERVED_CANDIDATE')
+    if (pressure['cpu'].get('some', {}).get('stall_percent') or 0) >= 5:
+        risk('CPU_RESOURCE_PRESSURE', '资源窗口存在 CPU 等待', str(pressure['cpu']), 'OBSERVED_CANDIDATE')
+    elif cpu['busy_percent'] is not None and cpu['busy_percent'] >= 90:
         risk('CPU_RESOURCE_PRESSURE', '资源快照显示 CPU 高负载', str(cpu))
 
     filesystems = _df(raw('df_blocks_end.txt') or raw('df_blocks.txt'))
@@ -195,10 +200,14 @@ def analyze_resources(m):
         risk('IO_PRESSURE', '资源窗口存在 I/O 等待压力', str(pressure['io']), 'OBSERVED_CANDIDATE')
 
     # Retain per-cgroup limits: host free memory does not imply a job has room.
+    workload_pids = set(m.get('process_analysis', {}).get('related_tgids', []))
+    workload_pids.update(row['pid'] for row in m.get('npu_affinity', {}).get('rows', []) if row.get('pid'))
     phase_groups = []
     for phase in ('start', 'end'):
         groups = {}
         for process in process_batch(snapshot, phase).get('processes', []):
+            if process.get('tgid') not in workload_pids:
+                continue
             for row in process.get('cgroup_cpu', []):
                 if isinstance(row, dict) and row.get('path'):
                     groups[row['path']] = row
