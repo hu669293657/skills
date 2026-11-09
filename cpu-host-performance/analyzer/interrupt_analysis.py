@@ -41,7 +41,7 @@ def analyze_interrupts(m,events):
             elif pending[key]:
                 lo,name=pending[key].pop()
                 if ev.ts>=lo:
-                    spans[ev.cpu].append((lo,ev.ts));count[ev.cpu]+=1
+                    spans[ev.cpu].append((lo, ev.ts, ident, name));count[ev.cpu]+=1
                     named[name][0]+=1;named[name][1]+=ev.ts-lo
             else:
                 missed+=1
@@ -56,17 +56,29 @@ def analyze_interrupts(m,events):
         denominator=sum(pc['observed_sec'] for pc in m['per_cpu'].values())
         total=0.0;per={}
         for c,pc in m['per_cpu'].items():
-            seconds=intersection(merge(spans[c]),merge(observed[c]))
+            seconds=intersection(merge((lo, hi) for lo, hi, _, _ in spans[c]),merge(observed[c]))
             total+=seconds
             ratio=100*seconds/pc['observed_sec'] if available and pc['observed_sec'] and (complete or seconds>0) else None
             per[c]=ratio
             pc[kind+'_time']=seconds if ratio is not None else None
             pc[kind+'_ratio']=ratio
             pc[kind+'_count']=count[c] if available else None
-        nonnull=[v for v in per.values() if v is not None]
+        known = [cpu for cpu, ratio in per.items() if ratio is not None]
+        peak = max(known, key=per.get) if known else None
+        source_spans = defaultdict(list)
+        for lo, hi, ident, name in spans.get(peak, []):
+            source_spans[(ident, name)].append((lo, hi))
+        peak_observed = merge(observed.get(peak, []))
+        sources = []
+        for (ident, name), intervals in source_spans.items():
+            seconds = intersection(merge(intervals), peak_observed)
+            if seconds > 0:
+                sources.append({'id': ident, 'name': name, 'seconds': seconds})
+        sources.sort(key=lambda row: -row['seconds'])
         result={'total_count':sum(count.values()) if available else None,'total_time':total if available else None,
                 'total_ratio':100*total/denominator if available and denominator and (complete or total>0) else None,
-                'max_cpu_ratio':max(nonnull) if nonnull else None,'observed_cpu_sec':denominator,
+                'max_cpu_ratio':per.get(peak), 'peak_cpu':peak,
+                'peak_sources':sources[:3],'observed_cpu_sec':denominator,
                 'per_cpu_ratio':per,top_key:sorted([(name,n,t) for name,(n,t) in named.items()],key=lambda x:-x[2])[:10],
                 'all_names' if kind=='irq' else 'all_actions':sorted([(name,n,t) for name,(n,t) in named.items()],key=lambda x:-x[2]),
                 'available':available,'complete':complete,'unpaired_events':missed,

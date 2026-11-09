@@ -71,7 +71,7 @@ python3 "$SKILL_DIR/scripts/ascend_bind.py" rollback --state "$CASE_DIR/state.js
 
 `--allocation partition` 是显式的均分实验候选：读取所有 NPU（包括未选中/当前空闲卡）的完整拓扑，按相同原始亲和池分组，再按全局逻辑 NPU ID 分配完整 SMT sibling 组。它不使用固定核数、不根据正在运行的卡数扩大池，不拆开同一物理核；非相同池部分重叠、SMT 不完整/不对称或核心组不足时拒绝。它没有宣称按实测需求最优；现有 Analyzer 的运行/等待需求建议可作为另外的证据，收益仍由业务 A/B 验证。
 
-逐线程核验 cpuset。任何线程目标为空或安全目标互不相同，停止生成现场计划。CPU 亲和性不隔离其他业务/IRQ，不改变 quota，不迁移已有页，不设置新页的内存策略。IRQ/dev 亲和、irqbalance、migratepages、membind 不在此事务范围内；需要对应独立证据与独立实验。
+逐线程核验 cpuset。对各线程的许可范围取公共交集。公共目标为空或会改变需保留的本地掩码时，停止生成现场计划。CPU 亲和性不隔离其他业务/IRQ，不改变 quota，不迁移已有页，不设置新页的内存策略。IRQ/dev 亲和、irqbalance、migratepages、membind 不在此事务范围内；需要对应独立证据与独立实验。
 
 不支持当前 npu-smi 文本格式时，允许人工核验全部卡的 JSON；必须同时显式给 `--worker`。示例仅表示结构，实际 CPU/NPU 值来自现场：
 

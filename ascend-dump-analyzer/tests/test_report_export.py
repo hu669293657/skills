@@ -100,6 +100,22 @@ class ReportExportTests(unittest.TestCase):
         self.assertIn('a|b', ''.join(doc.visible))
         self.assertIn('{{HOSTNAME}}', ''.join(doc.visible))
 
+    def test_template_mode_rejects_incomplete_analysis_and_accepts_filled_template(self):
+        self.md.write_text('# 环境分析\n\n## 摘要\n\n证据不足。\n', encoding='utf-8')
+        rejected = self.run_cli('--template', 'single')
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('缺少模板章节', rejected.stderr)
+        self.assertFalse(self.html.exists())
+        headings = ('摘要', '输入与采集覆盖', '系统与资源', 'NPU 与昇腾组件',
+                    '业务进程与软件环境', '网络与设备映射', '配置与模型',
+                    '发现与建议', '未采集项与限制')
+        self.md.write_text('# 环境分析\n\n' + '\n'.join(
+            f'## {heading}\n\n证据不足。\n' for heading in headings), encoding='utf-8')
+        result = self.run_cli('--template', 'single')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.run_cli('--template', 'single', '--check').returncode, 0)
+        self.assertNotEqual(self.run_cli('--template', 'comparison', '--check').returncode, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

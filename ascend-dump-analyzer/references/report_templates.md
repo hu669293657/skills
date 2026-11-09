@@ -1,6 +1,8 @@
-# 仪表盘模板参考（可选美化）
+# 报告模板索引
 
-默认双报告流程见 [SKILL.md](../SKILL.md) 开头。只有用户要求原有仪表盘样式或需要额外美化时才读取本文；模板不能成为生成默认 HTML 的前提。先完成内容一致的 MD + HTML，再按需使用此处模板。
+每次分析必须先读取和填写 [单份 Markdown 模板](template_single_dump.md) 或 [比对 Markdown 模板](template_comparison.md)。在默认双报告流程中，导出和校验分别用 `render_report.py <报告.md> --template single` 或 `--template comparison`，再以相同参数加 `--check`。输入受阻和零差异也保留必需章节。
+
+下面的 HTML 仪表盘仅用于用户指定样式时的排版。内容来自已经填完的必需模板，手工核验与最终 Markdown 一致。
 
 ### 单机报告
 
@@ -33,6 +35,7 @@
 | `{{RUNTIME_PKG_ROWS}}` | 关键 pip 包版本表行 | 多个 `<tr>` |
 | `{{RUNTIME_PROCESS_ROWS}}` | 推理进程快照表行 | 多个 `<tr>` |
 | `{{RUNTIME_CONTAINER_ROWS}}` | 容器上下文表行（折叠） | 多个 `<tr>` |
+| `{{WORKLOAD_ROWS}}` | 目标角色、启动环境、加载库及资源限制，缺失时写明原因 | 多个 `<tr>` |
 | `{{CRITICAL_ENV_ROWS}}` | 关键环境变量表行 | 多个带徽章的 `<tr>` |
 | `{{SENSITIVE_VAR_BANNER}}` | 敏感变量警告 | `.banner.warn` 或空 |
 | `{{ALL_ENV_ROWS}}` | 全部环境变量行（折叠） | 多个 `<tr>` |
@@ -59,7 +62,7 @@
 
 1. **侧边栏** — 固定左侧导航，滚动联动高亮
 2. **头部** — 主机名、时间戳、健康评分环形图（SVG）
-3. **状态磁贴** — 4 个磁贴：系统状态、组件 X/7、环境变量 X/11、网络状态
+3. **状态磁贴** — 系统、组件、环境变量和网络状态；分母取实际适用范围
 4. **评估横幅** — 整体健康评估（ok/warn/fail）
 5. **系统健康** — 8 项检查表格（CPU/THP/overcommit 等），OK/WARN/FAIL 徽章
 6. **Ascend 组件** — 卡片网格（按已确认状态着色；版本不可用显示 UNKNOWN，不能直接标成未安装）+ 版本一致性矩阵
@@ -103,6 +106,7 @@
 | `{{DRIFT_BANNER}}` | 漂移评估横幅 | `.banner.ok/warn/fail` |
 | `{{DRIFT_ROWS}}` | 漂移评估表行 | 多个 `<tr>` |
 | `{{FINDING_BANNERS}}` | 关键发现横幅 | 多个 `.banner` div |
+| `{{SCOPE_COMPARISON_ROWS}}` | 各输入的视图、角色、schema 及可比性 | 多个 `<tr>` |
 | `{{RAW_DATA_TABLES}}` | 原始数据对比表 | 多个子表 |
 | `{{ALL_ENV_VAR_ROWS}}` | 全部环境变量行（折叠） | 多个 `<tr>` |
 | `{{FILE_COL_HEADERS}}` | 表格文件列表头 | `<th>env1</th><th>env2</th>` |

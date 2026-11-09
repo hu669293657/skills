@@ -7,21 +7,21 @@ description: "用于 Ascend 昇腾服务器环境采集、dump/预检信息分�
 
 采集、分析和比对昇腾 NPU 环境 dump JSON 文件。本技能包含独立采集脚本（`msprechecker_dump.py`）、比对脚本（`compare_dumps.py`）、报告导出脚本（`render_report.py`）、分析指南和 HTML 报告模板。
 
-## 默认交付契约（先执行，完成前核对）
+## 分析报告交付契约（必须使用模板）
 
 **用户请求分析、诊断、环境体检或比对时，默认在同一轮交付两个实际文件：`<报告名>.md` 和 `<报告名>.html`。聊天中的 Markdown、终端输出和生成命令均不能替代报告文件。** 用户不需要额外说“生成报告”“保存文件”或“可视化”；“使用这个 skill 帮我分析这个日志”直接进入以下流程，不询问是否需要报告，也不以“需要的话可以生成”结束。
 
 1. **定位输入并识别内容。** 优先使用用户指定路径、附件及当前上下文，按实际内容识别 dump，不按扩展名拒绝 `.log` / `.txt` 中的 JSON。目录中有多个候选时列清单并说明实际覆盖范围，不静默漏掉输入。明确指定本 skill 但输入是非 dump 故障日志时，只分析可支持的环境事实，报告标注能力边界并建议适合的专项技能。
 2. **确定输出位置。** 使用用户指定目录；否则遵守当前工作区的产物目录约定（如 `outputs/`），没有约定则使用当前项目的 `outputs/`。创建必要目录，不默认写入 skill 源码目录，不覆盖原始输入。文件名采用 `ascend_analysis_<时间戳>` 或 `ascend_comparison_<时间戳>`；同名已存在时加序号，保留既有报告。只需选定路径并执行，无需为默认格式、目录或文件名另行确认。
-3. **分析并写入 Markdown。** 按下文证据与判定规则生成完整 UTF-8 `.md`，包含摘要、输入与覆盖范围、证据路径、发现及优先级、建议、未采集项和限制。单机分析用“分析输出”，多文件用“比对输出”。所有敏感值先脱敏；不得为了凑齐模板编造观测或 FAIL。
+3. **必须读取并填写对应模板。** 单份分析用 [单份报告模板](references/template_single_dump.md)，多份比对用 [比对报告模板](references/template_comparison.md)。用模板的必需二级标题及顺序写入实际 UTF-8 Markdown，替换所有填写提示，保留证据路径和适用性。缺失、受阻、零差异、只要求一种输出格式或只在聊天展示时同样按模板组织内容。所有敏感值先脱敏，依据证据标注 UNKNOWN 或 N/A。
 4. **从同一份 Markdown 导出 HTML。** 默认执行下列命令；`<SKILL_DIR>` 指当前读取的本技能目录，必须替换成实际路径，脚本路径和报告路径均加引号。HTML 默认与 MD 同目录、同名，只改变扩展名，内联 CSS、零外部字体/脚本依赖。导出器只负责排版和文件检查，不代替分析或脱敏。
 
    ```bash
-   python3 "<SKILL_DIR>/references/render_report.py" "<OUTPUT_DIR>/<报告名>.md"
-   python3 "<SKILL_DIR>/references/render_report.py" "<OUTPUT_DIR>/<报告名>.md" --check
+   python3 "<SKILL_DIR>/references/render_report.py" "<OUTPUT_DIR>/<报告名>.md" --template single
+   python3 "<SKILL_DIR>/references/render_report.py" "<OUTPUT_DIR>/<报告名>.md" --template single --check
    ```
 
-   Windows 可将 `python3` 换成 `python`。导出器支持标题、段落、表格、平铺列表、引用、围栏代码块、行内代码/强调及普通链接；原始 HTML 会显示为转义文本。不要依赖嵌套列表、内嵌 HTML 或复杂 Markdown 扩展承载关键证据。
+   多份比对的两条命令都改用 `--template comparison`。Windows 可将 `python3` 换成 `python`。导出器校验必需章节与顺序。Markdown 使用标题、段落、表格、平铺列表、引用、围栏代码块、行内代码/强调及普通链接。
 5. **核验后交付。** 使用默认导出器时，两次命令均须退出码为 0；采用下表的手工降级路径时，实际读回文件并核对内容。检查 MD 和 HTML 真实存在、非空、内容一致，未残留模板占位符（日志原文中的同形文本可作为证据保留），不含未脱敏凭证。修改 MD 后重新导出并核验。最终回复给出简短结论与两个可点击的真实文件链接，分别标注“Markdown 报告”和“HTML 报告”；不只回复路径、计划或命令。
 
 **条件分支：**
@@ -36,7 +36,7 @@ description: "用于 Ascend 昇腾服务器环境采集、dump/预检信息分�
 | 用户明确说“只要 MD”“只要 HTML”“不要文件/只在聊天里说” | 遵守明确格式要求并在交付中说明覆盖了默认双格式；“分析一下”“简单分析”不构成覆盖 |
 | 用户只要求讲解/修改 skill、拷贝采集脚本或仅采集原始 dump | 执行所请求的工作；不自动探测本机、登录服务器或开展额外诊断。已提供/采集 dump 且要求分析时执行双报告流程 |
 
-**完成门槛：默认分支中，MD 已写入 + HTML 已写入 + 文件核验通过 + 两个链接已交付，才算分析任务完成。**
+**完成门槛：对应模板已填完、MD 与 HTML 已写入、模板和文件核验通过，并交付两个链接。只要求单一格式时仍须核对对应模板。**
 
 ## 触发条件
 
@@ -57,7 +57,7 @@ description: "用于 Ascend 昇腾服务器环境采集、dump/预检信息分�
 **核心特性：**
 - 零依赖 — 仅需 Python 标准库（psutil 为可选依赖，缺失时自动跳过）
 - 单文件 — 拷贝到任意 Linux 服务器即可用 `python3` 运行
-- 输出兼容 `msprechecker compare` — JSON 格式与原工具一致
+- 保留旧版主要 JSON 区块，随附比对工具读取历史与新版 dump
 - 结构化 + raw 双输出 — 每个 section 同时提供结构化字段（供判定）与原始命令输出（供留证）
 
 **使用场景：**
@@ -80,7 +80,11 @@ python3 /tmp/msprechecker_dump.py
 # 指定输出路径
 python3 /tmp/msprechecker_dump.py -o /tmp/snapshot.json
 
-# 仅采集昇腾相关环境变量（分享时更安全）
+# 固定环境快照。将 PID 替换为本机可见的真实业务进程
+python3 /tmp/msprechecker_dump.py --filter --no-probes \
+  --target launcher=1234 --target worker-0=2345 -o /tmp/snapshot.json
+
+# 只采集器视图，按环境键范围筛选
 python3 /tmp/msprechecker_dump.py --filter -o /tmp/snapshot.json
 
 # 全量采集（含配置、网络、权重）
@@ -96,7 +100,9 @@ python3 /tmp/msprechecker_dump.py \
 | 参数 | 必选 | 说明 |
 |------|------|------|
 | `-o, --output-path` | 否 | 输出 JSON 路径。默认：`./msprechecker_dumped.json` |
-| `--filter` | 否 | 仅采集昇腾相关环境变量 |
+| `--filter` | 否 | 筛选采集器环境变量，覆盖昇腾、框架、分布式、路径和绑核变量 |
+| `--target ROLE=PID` | 否 | 可重复。读取指定进程的初始环境、加载库及限制。跨环境沿用相同角色名 |
+| `--no-probes` | 否 | 固定环境快照建议使用。跳过 ICMP/TCP/NPU ping，保留 rank table 与只读链路状态查询 |
 | `--mies-config-path` | 否 | MindIE 服务 config.json 路径 |
 | `--user-config-path` | 否 | user_config.json 路径 |
 | `--mindie-env-path` | 否 | mindie_env.json 路径 |
@@ -110,22 +116,27 @@ python3 /tmp/msprechecker_dump.py \
 | Section | 始终采集 | 触发参数 | 内容 |
 |---------|---------|---------|------|
 | `system` | 是 | — | CPU 型号、高性能模式、内核、THP、内存、虚拟化检测 |
-| `ascend` | 是 | — | 7 个组件：driver/toolkit/opp_kernel/atb/mindie/atb-models |
-| `env` | 是 | — | 全部环境变量或过滤后的昇腾子集 |
+| `hardware`、`npu`、`network` | 是 | — | 硬件资源、NPU 运行态与拓扑查询、网卡/RDMA、路由与策略规则 |
+| `ascend` | 是 | — | 驱动、Toolkit、算子、Runtime、Compiler、HCCL、AI CPU、ATB/SiP、MindIE 等已知版本文件路径和候选版本 |
+| `env`、`runtime` | 是 | — | 采集器视图的环境变量、Python 包和路径、进程概况、容器信息 |
+| `workload` | 是 | `--target` 填充 | 按角色采目标进程环境、共享库、身份、资源限制；未指定时记录跳过 |
+| `rank_table` | 否 | `--rank-table-path` | 规范化 Host、设备与角色清单，保留解析覆盖 |
 | `mies config` | 否 | `--mies-config-path` | MindIE 服务 config.json |
 | `user config` | 否 | `--user-config-path` | user_config.json |
 | `mindie env` | 否 | `--mindie-env-path` | mindie_env.json |
 | `model config` | 否 | `--weight-dir` | 权重目录下的 config.json |
 | `weight` | 否 | `--weight-dir` | .safetensors 文件的 SHA256 哈希 |
-| `ping` | 否 | `--rank-table-path` | rank table 中所有主机的 ping 结果 |
-| `hccl` | 否 | `--rank-table-path` | NPU 设备间 HCCS ping |
+| `ping` | 否 | `--rank-table-path` 且未关闭探测 | rank table 中主机的 ping 结果 |
+| `hccl` | 否 | `--rank-table-path` 且未关闭探测 | 设备 IP 连通性探测 |
 | `link` | 否 | `--rank-table-path` | NPU 链路状态（hccn_tool） |
 | `vnic` | 否 | `--rank-table-path` | VNIC 状态（A3 板卡） |
 | `tls` | 否 | `--rank-table-path` | TLS 证书状态 |
 | `_meta` | 是 | — | 工具名、版本、时间戳、主机名、Python 版本、耗时 |
 
 **用户指导：**
-- 分享 dump 文件时建议加 `--filter`（避免泄露敏感环境变量）
+- 固定使用同一组选项及角色名，在 Host 和业务容器分别采集并标记视图。分享前复核脱敏，`--filter` 只限定键范围。
+- `env` 与 `runtime.packages` 属于采集器，`workload.targets.<角色>.environment` 属于目标进程的初始环境。应用启动后覆盖的值、编排侧镜像 digest 需用相应来源补证。仅比对同一视图与角色。
+- 1.2 的逐卡固件从 board 的 Firmware Version 读取。早期 dump 的结构化 `firmware_version` 可能误取驱动，需回看 board 原文再比对。NPU 清单和拓扑查询保留原文，避免把设备节点编号直接当成物理 ID。
 - 多机比对时需在**每台**机器上分别采集
 - PD 分离 / K8s 场景使用 `--user-config-path` 和 `--mindie-env-path`
 - root 和非 root 均可运行（TLS 检查需 root）
@@ -250,7 +261,7 @@ python3 "<SKILL_DIR>/references/compare_dumps.py" "env1.json" "env2.json" "env3.
 
 ### 环境变量
 
-使用 `--filter` 时采集昇腾相关变量，并显式保留下表 11 个关键变量中实际存在的项；否则采集全部环境变量。两种模式均脱敏。新 dump 的 `_meta.collection.env` 记录 `scope`、`included_keys` 和 `critical_keys_in_scope`。
+使用 `--filter` 时采集配置相关键，否则采集全部采集器环境变量。两种模式均脱敏。`_meta.collection.env` 记录实际范围及关键键清单，`workload` 单独记录目标进程的已设值、明确未设键与读取失败状态。
 
 #### 关键环境变量清单
 
@@ -307,89 +318,12 @@ python3 "<SKILL_DIR>/references/compare_dumps.py" "env1.json" "env2.json" "env3.
 | `model config` + `weight` | `--weight-dir <path>` |
 | `ping` / `hccl` / `link` / `vnic` / `tls` | `--rank-table-path <path> --scene <mindie\|vllm>` |
 
-## 输出格式
+## 模板内的判定规则
 
-### 分析输出
-
-写入实际 `.md` 文件，补充报告标题、摘要（主要发现与结论可信范围）、输入路径与覆盖范围；正文包含以下 section。再按开头的默认流程生成 HTML，不能停留在聊天渲染：
-
-```
-## 环境概要
-- 主机名 / 时间戳 / 耗时 / 采集范围
-
-## 系统健康
-| 检查项 | 当前值 | 期望值 | 状态 | 说明 |
-(带 OK/WARN/FAIL 标记的表格)
-
-## Ascend 组件
-### 各组件版本
-| 组件 | 版本 | 时间戳/Commit | 状态 | 说明 |
-### 版本一致性
-| 组件对比 | 版本 A | 版本 B | 状态 |
-(标记跨组件不一致)
-
-## 环境变量
-### 关键 Ascend 变量
-| 变量 | 是否存在 | 值 | 状态 |
-(区分未设置、未采集、不适用；只有已确认的必需配置缺失才判 FAIL)
-### 敏感变量
-(标记匹配敏感模式的变量)
-### 诊断
-(关联缺失环境变量与缺失 Ascend 组件)
-
-## 配置分析（如有）
-(关键配置值及观察)
-
-## 网络状态（如有）
-(Ping / HCCL / Link / VNIC / TLS 摘要表)
-
-## 未采集项
-(列出未采集项 + 建议命令)
-
-## 综合诊断
-### 发现的问题
-| 优先级 | 问题 | 建议 |
-(高/中/低)
-### 建议下一步
-(可直接使用的命令)
-```
-
-状态标记：
-- OK = 符合期望
-- WARN = 需关注但不阻塞
-- FAIL = 有适用要求及直接证据证明不符合
-- UNKNOWN = 未采集、失败、无权限或缺少规则依据
-- N/A = 当前场景不适用
-
-如展示健康评分，只计已确认适用、有判定依据且有证据的项（OK=1、WARN=0.5、FAIL=0）；UNKNOWN 与 N/A 不计为失败。同时展示已判定/未知/不适用项数量与覆盖率。没有可判定项时不显示数值；关键必需项 UNKNOWN 时不下“健康/可部署”结论。
-
-### 比对输出
-
-写入实际 `.md` 文件并导出同源 HTML；在下列结构中补充结论摘要、请求/成功/跳过文件清单、状态（完整/partial/受阻）、差异影响的证据及限制、后续建议。零差异也交付双报告，相似度不能证明环境健康。
-
-```
-## 比对概要
-- 文件 A: <path> (主机名, 时间戳)
-- 文件 B: <path> (主机名, 时间戳)
-- 差异总数: N
-
-## 版本变更
-| 组件 | 文件 A | 文件 B | 变化 |
-(升级 / 降级 / 缺失)
-
-## 环境变量变更
-| 变量 | 文件 A | 文件 B | 状态 |
-(新增 / 删除 / 修改)
-
-## 系统设置变更
-| 设置项 | 文件 A | 文件 B |
-
-## 配置变更（如有）
-| 配置路径 | 文件 A | 文件 B |
-
-## 网络变更（如有）
-(连通性状态变化)
-```
+- 依据 [单份报告模板](references/template_single_dump.md) 或 [比对报告模板](references/template_comparison.md) 写报告。
+- OK 表示符合明确要求，WARN 表示需关注，FAIL 需要适用要求及直接证据，UNKNOWN 表示证据或规则不足，N/A 表示不适用。
+- 若展示评分，只计算有明确依据且已判定的项目，同时展示覆盖率与未知项。关键必需项为 UNKNOWN 时，结论保留证据限制。
+- 比对时匹配采集视图和业务角色，优先比较实际加载路径与有效版本。PID 和启动时钟变化用于确认身份，不能单独当成配置漂移。旧版缺字段、遮盖、未采到和未设置分别说明。
 
 ## 比对算法
 
@@ -412,7 +346,7 @@ $["ascend"]["driver"]["version"] = "24.1"
 
 ## HTML 报告生成
 
-**默认路径：** 先写入完整 Markdown，再用 `references/render_report.py` 导出同名 HTML，运行 `--check`，按开头的交付契约给出两个链接。HTML 使用深色主题、可横向滚动的表格、移动端布局和打印样式；无需访问网络或安装依赖。
+**默认路径：** 按模板写入 Markdown，再用 `references/render_report.py --template single` 或 `--template comparison` 导出同名 HTML，并用同一模式运行 `--check`，按开头的交付契约给出两个链接。HTML 使用深色主题、可横向滚动的表格、移动端布局和打印样式；无需访问网络或安装依赖。
 
 **可选仪表盘路径：** 用户需要原有侧边栏、健康环形图、组件卡片等样式时，读取 [references/report_templates.md](references/report_templates.md)，再使用其中链接的单机/比对模板。模板细节按需读取，不替代默认报告生成流程。美化后的 HTML 须人工核对与最终 MD 内容一致；`render_report.py --check` 仅校验该导出器生成的同源版本。
 

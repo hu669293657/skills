@@ -50,6 +50,6 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 
 单文件采集使用 `/proc/uptime` 的 boottime 时间戳；频率样本和进程快照声明 `clock=boottime`，优先选择 ftrace `boot` 时钟。内核不支持 boot 时钟时保留数据但不叠加不同域时间线。旧版 Python 采集包的 monotonic/mono 组合继续兼容。
 
-展示契约：HTML每类明细最多100条，完整指标和原始证据保留于report_data.json。截断只发生在渲染层；2.3不生成逐PID全部线程亲和证据表。第5节用一张图展示最可能影响任务的资源占用与压力。资源速率依赖同钟不同时间点与非回退计数，缺失显示N/A；MemAvailable不能用MemFree替代，磁盘分区与整盘不累加，短窗口及磁盘busy%本身不证明资源瓶颈。
+展示契约：HTML每类明细最多100条，完整指标和原始证据保留于report_data.json。截断只发生在渲染层；2.3不生成逐PID全部线程亲和证据表。第4节用一张图展示最可能影响任务的资源占用与压力。资源速率依赖同钟不同时间点与非回退计数，缺失显示N/A；MemAvailable不能用MemFree替代，磁盘分区与整盘不累加，短窗口及磁盘busy%本身不证明资源瓶颈。
 
 HTML与JSON/绑核脚本直接生成，不再生成MD报告。2.3不展示逐卡原始证据展开区或建议CPU/NUMA占位。第三节metrics.binding_plan包含完整AI对象清单、命令、待核验原因和Bash脚本；展示最多100条，完整脚本/JSON不截断。

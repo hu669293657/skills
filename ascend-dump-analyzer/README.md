@@ -24,13 +24,22 @@
 
 无需安装任何额外依赖；若已有历史 dump 文件，直接提供路径即可。
 
+固定环境快照示例。替换为本次可见的真实 PID，跨节点沿用相同角色名。需要保存 rank table 时追加 `--rank-table-path <路径> --scene mindie`，也可按实际格式选择 `vllm`。
+
+```bash
+python3 msprechecker_dump.py --filter --no-probes \
+  --target launcher=1234 --target worker-0=2345 -o snapshot.json
+```
+
+1.2 扩充了版本清单、逐卡版本与拓扑、目标进程环境与加载库、目标 cgroup、路由规则和 rank table 证据。分别在宿主机和业务容器内采集，保留视图来源。采集解释器的包清单和业务进程的实际加载库分别记录。
+
 ## 输出成果
 
 - 分析模式：默认同时保存 **Markdown（.md）与 HTML（.html）分析报告**，包含软硬件清单、版本配套核验、风险与证据限制。
 - 比对模式：默认同时保存 **Markdown 与 HTML 差异报告**，列出相同项、差异项、仅一方存在项与未覆盖输入。
 - “使用这个 skill 帮我分析这个日志”即触发双报告，不需要另说“生成报告”。默认同目录同名，使用用户指定目录或当前工作区的 `outputs/`，最终交付两个文件链接。
 - 输入损坏、证据不足、未发现异常或零差异时仍生成报告，并明确限制；只有用户明确要求其他格式/不要文件时覆盖默认行为。
-- HTML 通过自带 `references/render_report.py` 从最终 Markdown 导出，零第三方依赖，离线可读；`--check` 检查配对文件存在、非空且同步。已有 HTML 仪表盘模板仍可用于额外美化。
+- 每次分析或比对**必须套用对应模板**。读取[单份分析模板](references/template_single_dump.md)或[多份比对模板](references/template_comparison.md)，填充实际观测。用 `render_report.py <报告.md> --template single` 或 `--template comparison` 导出，并以同一模板模式加 `--check` 验证章节与文件同步。
 
 ## 流程图
 

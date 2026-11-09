@@ -439,14 +439,14 @@ details > .details-body { padding: 0.5rem 0; }
   </details>
 </section>
 
-<!-- ===== SOFTWARE RUNTIME (conditional: 若 dump 中无 runtime section，删除本区块) ===== -->
+<!-- ===== SOFTWARE RUNTIME (缺失时保留章节并标注证据状态) ===== -->
 <section class="section" id="runtime">
   <div class="section-head">
     <div class="sh-title"><span class="sh-icon">🧩</span> 软件运行时</div>
     <span class="sh-count">{{RUNTIME_PKG_COUNT}} 个关键包</span>
   </div>
 
-  <div class="sub-head">Python 环境与关键包版本</div>
+  <div class="sub-head">采集器 Python 环境与关键包</div>
   <div class="table-wrap">
     <table>
       <thead><tr><th>包 / 组件</th><th>版本</th><th>说明</th></tr></thead>
@@ -456,13 +456,21 @@ details > .details-body { padding: 0.5rem 0; }
     </table>
   </div>
 
-  <div class="sub-head">推理进程快照</div>
+  <div class="sub-head">业务进程快照</div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>PID</th><th>进程</th><th>CPU%</th><th>内存%</th><th>线程数</th><th>CPU 亲和</th><th>命令行</th></tr></thead>
+      <thead><tr><th>PID</th><th>进程</th><th>父进程</th><th>线程数</th><th>CPU 亲和</th><th>证据状态</th></tr></thead>
       <tbody>
         {{RUNTIME_PROCESS_ROWS}}
       </tbody>
+    </table>
+  </div>
+
+  <div class="sub-head">目标进程环境与已加载库</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>角色 / PID</th><th>启动环境</th><th>加载库</th><th>cgroup / 限制</th><th>证据路径及状态</th></tr></thead>
+      <tbody>{{WORKLOAD_ROWS}}</tbody>
     </table>
   </div>
 

@@ -31,6 +31,7 @@ import socket
 import platform
 import subprocess
 import ipaddress
+import posixpath
 import threading
 import argparse
 from enum import Enum
@@ -38,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Keep this helper identical in both standalone scripts; no deployment dependency.
 SENSITIVE_KEY = re.compile(
@@ -306,6 +307,7 @@ class DeviceInfo:
     device_ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
     device_id: int
     rank_id: int
+    role: str = ""
 
 
 @dataclass
@@ -374,6 +376,7 @@ def _parse_mindie_rank_table(path: str) -> RankTable:
                 DeviceInfo(device_ip=device_ip, device_id=device_id, rank_id=rank_id)
             )
 
+    host_to_devices = {host: devices for host, devices in host_to_devices.items() if devices}
     if not host_to_devices:
         raise RankTableParseError(f"rank table 中未解析出任何设备: {path!r}")
 
@@ -397,7 +400,8 @@ def _parse_vllm_rank_table(path: str) -> RankTable:
         )
 
     host_to_devices = {}
-    for device_list in [data["prefill_device_list"], data["decode_device_list"]]:
+    for role in ('prefill', 'decode'):
+        device_list = data[role + '_device_list']
         if device_list is None:
             continue
         for dev in device_list:
@@ -425,9 +429,10 @@ def _parse_vllm_rank_table(path: str) -> RankTable:
                 continue
 
             host_to_devices[host_ip].append(
-                DeviceInfo(device_ip=device_ip, device_id=device_id, rank_id=cluster_id - 1)
+                DeviceInfo(device_ip=device_ip, device_id=device_id, rank_id=cluster_id - 1, role=role)
             )
 
+    host_to_devices = {host: devices for host, devices in host_to_devices.items() if devices}
     if not host_to_devices:
         raise RankTableParseError(f"rank table 中未解析出任何设备: {path!r}")
 
@@ -591,6 +596,15 @@ class SysCollector:
 
     def _collect_kernel_info(self) -> dict:
         info = dict(platform.uname()._asdict())
+        try:
+            with open('/etc/os-release', encoding='utf-8') as f:
+                info['os_release'] = dict(line.rstrip().split('=', 1) for line in f
+                                          if re.match(r'^[A-Z_]+=', line))
+        except OSError:
+            pass
+        libc_name, libc_version = platform.libc_ver()
+        if libc_name:
+            info['libc'] = {'name': libc_name, 'version': libc_version}
         try:
             with open('/sys/kernel/mm/transparent_hugepage/enabled', 'r') as f:
                 content = f.read()
@@ -1222,10 +1236,12 @@ class NPUCollector:
             dev["ecc"] = ecc_summary
 
         # 固件/序列号来自 board 信息
-        firmware = self._kv_get(board_kv, "Software", "Version") \
-            or self._kv_get(board_kv, "Firmware")
-        if firmware:
-            dev["firmware_version"] = firmware
+        for key, label in (("driver_version", "Software Version"),
+                           ("firmware_version", "Firmware Version"),
+                           ("compatibility", "Compatibility")):
+            value = self._kv_get(board_kv, label)
+            if value and query_status["board"]["returncode"] == 0:
+                dev[key] = value
         serial = self._kv_get(board_kv, "Serial")
         if serial:
             dev["serial"] = serial
@@ -1253,6 +1269,15 @@ class NPUCollector:
         out["devices"] = [devices[i] for i in self.device_ids]
         out['per_device_collection'] = {'collection_status': 'success'}
         return out
+
+    def _collect_inventory(self) -> dict:
+        inventory = {}
+        if self.smi_cmd:
+            for key, options in (('npu_ids', ['-l']), ('chip_mapping', ['-m']),
+                                 ('topology', ['-t', 'topo'])):
+                rc, output = run_cmd([self.smi_cmd, 'info', *options])
+                inventory[key] = {'returncode': rc, 'raw': output}
+        return {'inventory': inventory}
 
     # ------------------------------------------------------------------
     # 子采集器 3：/dev 设备节点权限（容器场景高频故障点）
@@ -1417,6 +1442,7 @@ class NPUCollector:
         sub_collectors = [
             ("smi", self._collect_smi),
             ("per_device", self._collect_per_device),
+            ("inventory", self._collect_inventory),
             ("device_nodes", self._collect_device_nodes),
             ("optical", self._collect_optical),
             ("log_dirs", self._collect_log_dirs),
@@ -1435,8 +1461,9 @@ class NPUCollector:
         # 顶层汇总字段：count / devices / firmware_version，方便 Agent 直接判断多卡一致性
         devices = result.get("devices") or []
         result["count"] = len(devices) if devices else self.npu_count
-        if devices and isinstance(devices[0], dict) and devices[0].get("firmware_version"):
-            result["firmware_version"] = devices[0]["firmware_version"]
+        versions = {device.get("firmware_version") for device in devices}
+        if len(versions) == 1 and None not in versions:
+            result["firmware_version"] = versions.pop()
         return CollectorResult(result, self.collect_type, errors)
 
 
@@ -1461,6 +1488,7 @@ class AscendCollector:
          "/usr/local/Ascend/atb-models",
          "version.info", ("atb-models version",), "time", "commit id"),
     ]
+    CANN_SUBCOMPONENTS = ('runtime', 'compiler', 'hccl', 'opp', 'ops', 'aicpu')
 
     def __init__(self):
         self.collect_type = "ascend"
@@ -1475,7 +1503,8 @@ class AscendCollector:
 
     @staticmethod
     def _parse_version_file(file_path, ver_keys, ts_key, commit_key):
-        result = {'source': file_path, 'collection_status': 'success'}
+        result = {'source': file_path, 'realpath': os.path.realpath(file_path),
+                  'collection_status': 'success'}
         if not os.path.isfile(file_path):
             return {'source': file_path, 'collection_status': 'unavailable',
                     'reason': 'version.info 不存在或不可访问；不能据此断言组件未安装'}
@@ -1507,10 +1536,41 @@ class AscendCollector:
 
     def collect(self) -> CollectorResult:
         results = {}
+        roots = list(dict.fromkeys(os.path.normpath(path) for path in (
+            os.getenv('ASCEND_HOME_PATH'), os.getenv('ASCEND_TOOLKIT_HOME'),
+            '/usr/local/Ascend/cann', '/usr/local/Ascend/ascend-toolkit/latest',
+            os.path.expanduser('~/Ascend/cann'), os.path.expanduser('~/Ascend/ascend-toolkit/latest'),
+        ) if path))
         for name, env_var, default_home, version_file, ver_keys, ts_key, commit_key in self.COMPONENTS:
-            file_path = self._get_version_file(env_var, default_home, version_file)
-            results[name] = self._parse_version_file(file_path, ver_keys, ts_key, commit_key)
+            paths = [self._get_version_file(env_var, default_home, version_file)]
+            if env_var == 'ASCEND_TOOLKIT_HOME':
+                paths.extend(os.path.join(root, version_file) for root in roots)
+            elif name == 'atb':
+                paths.extend(os.path.expanduser(prefix + '/nnal/atb/latest/version.info')
+                             for prefix in ('/usr/local/Ascend', '~/Ascend'))
+            results[name] = self._collect_candidates(paths, ver_keys, ts_key, commit_key)
+        for name in self.CANN_SUBCOMPONENTS:
+            results[name] = self._collect_candidates(
+                [os.path.join(root, name, 'version.info') for root in roots],
+                ('version', 'version_dir'), 'timestamp', 'commit id')
+        results['asdsip'] = self._collect_candidates(
+            [os.path.expanduser(prefix + '/nnal/asdsip/latest/version.info')
+             for prefix in ('/usr/local/Ascend', '~/Ascend')], ('version', 'ascend-cann-asdsip version'), '', '')
+        vendor_paths = os.environ.get('ASCEND_CUSTOM_OPP_PATH', '').split(os.pathsep)
+        results['custom_opp'] = {'source': 'collector:ASCEND_CUSTOM_OPP_PATH', 'paths': [
+            {'path': path, 'realpath': os.path.realpath(path), 'is_directory': os.path.isdir(path),
+             'manifest': self._parse_version_file(os.path.join(path, 'version.info'), ('version',), '', '')}
+            for path in vendor_paths if path]}
         return CollectorResult(results, self.collect_type)
+
+    def _collect_candidates(self, paths, ver_keys, ts_key, commit_key):
+        records = [self._parse_version_file(path, ver_keys, ts_key, commit_key)
+                   for path in dict.fromkeys(paths)]
+        selected = next((entry for entry in records if entry['collection_status'] == 'success'), records[0])
+        return dict(selected, attempted_paths=[entry['source'] for entry in records],
+                    installed_candidates=[{key: value for key, value in entry.items()
+                                           if key != 'collection_status'}
+                                          for entry in records if entry['collection_status'] == 'success'])
 
 
 class EnvCollector:
@@ -1519,7 +1579,8 @@ class EnvCollector:
     ENV_FILTERS = [
         "ASCEND", "MINDIE", "ATB_", "HCCL_", "MIES",
         "RANKTABLE", "GE_", "TORCH", "ACL_", "NPU_",
-        "LCCL_", "LCAL_", "OPS", "INF_"
+        "LCCL_", "LCAL_", "OPS", "INF_", "VLLM_", "SGLANG_", "RAY_",
+        "OMPI_COMM_WORLD_", "TORCHELASTIC_", "OMP_"
     ]
 
     # 疑似敏感变量的 key 匹配模式（值脱敏，key 名保留用于环境一致性比对）
@@ -1531,7 +1592,18 @@ class EnvCollector:
         'MINDIE_LLM_HOME_PATH', 'ATB_HOME_PATH', 'ATB_SPEED_HOME_PATH',
         'HCCL_BUFFSIZE', 'TASK_QUEUE_ENABLE', 'RANK_TABLE_FILE',
         'OMP_NUM_THREADS', 'PYTORCH_NPU_ALLOC_CONF',
+        'PATH', 'PYTHONPATH', 'PYTHONHOME', 'LD_PRELOAD', 'CONDA_PREFIX',
+        'VIRTUAL_ENV', 'RANK', 'LOCAL_RANK', 'WORLD_SIZE', 'LOCAL_WORLD_SIZE',
+        'GROUP_RANK', 'RANK_SIZE', 'RANK_ID', 'DEVICE_ID', 'MASTER_ADDR',
+        'MASTER_PORT', 'GLOO_SOCKET_IFNAME', 'GOMP_CPU_AFFINITY',
+        'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'KMP_AFFINITY',
+        'TOKENIZERS_PARALLELISM', 'DYNAMIC_EPLB', 'HF_HOME', 'HF_HUB_CACHE',
     }
+
+    @classmethod
+    def filter_keys(cls, items):
+        return {k: v for k, v in items.items()
+                if k in cls.CRITICAL_ENV or any(pattern in k for pattern in cls.ENV_FILTERS)}
 
     def __init__(self, filter_env: bool = False):
         self.collect_type = "env"
@@ -1540,10 +1612,7 @@ class EnvCollector:
     def collect(self) -> CollectorResult:
         env_items = dict(os.environ)
         if self.filter_env:
-            env_items = {
-                k: v for k, v in env_items.items()
-                if k in self.CRITICAL_ENV or any(f in k for f in self.ENV_FILTERS)
-            }
+            env_items = self.filter_keys(env_items)
 
         # 敏感变量脱敏
         masked_keys = sorted(k for k in env_items if self.SENSITIVE_PATTERN.search(k))
@@ -1720,9 +1789,10 @@ class NetworkCollector:
     PROBE_TIMEOUT = 2.0
     MAX_PEER_PROBE_PORTS = 8
 
-    def __init__(self, rank_table: "RankTable" = None):
+    def __init__(self, rank_table: "RankTable" = None, probe_connectivity=True):
         self.collect_type = "network"
         self.rank_table = rank_table
+        self.probe_connectivity = probe_connectivity
 
     def collect(self) -> CollectorResult:
         sub_collectors = [
@@ -1801,7 +1871,8 @@ class NetworkCollector:
                 results.append(port)
 
     def _probe_port(self, host, port):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        family = socket.AF_INET6 if ipaddress.ip_address(host).version == 6 else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
         sock.settimeout(self.PROBE_TIMEOUT)
         try:
             sock.connect((host, port))
@@ -1883,6 +1954,10 @@ class NetworkCollector:
         rc, out = run_cmd("ip -6 route")
         if rc == 0 and out:
             result["route6_raw"] = out.splitlines()
+        for family, key in (('-4', 'rules4_raw'), ('-6', 'rules6_raw')):
+            rc, out = run_cmd(['ip', family, 'rule', 'show'])
+            if rc == 0:
+                result[key] = out.splitlines()
         return result
 
     def _collect_rdma(self):
@@ -1942,6 +2017,8 @@ class NetworkCollector:
     def _collect_peer_ports(self):
         """秩间业务端口连通性：对本机监听的业务端口（>=1024）
         逐一探测 rank table 中各主机的连通性（ICMP 通不代表业务端口通）"""
+        if not self.probe_connectivity:
+            return {'peers': {}, 'peer_probe_status': 'skipped'}
         host_to_devices = {}
         if self.rank_table is not None:
             host_to_devices = getattr(self.rank_table, "host_to_devices", {}) or {}
@@ -1978,6 +2055,8 @@ class RuntimeCollector:
     WATCHED_PACKAGES = (
         "torch", "torch-npu", "vllm", "vllm-ascend", "transformers",
         "mindspore", "mindie", "numpy", "triton", "onnx", "onnxruntime",
+        "mindie-llm", "mindie-motor", "atb-llm", "mindspeed", "megatron-core",
+        "deepspeed", "accelerate", "sglang", "ray", "safetensors",
     )
     TARGET_PROCESS_KEYWORDS = ("mindie", "vllm", "torchrun", "python")
     MAX_TARGET_PROCESSES = 40
@@ -2054,7 +2133,7 @@ class RuntimeCollector:
 
     def _collect_packages(self):
         """pip 包版本：环境比对的核心差异源（torch/torch_npu/vllm/transformers 等）"""
-        result = {"watched": {}}
+        result = {"watched": {}, "watched_locations": {}}
         watched_norm = {p.lower().replace("-", "_") for p in self.WATCHED_PACKAGES}
         try:
             import importlib.metadata as importlib_metadata
@@ -2062,6 +2141,8 @@ class RuntimeCollector:
                 name = (dist.metadata.get("Name") or "").lower().replace("-", "_")
                 if name in watched_norm:
                     result["watched"][name] = dist.version
+                    result["watched_locations"].setdefault(name, []).append(
+                        {'version': dist.version, 'location': str(dist.locate_file(''))})
         except Exception as e:
             result["watched_error"] = str(e)
         rc, out = run_cmd([sys.executable, '-m', 'pip', 'list', '--format=freeze'], timeout=60)
@@ -2158,6 +2239,107 @@ class RuntimeCollector:
                 result["mounts_filtered"] = interesting
         result["note"] = "镜像 ID 需在宿主机执行 docker inspect 获取"
         return result
+
+
+class WorkloadCollector:
+    """Read an explicitly selected workload without executing its code."""
+
+    CGROUP_V2_FIELDS = (
+        'cpu.max', 'cpu.stat', 'cpuset.cpus.effective', 'cpuset.mems.effective',
+        'memory.current', 'memory.max', 'memory.events', 'pids.max',
+    )
+
+    def __init__(self, targets, proc_root='/proc'):
+        self.collect_type = 'workload'
+        self.targets = targets
+        self.proc_root = proc_root
+
+    @staticmethod
+    def _read(path, limit=4 * 1024 * 1024):
+        with open(path, 'rb') as stream:
+            data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError('超过采集大小上限')
+        return data.decode('utf-8', errors='replace')
+
+    def _start_time(self, base):
+        # comm may contain spaces and parentheses. Field 22 follows the final ')'.
+        return int(self._read(os.path.join(base, 'stat')).rsplit(')', 1)[1].split()[19])
+
+    def _environment(self, base):
+        launch = dict(item.split('=', 1) for item in
+                      self._read(os.path.join(base, 'environ')).split('\0') if '=' in item)
+        values = EnvCollector.filter_keys(launch)
+        return {'source': 'proc_exec_environment', 'values': values,
+                'unset': sorted(EnvCollector.CRITICAL_ENV - values.keys())}
+
+    def _libraries(self, base):
+        paths = set()
+        for line in self._read(os.path.join(base, 'maps')).splitlines():
+            fields = line.split(None, 5)
+            if len(fields) == 6 and fields[5].startswith('/') and '.so' in posixpath.basename(fields[5]):
+                paths.add(fields[5])
+        return {'source': 'proc_maps', 'paths': sorted(paths)}
+
+    def _cgroup(self, base):
+        membership = self._read(os.path.join(base, 'cgroup')).splitlines()
+        result = {'membership': membership, 'limits': {}}
+        group = next((line[3:] for line in membership if line.startswith('0::')), None)
+        if group is None:
+            return dict(result, reason='当前仅结构化解析 cgroup v2 限制')
+        if not group.startswith('/') or '..' in group.split('/'):
+            return dict(result, collection_status='unavailable', reason='目标 cgroup 在当前视图不可见')
+        mounts = self._read(os.path.join(self.proc_root, 'self', 'mountinfo'))
+        for line in mounts.splitlines():
+            left, sep, right = line.partition(' - ')
+            if not sep or not right.startswith('cgroup2 '):
+                continue
+            root, mount = (re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), value)
+                           for value in left.split()[3:5])
+            if group != root and not group.startswith(root.rstrip('/') + '/'):
+                continue
+            target = os.path.join(mount, group[len(root):].lstrip('/'))
+            if not os.path.isdir(target):
+                continue
+            for key in self.CGROUP_V2_FIELDS:
+                try:
+                    result['limits'][key] = self._read(os.path.join(target, key)).strip()
+                except (OSError, ValueError) as exc:
+                    result['limits'][key] = {'collection_status': 'unavailable', 'reason': str(exc)}
+            return result
+        return dict(result, collection_status='unavailable', reason='未找到可读的目标 cgroup v2 挂载')
+
+    def _collect_target(self, pid):
+        base = os.path.join(self.proc_root, str(pid))
+        try:
+            start_time = self._start_time(base)
+            result = {'pid': pid, 'start_time_ticks': start_time}
+            for key, read in (
+                ('environment', lambda: self._environment(base)),
+                ('libraries', lambda: self._libraries(base)),
+                ('cgroup', lambda: self._cgroup(base)),
+                ('identity', lambda: {name: os.readlink(os.path.join(base, name))
+                                      for name in ('exe', 'cwd')}),
+                ('process_limits', lambda: self._read(os.path.join(base, 'limits'))),
+                ('status', lambda: dict(line.split(':', 1) for line in
+                    self._read(os.path.join(base, 'status')).splitlines()
+                    if line.partition(':')[0] in ('Uid', 'Gid', 'PPid', 'NSpid',
+                                                   'Cpus_allowed_list', 'Mems_allowed_list'))),
+            ):
+                try:
+                    result[key] = read()
+                except (OSError, ValueError) as exc:
+                    result[key] = {'collection_status': 'unavailable', 'reason': str(exc)}
+            if self._start_time(base) == start_time:
+                return result
+            return {'pid': pid, 'collection_status': 'failed', 'reason': 'PID 已复用'}
+        except (OSError, IndexError, ValueError) as exc:
+            return {'pid': pid, 'collection_status': 'unavailable', 'reason': str(exc)}
+
+    def collect(self):
+        targets = {label: self._collect_target(pid) for label, pid in self.targets.items()}
+        data = {'scope': 'explicit_pid', 'targets': targets}
+        return CollectorResult(redact_sensitive(data), self.collect_type)
 
 
 class WeightCollector:
@@ -2301,6 +2483,13 @@ def collect_all(args) -> dict:
     info("采集软件运行时（Python 包/推理进程/容器）...")
     _run_collector(RuntimeCollector())
 
+    targets = getattr(args, 'targets', {})
+    if targets:
+        _run_collector(WorkloadCollector(targets))
+    else:
+        dump_content['workload'] = {'scope': 'explicit_pid', 'targets': {}}
+        collection['workload'] = {'status': 'skipped', 'reason': '未指定目标进程', 'errors': []}
+
     # --- 预解析 rank table（供 Ping/HCCL/Network 采集器复用） ---
     rank_table = None
     rank_error = None
@@ -2311,9 +2500,25 @@ def collect_all(args) -> dict:
         except Exception as e:
             rank_error = str(e)
             warn("rank table 解析失败: {}", redact_sensitive(str(e), all_secrets))
+    collection['rank_table'] = {'status': 'skipped', 'reason': '未提供 rank table', 'errors': []}
+    if rank_table:
+        hosts = {str(host): [{'device_ip': str(device.device_ip), 'device_id': device.device_id,
+                              'rank_id': device.rank_id, 'role': device.role}
+                             for device in devices]
+                 for host, devices in rank_table.host_to_devices.items()}
+        dump_content['rank_table'] = {
+            'source': args.rank_table_path, 'scene': args.scene or 'mindie',
+            'version': rank_table.version._raw, 'declared_server_count': rank_table.server_count,
+            'parsed_server_count': len(hosts), 'parsed_device_count': sum(map(len, hosts.values())),
+            'hosts': hosts,
+        }
+        collection['rank_table'] = {'status': 'success', 'errors': []}
+    elif rank_error:
+        collection['rank_table'] = {'status': 'failed', 'errors': [rank_error]}
 
     info("采集网络细节（网卡/路由/RDMA/端口连通性）...")
-    _run_collector(NetworkCollector(rank_table=rank_table))
+    probe_connectivity = not getattr(args, 'no_probes', False)
+    _run_collector(NetworkCollector(rank_table=rank_table, probe_connectivity=probe_connectivity))
 
     # --- 可选：配置文件 ---
     if args.mies_config_path:
@@ -2339,11 +2544,12 @@ def collect_all(args) -> dict:
 
     # --- 可选：Ping/HCCL/HCCN（需要 rank table） ---
     if rank_table:
-        info("采集 Ping 连通性...")
-        _run_collector(PingCollector(rank_table))
+        if probe_connectivity:
+            info("采集 Ping 连通性...")
+            _run_collector(PingCollector(rank_table))
 
-        info("采集 HCCL 通信状态...")
-        _run_collector(HCCLCollector(rank_table))
+            info("采集 NPU 设备连通性...")
+            _run_collector(HCCLCollector(rank_table))
 
         info("采集 Link 状态...")
         _run_collector(HCCNCollector("link", "link"))
@@ -2366,11 +2572,13 @@ def collect_all(args) -> dict:
             collection[name] = {'status': 'skipped', 'reason': '未提供对应采集参数', 'errors': []}
     for name in ('ping', 'hccl', 'link', 'vnic', 'tls'):
         if name not in collection:
+            reason = ('rank table 解析失败' if rank_error else
+                      '按 --no-probes 跳过主动探测' if rank_table else '未提供 rank table')
             collection[name] = {'status': 'failed' if rank_error else 'skipped',
-                                'reason': 'rank table 解析失败' if rank_error else '未提供 rank table',
+                                'reason': reason,
                                 'errors': [rank_error] if rank_error else []}
     dump_content['_meta'] = {
-        'schema_version': '1.1',
+        'schema_version': '1.2',
         'collection': collection,
         'status': 'partial' if any(v['status'] in ('failed', 'partial') for v in collection.values()) else 'success',
         'redaction': {'enabled': True, 'process_arguments': 'omitted',
@@ -2406,12 +2614,16 @@ def main():
     parser.add_argument(
         "--filter",
         action="store_true",
-        help="仅采集昇腾相关的环境变量 (ASCEND/MINDIE/ATB_/HCCL_ 等)"
+        help="仅采集与昇腾、框架、分布式、路径和绑核相关的环境变量"
     )
+    parser.add_argument('--target', action='append', default=[], metavar='ROLE=PID',
+                        help='只读采集指定业务进程，可重复；同一角色名用于跨快照比对')
     parser.add_argument("--mies-config-path", help="MindIE 服务 config.json 路径")
     parser.add_argument("--user-config-path", help="user_config.json 路径")
     parser.add_argument("--mindie-env-path", help="mindie_env.json 路径")
     parser.add_argument("--rank-table-path", help="rank table 文件路径")
+    parser.add_argument('--no-probes', action='store_true',
+                        help='保留 rank table 与只读状态采集，跳过 ICMP、TCP 和 NPU ping')
     parser.add_argument(
         "--scene",
         help="部署场景，如 'mindie' 或 'vllm'。用于确定 rank table 的解析格式"
@@ -2425,6 +2637,14 @@ def main():
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
+    args.targets = {}
+    for entry in args.target:
+        role, sep, pid = entry.partition('=')
+        if (not sep or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', role)
+                or not re.fullmatch(r'[1-9][0-9]{0,9}', pid) or role in args.targets
+                or SENSITIVE_KEY.search(role)):
+            parser.error('--target 需要唯一、非敏感的 ROLE=PID，例如 worker-0=12345')
+        args.targets[role] = int(pid)
 
     start_time = time.time()
 

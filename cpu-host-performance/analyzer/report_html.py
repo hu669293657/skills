@@ -3,14 +3,13 @@
 由 report.generate_reports 调用:
     render_html(m, diag, svg_bar_chart_fn, svg_line_chart_fn, esc_fn, sev_color, sev_cn, status_cn)
 """
-import io
 import re
-from .metrics import METRIC_EXPLANATIONS, EVENT_EXPLANATIONS, _explain_irq_name, freq_to_mhz, _pid_disp
 from .diagnosis import THRESHOLDS
 from .npu_report import affinity_html, binding_html
-from .report_explanation import explanations_html, fmt, collection_actions_html, collection_integrity_html
+from .report_explanation import explanations_html, fmt
 from .report_tables import enhance_long_tables, table_script
-from .report_sections import frequency_section, thread_section, core_table, coverage_section, topology_section, interrupt_tables, resource_section
+from .report_findings import diagnosis_overview
+from .report_sections import core_table, resource_section
 from .core_balance import render_core_balance
 
 
@@ -35,6 +34,13 @@ border-left:3px solid var(--blue)}
 h3{font-size:14.5px;font-weight:600;margin:16px 0 8px;color:#dce3ea}
 p{margin:6px 0}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin:12px 0}
+.diagnosis-item h4{margin:0 0 6px;font-size:14.5px;color:#dce3ea}
+.diagnosis-item b{color:#dce3ea}
+.diagnosis-status{display:inline-block;color:#abd2ff;background:#1b2d42;border-radius:4px;
+font-size:12px;padding:1px 6px;margin-right:5px}
+.diagnosis-critical{color:#ffb1b1;background:#442324}
+.diagnosis-warning{color:#ffda92;background:#3c2b17}
+.diagnosis-item{overflow-wrap:anywhere}
 .kpis{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
 .kpi{flex:1 1 130px;min-width:130px;background:var(--panel);border:1px solid var(--border);
 border-radius:10px;padding:12px 14px}
@@ -51,13 +57,6 @@ th{background:var(--panel2);color:var(--muted);text-align:left;padding:7px 10px;
 border:1px solid var(--border);font-weight:600;white-space:nowrap}
 td{padding:7px 10px;border:1px solid var(--border);vertical-align:top;overflow-wrap:normal;word-break:normal;min-width:4.5em}
 td.num,th.num{text-align:right;font-family:Consolas,monospace}
-.finding{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--gray);
-border-radius:8px;padding:14px 18px;margin:12px 0}
-.finding h3{margin:0 0 8px}
-.finding .tagline{font-size:12px;color:var(--muted);margin-bottom:8px}
-.finding .lbl{color:var(--muted)}
-.finding ol{margin:4px 0 0 22px}
-.finding li{margin:3px 0}
 .evt{background:var(--panel2);border-radius:6px;padding:2px 6px;font-family:Consolas,monospace;font-size:12.5px}
 .chart{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;margin:12px 0;overflow-x:auto}
 .legend{font-size:12px;color:var(--muted);margin:6px 0 2px}
@@ -87,21 +86,15 @@ pre{white-space:pre;overflow:auto;background:#090e15;border:1px solid var(--bord
 @media(max-width:700px){.npu-grid{grid-template-columns:1fr}.wrap{padding:0 12px}}
 @media print{body{background:#fff;color:#111}.card,.kpi,.finding,.chart,.status-hero{border-color:#ccc}}
 
-.report-help{margin:12px 0;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--panel)}
-.report-help>summary{cursor:pointer;color:#a9d1ff;font-weight:600}
 .data-details{margin:12px 0;border:1px solid var(--border);border-radius:8px;background:var(--panel)}
-.data-details>summary,.fi-legend>summary{cursor:pointer;padding:10px 12px;color:#a9d1ff;font-weight:600}
+.data-details>summary{cursor:pointer;padding:10px 12px;color:#a9d1ff;font-weight:600}
 .data-details[open]>summary{border-bottom:1px solid var(--border)}
-.table-tools,.fi-controls{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px;font-size:12px}
-.table-tools input,.table-tools select,.table-tools button,.fi-controls input,.fi-controls select,.fi-controls button{background:#182333;color:#dce3ea;border:1px solid #40516a;border-radius:5px;padding:6px;max-width:100%}
+.table-tools{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px;font-size:12px}
+.table-tools input,.table-tools select,.table-tools button{background:#182333;color:#dce3ea;border:1px solid #40516a;border-radius:5px;padding:6px;max-width:100%}
 .table-tools input{min-width:170px}.table-tools select{max-width:190px}
 .data-details table{margin:0}.data-details tbody tr[hidden]{display:none!important}
 .data-details .core-table-scroll{max-height:650px;overflow:auto}
-#frequency-idle svg{display:block;width:100%;min-width:560px}#fi-plot{overflow:auto}
-#fi-series{max-height:230px;overflow:auto;display:flex;flex-wrap:wrap;gap:8px;padding:10px}
-#fi-series label{font-size:12px;display:flex;align-items:center;gap:5px;padding:3px 6px;border:1px solid var(--border);border-radius:4px}
-#fi-tooltip{white-space:pre-wrap;font:12px/1.7 Consolas,monospace;min-height:52px;margin-top:8px}
-@media print{.table-tools,.fi-controls,.fi-legend{display:none}.data-details{break-inside:avoid}}
+@media print{.table-tools{display:none}.data-details{break-inside:avoid}}
 
 /* ---- 左侧固定导航目录 ---- */
 :root{--tocpad:216px}
@@ -209,20 +202,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     p = diag.get("primary")
     resource_types = {'CPU_RESOURCE_PRESSURE','MEMORY_PRESSURE','DISK_CAPACITY','IO_PRESSURE','CGROUP_RESOURCE_LIMIT'}
     resource_types.update(r['type'] for r in m.get('resources', {}).get('risks', []))
-    resource_findings = [f for f in diag['findings'] if f['type'] in resource_types]
-    other_findings = [f for f in diag['findings'] if f['type'] not in resource_types]
     primary_resource = bool(p and p['type'] in resource_types)
-    if p and not primary_resource:
-        A("<div class='card' style='border-left:4px solid %s'>" % sev_color.get(p["severity"], "#6b7280"))
-        A("<h3>核心问题：%s</h3>" % esc(p["title"]))
-        A("<p><span class='lbl'>置信度：</span><span class='evt'>%s</span> ｜ <span class='lbl'>类别：</span>"
-          "<span class='evt'>%s</span></p>" % (esc(p["confidence"]), esc(p["type"])))
-        A("<p><span class='lbl'>影响：</span>%s</p>" % esc(p["impact"]))
-        A("<p class='note'>完整优化方案与可复制命令见第三部分。</p></div>")
-    elif primary_resource:
-        A("<div class='card'><p>主要发现为机器资源风险；<a href='#sec-5'>查看第5节资源图</a>。</p></div>")
-    else:
-        A("<div class='card'><p>未发现明显的 CPU Host 侧问题。若业务性能仍异常，建议从 NPU/IO/框架侧继续排查。</p></div>")
+    A(diagnosis_overview(m, diag, sev_cn, primary_resource))
     if m.get("warnings"):
         A("<div class='warn-box'>⚠ <b>数据告警</b>：%s</div>" % esc("；".join(m["warnings"])))
     # ---------- 2. 证据总表 ----------
@@ -239,145 +220,20 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
         A("<p><span class='lbl'>候选判断</span> → <span class='evt'>%s</span>（%s）</p></div>" % (
             esc(p["type"]), esc(p.get("explanation", ""))))
     elif primary_resource:
-        A("<p>机器资源可能限制性能；<a href='#sec-5'>详见第5节</a>。</p>")
+        A("<p>机器资源可能限制性能；<a href='#sec-4'>详见第4节</a>。</p>")
     else:
         A("<p>未发现需要根因判断的问题。</p>")
     A(affinity_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
     # ---------- 3. 建议 ----------
     A("<h2>3. 优化建议</h2>")
     A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {}), m.get("binding_plan", {})))
-    # ---------- 4. 问题详情 ----------
-    A("<h2>4. 问题详情</h2>")
-    if other_findings:
-        for f in other_findings[:100]:
-            A(_finding_html(f, esc, sev_color, sev_cn))
-    elif not resource_findings:
-        A("<p>未发现问题。</p>")
-    if resource_findings:
-        A("<p>机器资源状态见<a href='#sec-5'>第5节</a>。</p>")
-    # ---------- 5. 总体状态 ----------
-    A("<h2>5. 机器资源与 CPU 总体状态</h2>")
+    # ---------- 4. 总体状态 ----------
+    A("<h2>4. 机器资源与 CPU 总体状态</h2>")
     A(resource_section(m, True))
-    # ---------- 6. Core Balance ----------
-    A("<h2>6. CPU Core Balance（各核心负载）</h2>")
+    # ---------- 5. Core Balance ----------
+    A("<h2>5. CPU Core Balance（各核心负载）</h2>")
     A(render_core_balance(m))
     A(core_table(m,True))
-    # ---------- 7. Scheduler ----------
-    A("<h2>7. Scheduler 调度分析</h2>")
-    A("<div class='card'>")
-    A("<p>上下文切换总计 <b>%s</b> 次（%s 次/秒）%s</p>" % (
-        fmt(sch.get("cs_total"),digits=0), fmt(sch.get("cs_rate"),digits=0),
-        "— 上下文切换率过高会增加调度开销，任务碎片化明显。"
-        if (sch.get("cs_rate") or 0) > _cs_limit(st["n_cpus"]) else ""))
-    A("<p>唤醒总计 <b>%s</b> 次（%s 次/秒）— 唤醒率反映任务碎片化程度。</p>" % (
-        fmt(sch.get("wakeup_total"),digits=0), fmt(sch.get("wakeup_rate"),digits=0)))
-    if sch.get("lat_avg") is not None:
-        A("<p>调度延迟：平均 %.3f ms，P50 %.3f ms，P95 %.2f ms，P99 %.2f ms，最大 %.2f ms（共 %s 次可配对样本）。</p>" % (
-            sch["lat_avg"], sch["lat_p50"], sch["lat_p95"], sch["lat_p99"], sch["lat_max"],
-            format(sch["lat_count"], ",")))
-        A("<p class='note'>调度延迟含义：%s</p>" % esc(METRIC_EXPLANATIONS["sched_latency"]))
-    else:
-        A("<p>调度延迟：%s</p>" % esc(sch.get("lat_note") or "无数据。"))
-    if sch.get("runnable_avg") is not None:
-        A("<p>已完成可运行等待的平均队列长度下界 %.1f — %s</p>" % (sch["runnable_avg"], esc(METRIC_EXPLANATIONS["runnable_avg"])))
-    A("</div>")
-    if sch.get("top_lat_tasks"):
-        A("<table><tr><th>任务</th><th class='num'>最大延迟 ms</th><th class='num'>平均 ms</th><th class='num'>次数</th></tr>")
-        for pid, comm, mx, avg, n in sch["top_lat_tasks"]:
-            A("<tr><td>%s</td><td class='num'>%.2f</td><td class='num'>%.3f</td><td class='num'>%d</td></tr>"
-              % (esc(_pid_disp(comm, pid)), mx * 1000, avg * 1000, n))
-        A("</table>")
-    # ---------- 8. IRQ / SoftIRQ ----------
-    A("<h2>8. IRQ / SoftIRQ 分析</h2>")
-    A("<h3>8.1 硬中断</h3>")
-    A("<p>硬中断全机观测占比 <b>%s</b>；单核最高 %s；配对次数 %s。</p>" % (fmt(irq.get("total_ratio"),"%"),fmt(irq.get("max_cpu_ratio"),"%"),fmt(irq.get("total_count"),digits=0)))
-    A(interrupt_tables(m,"irq",True))
-    A("<h3>8.2 软中断</h3>")
-    A("<p>软中断全机观测占比 <b>%s</b>；单核最高 %s；配对次数 %s。</p>" % (fmt(soft.get("total_ratio"),"%"),fmt(soft.get("max_cpu_ratio"),"%"),fmt(soft.get("total_count"),digits=0)))
-    A(interrupt_tables(m,"softirq",True))
-    A("<p class='note'>各核中断分布见第 6 节表格与上方图表。</p>")
-    # ---------- 9. Freq / Idle ----------
-    A("<h2>9. CPU Frequency / Idle 分析</h2>")
-    A(frequency_section(m,True))
-    # ---------- 10. Task ----------
-    A("<h2>10. Task / Thread 分析</h2>")
-    A(thread_section(m,True))
-    tk = m.get("tasks", {})
-    if tk.get("top_cs"):
-        A("<table><tr><th>Top 切出次数任务</th><th class='num'>次数</th></tr>")
-        for pid, comm, v in tk["top_cs"]:
-            A("<tr><td>%s</td><td class='num'>%s</td></tr>" % (
-                esc(_pid_disp(comm, pid)), format(v, ",")))
-        A("</table>")
-    if tk.get("top_wakeup"):
-        A("<table><tr><th>Top 被唤醒任务</th><th class='num'>次数</th></tr>")
-        for comm, n in tk["top_wakeup"]:
-            A("<tr><td>%s</td><td class='num'>%s</td></tr>" % (esc(comm or "?"), format(n, ",")))
-        A("</table>")
-    # ---------- 11. Affinity / NUMA ----------
-    A("<h2>11. Affinity / NUMA 分析</h2>")
-    A(topology_section(m,True))
-    numa_txt = (m.get("snapshot", {}) or {}).get("numa.txt", "")
-    if numa_txt and "node" in numa_txt:
-        nn = numa_txt.count("== /sys/devices/system/node/node") if "== " in numa_txt else None
-        A("<p>快照包含 NUMA 拓扑信息（%s 个节点可见）。</p>" % (nn if nn else "多"))
-    if tk.get("top_runtime"):
-        A("<p>Top 任务运行分布与各核利用率见第 6 节；任务集中在少数核时可结合绑核配置判断。</p>")
-    A("<p>CPU 亲和性、NPU/PID 对应及线程运行核见第二部分；互斥 CPU 分区和宿主机命令见第三部分。</p>")
-    A("<p class='note'>内存页 NUMA 分布与跨节点内存访问仍须 numastat -p PID、/proc/PID/numa_maps 或性能数据验证；taskset 本身不迁移内存页。</p>")
-    # ---------- 12. 时间窗口 ----------
-    A("<h2>12. 时间窗口分析</h2>")
-    A(_time_window_html(m, esc))
-    # ---------- 13. 数据说明与指标解释 ----------
-    A("<h2>13. 数据说明与指标解释</h2>")
-    A(collection_integrity_html(m.get("collection_integrity", {})))
-    A(coverage_section(m,True))
-    A("<h3>数据概况</h3><div class='card'>")
-    A("<p>trace 时间范围：%.3f ~ %.3f（相对秒），时长 %.1f 秒</p>" % (m.get("t_start", 0), m.get("t_end", 0), st["duration"]))
-    A("<p>CPU 数量（参与统计）：%d；报告核数（nproc）：%s</p>" % (st["n_cpus"], esc(m.get("n_cpus_report") or "-")))
-    A("<p>内核版本：%s ｜ 主机名：%s</p>" % (
-        esc(m["metadata"].get("kernel", "未知")), esc(m["metadata"].get("hostname", "未知"))))
-    A("<p>可用事件：%s</p>" % esc(", ".join(sorted(m.get("available", [])) or ["无"])))
-    A("<p>解析统计：总行 %s，成功 %s，失败 %s（失败行已自动跳过）</p>" % (
-        format(m["parse_stats"]["total"], ","), format(m["parse_stats"]["parsed"], ","),
-        format(m["parse_stats"]["failed"], ",")))
-    A("<p>buffer 溢出：%s</p></div>" % esc((m.get("buffer_overrun") or "0（统计已提供）") if m.get("buffer_overrun_known") else "未知（未提供丢失统计，不能当作0）"))
-    A("<h3>分析限制</h3><div class='card'><ul style='margin-left:20px'>"
-      "<li>trace 仅覆盖采集窗口，不代表长期行为。</li>"
-      "<li>利用率基于连续sched_switch有效区间；无switch的CPU可用cpu_idle区间降级；user/system快照为开机累计。</li>"
-      "<li>调度延迟为 wakeup→switch 配对估算；中断耗时为 entry→exit 配对。</li>"
-      "<li>频率按显式单位换算；标准trace/sysfs为kHz，报告为MHz。驱动报告值不等同于已验证的PMU实测频率。</li></ul></div>")
-    A('<details id="metric-help" class="report-help"><summary>指标与术语解释（按需展开）</summary>')
-    A("<h3>指标解释（每个指标是什么）</h3>")
-    A('<table data-inline-help><tr><th>指标</th><th>解释</th></tr>')
-    for k, v in METRIC_EXPLANATIONS.items():
-        A("<tr><td class='evt'>%s</td><td>%s</td></tr>" % (esc(k), esc(v)))
-    A("</table>")
-    A("<h3>事件/术语解释</h3>")
-    A('<table data-inline-help><tr><th>术语</th><th>解释</th></tr>')
-    for k, v in EVENT_EXPLANATIONS.items():
-        A("<tr><td class='evt'>%s</td><td>%s</td></tr>" % (esc(k), esc(v)))
-    A("</table>")
-    A('</details>')
-    # ---------- 图表：时间序列 ----------
-    ts = m.get("timeseries") or {}
-    util = ts.get("util") or []
-    if util:
-        A("<h2>附录图 1：利用率 / 中断占比时间序列</h2><div class='chart'>")
-        A("<div class='legend'><span style='color:#4a9eff'>■</span> CPU 利用率　"
-          "<span style='color:#d98f00'>■</span> 硬中断占比　"
-          "<span style='color:#2e9e5b'>■</span> 软中断占比</div>")
-        A(line_fn([("util", "#4a9eff", util),
-                   ("irq", "#d98f00", ts.get("irq_ratio") or []),
-                   ("softirq", "#2e9e5b", ts.get("softirq_ratio") or [])],
-                  y_max=100, y_label="%"))
-        A("</div>")
-        lat = ts.get("lat_p99") or []
-        if any(v is not None for v in lat):
-            A("<h2>附录图 2：调度延迟 P99 时间序列</h2><div class='chart'>")
-            A("<div class='legend'><span style='color:#d64545'>■</span> 调度延迟 P99 (ms)</div>")
-            A(line_fn([("lat_p99", "#d64545", lat)], y_label="ms"))
-            A("</div>")
     A("<div class='footer'>HostBound 性能诊断 Skill 生成 ｜ 仅标准库渲染，可离线打开</div>")
     A("</div></body></html>")
     return _inject_toc(enhance_long_tables("\n".join(L))).replace("</body>", table_script()+"</body>", 1)
@@ -408,56 +264,6 @@ def _row(name, value, threshold, status, warn):
     color = "#d98f00" if warn else "#2e9e5b"
     return ("<tr><td>%s</td><td class='num'>%s</td><td>%s</td>"
             "<td style='color:%s;font-weight:600'>%s</td></tr>" % (name, value, threshold, color, status))
-
-def _finding_html(f, esc, sev_color, sev_cn):
-    color = sev_color.get(f["severity"], "#6b7280")
-    parts = ["<div class='finding' style='border-left-color:%s'>" % color]
-    parts.append("<h3>%s <span class='badge' style='background:%s'>%s</span> "
-                 "<span class='evt'>置信度 %s</span></h3>" % (
-                     esc(f["title"]), color, esc(sev_cn.get(f["severity"], f["severity"])), esc(f["confidence"])))
-    parts.append("<div class='tagline'>类别：<span class='evt'>%s</span> — %s</div>" % (
-        esc(f["type"]), esc(f.get("explanation", ""))))
-    parts.append("<p><span class='lbl'>证据：</span></p><table><tr><th>指标</th><th>当前值</th><th>判定阈值</th><th>来源 / 时间窗</th></tr>")
-    for e in f["evidence"]:
-        parts.append("<tr><td class='evt'>%s</td><td><b>%s</b></td><td>%s</td><td>%s<br>%s</td></tr>" % (
-            esc(e["metric"]), esc(e["value"]), esc(e["threshold"]),
-            esc(e.get('source', 'ftrace / 对应系统快照')), esc(e.get('time_window', '本次采集窗口；累计快照除外'))))
-    parts.append("</table>")
-    parts.append("<p><span class='lbl'>影响：</span>%s</p>" % esc(f["impact"]))
-    parts.append("<p><span class='lbl'>可能根因：</span>%s</p>" % esc(f["possible_root_cause"]))
-    parts.append("<p class='note'>对应优化动作见第三部分。</p></div>")
-    return "".join(parts)
-
-def _time_window_html(m, esc):
-    ts = m.get("timeseries") or {}
-    util = ts.get("util") or []
-    if not util:
-        return "<p>时间序列数据不足，无法进行时间窗口分析。</p>"
-    b = ts.get("bucket_sec", 1)
-    vals = [(i, v) for i, v in enumerate(util) if v is not None]
-    if not vals:
-        return "<p>时间序列数据不足，无法进行时间窗口分析。</p>"
-    top3 = sorted(sorted(vals, key=lambda x: -x[1])[:3])
-    parts = ["<p>以下为利用率最高的时间窗口（桶 = %.2f 秒）：</p><ul style='margin-left:22px'>" % b]
-    cs = ts.get("cs_rate") or []
-    lat = ts.get("lat_p99") or []
-    soft = ts.get("softirq_ratio") or []
-    for i, v in top3:
-        seg = "窗口 %.1f~%.1f 秒：利用率峰值 <b>%.1f%%</b>" % (i * b, (i + 1) * b, v)
-        extra = []
-        if cs and cs[i] is not None:
-            extra.append("上下文切换 %.0f 次/秒" % cs[i])
-        if soft and soft[i] is not None:
-            extra.append("软中断占比 %.1f%%" % soft[i])
-        if lat and lat[i] is not None:
-            extra.append("调度延迟 P99 %.2f ms" % lat[i])
-        if extra:
-            seg += "，同期 " + "、".join(extra)
-        parts.append("<li>%s</li>" % seg)
-    parts.append("</ul>")
-    parts.append("<p class='note'>若峰值窗口内同步出现中断/调度延迟上升，可建立「负载升高 → 中断增加 → 调度延迟上升 → "
-                 "worker 运行时间下降 → NPU 等待 Host」的关联链；仅当上述同期证据存在时成立。</p>")
-    return "".join(parts)
 
 def _now():
     import time

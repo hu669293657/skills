@@ -187,6 +187,32 @@ class ComparisonTests(unittest.TestCase):
 
 
 class CollectorTests(unittest.TestCase):
+    def test_board_driver_is_not_reported_as_firmware(self):
+        board = 'Software Version : 24.1.0\nFirmware Version : 7.5.0\nCompatibility : OK'
+        with patch.object(d.NPUCollector, '_resolve_smi', return_value='/tool'):
+            obj = d.NPUCollector()
+        with patch.object(d, 'run_cmd', side_effect=lambda argv, **kw:
+                          (0, board if 'board' in argv else '')):
+            device = obj._collect_one_device(7)
+        self.assertEqual(device.get('driver_version'), '24.1.0')
+        self.assertEqual(device.get('firmware_version'), '7.5.0')
+        self.assertEqual(device.get('compatibility'), 'OK')
+
+    def test_target_snapshot_reads_launch_environment_and_loaded_libraries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            proc = Path(folder) / '123'
+            proc.mkdir()
+            (proc / 'stat').write_text('123 (worker x) S ' + '0 ' * 18 + '4321\n', encoding='utf-8')
+            (proc / 'environ').write_bytes(b'RANK=3\0MASTER_PORT=29500\0LD_PRELOAD=\0VLLM_API_KEY=secret\0UNRELATED=skip\0')
+            (proc / 'maps').write_text(
+                '1000-2000 r-xp 00000000 08:01 5 /cann/lib/libhccl.so\n'
+                '2000-3000 r--p 00001000 08:01 5 /cann/lib/libhccl.so\n', encoding='utf-8')
+            data = d.WorkloadCollector({'worker': 123}, proc_root=folder).collect().data['targets']['worker']
+        self.assertEqual(data['environment']['values'],
+                         {'RANK': '3', 'MASTER_PORT': '29500', 'LD_PRELOAD': '', 'VLLM_API_KEY': '***MASKED***'})
+        self.assertIn('WORLD_SIZE', data['environment']['unset'])
+        self.assertEqual(data['libraries']['paths'], ['/cann/lib/libhccl.so'])
+
     def test_filter_retains_all_documented_critical_variables(self):
         values = {k: 'value' for k in ('ASCEND_HOME_PATH', 'ASCEND_TOOLKIT_HOME', 'LD_LIBRARY_PATH',
                   'MINDIE_LLM_HOME_PATH', 'ATB_HOME_PATH', 'ATB_SPEED_HOME_PATH', 'HCCL_BUFFSIZE',
@@ -223,6 +249,29 @@ class CollectorTests(unittest.TestCase):
             data = d.collect_all(args)
         self.assertEqual(data['_meta']['collection']['hccl']['status'], 'failed')
         self.assertIn('bad rank table', data['_meta']['collection']['hccl']['errors'])
+
+    def test_no_probes_keeps_rank_table_without_active_connectivity_checks(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.ExitStack() as stack:
+            path = Path(folder) / 'rank.json'
+            path.write_text(json.dumps({
+                'server_count': 1, 'version': '1.2',
+                'server_list': [{'server_id': '192.0.2.1', 'device': [
+                    {'device_ip': '2001:db8::2', 'device_id': 7, 'rank_id': 0}]}],
+            }), encoding='utf-8')
+            args = types.SimpleNamespace(filter=True, rank_table_path=str(path), scene='mindie',
+                                         mies_config_path=None, user_config_path=None, mindie_env_path=None,
+                                         weight_dir=None, chunk_size=32, no_probes=True)
+            for cls in (d.SysCollector, d.HardwareCollector, d.NPUCollector, d.AscendCollector,
+                        d.EnvCollector, d.RuntimeCollector, d.HCCNCollector):
+                stack.enter_context(patch.object(cls, 'collect', lambda obj: d.CollectorResult({}, obj.collect_type)))
+            stack.enter_context(patch.object(d.NetworkCollector, 'collect', lambda obj:
+                d.CollectorResult(obj._collect_peer_ports(), obj.collect_type)))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            data = d.collect_all(args)
+        self.assertEqual(data['rank_table']['hosts']['192.0.2.1'][0]['device_ip'], '2001:db8::2')
+        self.assertEqual(data['network']['peer_probe_status'], 'skipped')
+        self.assertEqual(data['_meta']['collection']['ping']['status'], 'skipped')
+        self.assertEqual(data['_meta']['collection']['hccl']['status'], 'skipped')
 
     def test_zero_devices_does_not_construct_empty_pool(self):
         with patch.object(d, 'get_npu_count', return_value=0), patch.object(d.os, 'listdir', return_value=[]), patch.object(d, 'which', return_value='/tool'):

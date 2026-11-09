@@ -19,7 +19,7 @@ def build_timeseries(m,events,n=120):
     return {'bucket_sec':bucket,'n':n,'util':[100*b/o if o else None for b,o in zip(busy,observed)],
             'cs_rate':[v/bucket if o else None for v,o in zip(cs,observed)],
             'irq_ratio':[None]*n,'softirq_ratio':[None]*n,
-            'lat_p99':[percentile(v,99) for v in lat]}
+            'lat_p99':[percentile(v,99) for v in lat], 'lat_count':[len(v) for v in lat]}
 
 
 def task_compatibility(m):

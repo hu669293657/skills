@@ -19,6 +19,38 @@ def html(m):
 
 
 class ReportTests(unittest.TestCase):
+    def test_core_problems_sort_by_severity_instead_of_topic_order(self):
+        m = sample()
+        m['sched'].update(lat_p99=8, lat_count=80)
+        m['scheduler_quality']['complete'] = True
+        for cpu, row in m['per_cpu'].items():
+            row['irq_ratio'] = 35 if cpu == 0 else 0
+        m['irq'].update(peak_cpu=0, max_cpu_ratio=35, total_count=40)
+        overview = html(m).split("<h2 id='sec-2'>", 1)[0]
+        self.assertIn('核心问题：硬中断集中于 CPU 0', overview)
+        self.assertLess(overview.index('35.0%'), overview.index('8.00 ms 以内'))
+        levels = re.findall(r'<span class="diagnosis-status[^"]*">([^<]+)', overview)
+        self.assertEqual(levels, ['严重 · 待验证', '警告 · 已观测到'])
+        self.assertEqual(overview.count('如何复测'), 2)
+
+    def test_diagnosis_missing_evidence_stays_unknown(self):
+        h = html(sample())
+        visible = h.split("<h2 id='sec-2'>", 1)[0]
+        self.assertIn('数据不足', visible)
+        self.assertNotIn('未见明显异常', visible)
+        self.assertNotRegex(h, r'''(?:id|href)=["']#?sec-(?:[6-9]|1[0-2])["']''')
+
+    def test_diagnosis_with_healthy_wait_sample_needs_no_action(self):
+        m = sample()
+        m['sched'].update(lat_p99=1, lat_count=80)
+        m['scheduler_quality']['complete'] = True
+        m['collection_integrity'] = {'ftrace': {
+            'events_present': True, 'parse_success': True, 'loss_status': 'NO_REPORTED_LOSS'}}
+        h = html(m)
+        visible = h.split("<h2 id='sec-2'>", 1)[0]
+        self.assertIn('未见明显异常', visible)
+        self.assertNotIn('class="card diagnosis-item"', visible)
+
     def test_all_core_sizes_and_numa(self):
         from analyzer.core_balance import core_data, render_core_balance
         for n in (8,64,256):
@@ -63,14 +95,12 @@ class ReportTests(unittest.TestCase):
         m=sample(256);h=html(m)
         self.assertNotRegex(h,r'<script[^>]+src=')
         self.assertNotIn('0.00%</b>（0 次）',h)
-        self.assertIn('CPU Frequency Analysis',h)
-        self.assertIn('CPU Contention Analysis',h)
-        self.assertIn('Process / Thread Discovery',h)
-    def test_optional_tool_coverage_explicit(self):
-        m=sample();h=html(m)
-        for text in (h,):
-            for name in ('GIL','msprof','function_monitor','NOT_PROVIDED'):
-                self.assertIn(name,text)
+        for detail in ('CPU Frequency Analysis', 'CPU Contention Analysis', 'Process / Thread Discovery'):
+            self.assertNotIn(detail, h)
+    def test_optional_tool_coverage_retained_in_metrics(self):
+        tools = sample()['optional_tools']
+        for name in ('GIL', 'msprof', 'function_monitor'):
+            self.assertTrue(any(name in row['name'] and row['status'] == 'NOT_PROVIDED' for row in tools))
     def test_missing_wakeup_source_stays_null(self):
         m=sample()
         self.assertIsNone(m['sched']['wakeup_total'])
@@ -86,18 +116,20 @@ class ReportDisclosureTests(unittest.TestCase):
         h=html(m)
         self.assertNotIn('Top 运行时间任务',h)
         self.assertNotIn('Top 迁移任务',h)
-        self.assertIn('Top CPU Runtime Threads',h)
-        self.assertIn('Top CPU Migration Threads',h)
+        self.assertNotIn('Top CPU Runtime Threads',h)
+        self.assertNotIn('Top CPU Migration Threads',h)
         self.assertEqual(m['tasks']['top_runtime'],original)
         self.assertEqual(m['tasks']['top_migration'][0][2],7)
 
-    def test_section_five_only_shows_resource_chart(self):
+    def test_section_four_only_shows_resource_chart(self):
         m=sample()
         marker='RESOURCE_RISK_UNIQUE_EVIDENCE'
         m['resources'].update(available=True,risks=[{'type':'MEMORY_PRESSURE','title':'内存风险测试',
             'evidence':marker,'evidence_state':'POTENTIAL','note':'资源候选需验证'}])
         h=html(m)
-        five=h.split("<h2 id='sec-5'>",1)[1].split("<h2 id='sec-6'>",1)[0]
+        self.assertNotIn('问题详情', h)
+        self.assertIn("href='#sec-4'", h)
+        five=h.split("<h2 id='sec-4'>",1)[1].split("<h2 id='sec-5'>",1)[0]
         self.assertEqual(five.count('<svg'),1)
         self.assertNotIn('<table',five)
         self.assertNotIn('/proc/stat',five)
@@ -105,14 +137,10 @@ class ReportDisclosureTests(unittest.TestCase):
         self.assertNotIn('2.4 机器资源风险',h)
         self.assertEqual(len(m['resources']['risks']),1)
 
-    def test_dictionary_is_one_native_collapsed_help_block(self):
-        h=html(sample())
-        block=re.search(r'<details id="metric-help" class="report-help">(.*?)</details>',h,re.S)
-        self.assertIsNotNone(block)
-        self.assertIn('指标解释（每个指标是什么）',block.group(1))
-        self.assertIn('事件/术语解释',block.group(1))
-        self.assertNotIn('<details',block.group(1))
-        self.assertIn('cpu_util',block.group(1))
+    def test_legacy_evidence_and_dictionary_are_absent(self):
+        h = html(sample())
+        for marker in ('diagnosis-evidence', 'scheduler-evidence', 'metric-help', '查看技术证据'):
+            self.assertNotIn(marker, h)
 
     def test_full_core_table_collapsed_with_all_records_and_tools(self):
         from analyzer.report_sections import core_table
@@ -163,13 +191,13 @@ class ReportDisclosureTests(unittest.TestCase):
         self.assertIn('<details',h)
         self.assertIn('实际页',h)
 
-    def test_irq_sources_beyond_top_ten_remain_offline(self):
+    def test_irq_sources_beyond_top_ten_remain_in_metrics(self):
         m=sample()
         names=[('irq_source_%d'%i,i+1,.001*(i+1)) for i in range(15)]
         m['irq'].update(top_names=names[:10],all_names=names)
         h=html(m)
-        self.assertIn('irq_source_14',h)
-        self.assertIn('全部硬中断来源',h)
+        self.assertNotIn('irq_source_14', h)
+        self.assertEqual(m['irq']['all_names'][14][0], 'irq_source_14')
 
     def test_npu_cards_keep_conclusions_visible_and_fold_full_evidence(self):
         from tests.test_npu_affinity import metrics, snapshots

@@ -7,13 +7,10 @@ import subprocess
 import tempfile
 import unittest
 from tests.test_reports import sample, html
-from analyzer.parser import Event
-from analyzer.frequency_analysis import analyze_frequency
-from analyzer.idle_analysis import analyze_idle
 
 
 class OfflineBrowserTests(unittest.TestCase):
-    def test_search_sort_disclosure_and_combined_chart_controls(self):
+    def test_core_problems_and_core_table_work_offline(self):
         node = shutil.which('node')
         module = os.environ.get('CPU_REPORT_PLAYWRIGHT', str(Path.home()/'AppData/Roaming/npm/node_modules/playwright/node_modules/playwright-core'))
         browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', str(Path.home()/'AppData/Local/ms-playwright')))
@@ -26,9 +23,6 @@ class OfflineBrowserTests(unittest.TestCase):
         if not node or not Path(module).exists() or not engines:
             self.skipTest('Existing local Node/playwright Chromium unavailable (no download attempted)')
         m = sample(256)
-        m['snapshot']['hostbound/frequency_start.json'] = json.dumps({'policies':[{'id':'policy0','cpus':[0,1],'cpuinfo_max_freq':2600000},{'id':'policy128','cpus':[128,129],'cpuinfo_max_freq':2600000}]})
-        m['frequency'] = analyze_frequency(m, [Event(1,7,'cpu_frequency',fields={'cpu_id':0,'state':1000000}),Event(3,7,'cpu_frequency',fields={'cpu_id':0,'state':2000000}),Event(2,7,'cpu_frequency',fields={'cpu_id':128,'state':1500000})])
-        m['idle'] = analyze_idle(m, [Event(0,0,'cpu_idle',fields={'state':2}),Event(4,0,'cpu_idle',fields={'state':-1}),Event(2,128,'cpu_idle',fields={'state':1}),Event(6,128,'cpu_idle',fields={'state':4294967295})])
         with tempfile.TemporaryDirectory(prefix='cpu-report-browser-') as directory:
             report = Path(directory)/'report.html'
             report.write_text(html(m), encoding='utf-8')

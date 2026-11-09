@@ -13,6 +13,42 @@ class MetricAccuracyTests(unittest.TestCase):
         self.assertEqual(m['irq']['max_cpu_ratio'],10)
         self.assertEqual(m['irq']['observed_cpu_sec'],20)
 
+    def test_irq_hot_core_has_its_own_source(self):
+        td = TraceData()
+        td.snapshot = {'trace_overrun.txt': '0'}
+        for cpu, name, span in [(0, 'nic-global', 2.5), (1, 'nvme-local', 6),
+                                (2, 'nic-global', 2.5), (3, 'nic-global', 2.5)]:
+            td.events.extend([
+                Event(0, cpu, 'sched_switch', fields={'prev_pid': 0, 'next_pid': cpu + 1}),
+                Event(10, cpu, 'sched_switch', fields={'prev_pid': cpu + 1, 'next_pid': 0}),
+                Event(0.1, cpu, 'irq_handler_entry', fields={'irq': 10 + cpu, 'name': name}),
+                Event(0.1 + span, cpu, 'irq_handler_exit', fields={'irq': 10 + cpu}),
+            ])
+        m = compute_metrics(td)
+        self.assertEqual(m['irq']['top_names'][0][0], 'nic-global')
+        self.assertEqual(m['irq']['peak_cpu'], 1)
+        self.assertEqual(m['irq']['peak_sources'][0]['name'], 'nvme-local')
+        from tests.test_reports import html
+        verdict = html(m).split("<h2 id='sec-2'>", 1)[0]
+        self.assertIn('nvme-local', verdict)
+        self.assertNotIn('nic-global', verdict)
+        self.assertIn('IRQ 11', verdict)
+
+    def test_irq_hot_core_excludes_sources_outside_observed_time(self):
+        td = TraceData()
+        td.snapshot = {'trace_overrun.txt': '0'}
+        td.events = [
+            Event(0, 0, 'irq_handler_entry', fields={'irq': 1, 'name': 'outside'}),
+            Event(5, 0, 'irq_handler_exit', fields={'irq': 1}),
+            Event(6, 0, 'sched_switch', fields={'prev_pid': 0, 'next_pid': 1}),
+            Event(7, 0, 'irq_handler_entry', fields={'irq': 2, 'name': 'inside'}),
+            Event(8, 0, 'irq_handler_exit', fields={'irq': 2}),
+            Event(9, 0, 'sched_switch', fields={'prev_pid': 1, 'next_pid': 0}),
+        ]
+        metrics = compute_metrics(td)['irq']
+        self.assertEqual(metrics['top_names'][0][0], 'outside')
+        self.assertEqual(metrics['peak_sources'], [{'id': '2', 'name': 'inside', 'seconds': 1}])
+
     def test_missing_irq_not_zero(self):
         td=TraceData();td.events=[Event(0,0,'sched_switch',fields={'prev_pid':0,'next_pid':1}),Event(10,0,'sched_switch',fields={'prev_pid':1,'next_pid':0})]
         m=compute_metrics(td)

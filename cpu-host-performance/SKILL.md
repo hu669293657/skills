@@ -24,9 +24,17 @@ description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，�
 
 不默认执行 IRQ/dev 绑核、停 irqbalance、migratepages、强制内存绑定、训练启动或全局调优。有限 watch 仅审计，发现漂移/新任务即停止并恢复已跟踪项，不持续抢写框架策略。`taskset` 按 PID 枚举线程，执行器在调用前后核验身份和线程集合。
 
-报告采用 13 节顺序：1 结论摘要；2 问题证据总表与根因判断；3 优化建议；4 问题详情；5 机器资源与 CPU 总体状态；6 各核心负载；7 调度；8 IRQ/SoftIRQ；9 频率/Idle；10 Task/Thread；11 Affinity/NUMA；12 时间窗口；13 数据说明与指标解释。
+报告采用 5 节。1 结论摘要，2 问题证据总表与根因判断，3 优化建议，4 机器资源与 CPU 总体状态，5 各核心负载。
 
-第5节用一张离线资源图展示占用、等待压力与可能的性能限制。先筛选会影响当前任务的资源，再用可用快照计算指标。整机展示 CPU 忙碌与等待、内存峰值、磁盘 I/O 和最紧张挂载点；识别到任务资源限额时，再展示对应限额或限流。用颜色和文字区分正常、留意、紧张与缺数据。该节只展示图与简短图注，原始记录保留在 report_data.json。摘要与其他章节引用第5节。第10节保留新版线程排名，移除旧版“Top运行时间任务”和“Top迁移任务”两张重复小表。第13节指标与事件/术语字典统一放在一个默认收起、支持无JS展开的帮助块。
+第4节用一张离线资源图展示占用、等待压力与可能的性能限制。先筛选会影响当前任务的资源，再用可用快照计算指标。整机展示 CPU 忙碌与等待、内存峰值、磁盘 I/O 和最紧张挂载点；识别到任务资源限额时，再展示对应限额或限流。用颜色和文字区分正常、留意、紧张与缺数据。该节只展示图与简短图注，原始记录保留在 report_data.json。摘要与其他章节引用第4节。
+
+第1节在关键指标下的「核心问题」区域集中展示调度、线程、中断、频率/空闲和亲和性相关的问题。沿用诊断引擎的严重度，从严重、警告到提示排序。同级时首要诊断优先。仅供核查且尚未达到诊断规则的线索标为提示。每项同时标记「已观测到」或「待验证」，写明受影响的对象和关键证据、核查与调整条件、同负载复测方法。关键数据缺口另用一条「数据不足」说明影响和处理路径。完整技术指标、时序、线程排名及采集记录保留在 report_data.json。
+
+- 按实际任务和同核同窗证据合并调度等待、竞争者和已对齐的设备时间窗。CPU 配额限制单列，因为检查和调整对象不同。
+- 中断以热点核的配对占用时间和本核来源解释。核实业务线程同核同期排队后，再考虑分开设备队列和业务线程。
+- 忙核所在组的整窗低频只作为线索。核验业务忙段是否低频，再查上限、温度和功耗。空闲节能只作为判断低频线索的背景。
+- CPU 许可范围、实际运行位置和内存页位置分别判断。安全绑核预检与命令集中在第3节对应主 PID。
+- 回看时段与样本量放到对应问题。设备事件与 Host 等待同期用于定位，业务影响靠同负载对照。按实际丢失、解析或打包记录决定如何补齐缺口。
 
 第二部分必须直接解释CPU平均利用率、单核最高利用率、全机上下文切换率、调度延迟P99、硬中断总占比、软中断总占比，并呈现根因判断/候选证据链，以及 NPU 任务与 NUMA 亲和性。HTML 按 NUMA 分组、每张 NPU 一张任务卡，列出主进程（按显存占用最高推定）、所有占卡宿主机 PID、线程数、NPU 亲和 CPU、当前线程 allowed CPU、ftrace 观测 CPU、PSR 最近运行核、“观测 NUMA → 亲和 NUMA”、CPU 绑定状态。2.3只展示当前亲和摘要，移除“依据、来源、内存与线程证据”展开区和“建议CPU / NUMA”字段；AI对象清单、目标CPU、缺项及执行命令统一放第三部分。根因不再单列尾部章节，具体优化动作统一放在第三部分。
 
@@ -79,8 +87,8 @@ python3 tools/tool_router.py --signals python,gil,irq,numa,device-gap
 - 先保留原始采集包、affinity、IRQ 和 NUMA 快照，再提出优化方案。
 - `host_analyzer` 是可选的独立外部优化工具，不是诊断器。默认不执行系统变更；用户授权 CPU 绑核实验后使用上述 journal 执行器。`migratepages`、IRQ affinity 和 irqbalance 不随 CPU 实验自动执行。
 - 优化必须由用户确认，并以前后相同负载、同一窗口的复采结果验证；无收益或副作用须给出回滚方案。
-- 第三部分先列 NPU 主进程、可验证的父子进程和线程角色。每个已核验的占卡主进程只给一条具体的 `taskset -apc CPU_LIST PID`。该命令作用于指定 PID 的全部现有线程。启动器、未占卡子进程及辅助线程仅作清单展示。
-- 先核对主进程的宿主机身份、NPU 本地 CPU 范围和全线程的有效 cpuset。所有线程须可安全共用同一目标掩码。遇到需要保留的不同窄掩码或不兼容的 cpuset 时，将该 PID 标为待处理。
+- 第三节先展示可复制的绑核命令和脚本，再列出待核验的主 PID 和进程线程清单。每个已核验的占卡主进程给一条具体的 `taskset -apc CPU_LIST PID`。该命令作用于指定 PID 的全部现有线程。启动器、未占卡子进程及辅助线程仅作清单展示。
+- 先核对主进程的宿主机身份、NPU 本地 CPU 范围和全线程的有效 cpuset。从 NPU 本地在线 CPU 与所有线程许可范围的交集选择统一目标。线程许可范围可以不同。公共目标为空或会改变需保留的本地线程掩码时，在命令区标出主 PID 和原因。
 - `bind_cpu.sh` 默认 Bash 预检和预览。`--apply` 委托现场执行器重新发现主进程和线程，先保存原 affinity，再按主 PID 调用 `taskset -apc` 并读回。恢复时按日志逐线程恢复原掩码。完整操作见闭环契约。
 - 离线生成命令无需申请执行权限；实际绑核仍需用户授权。执行器在任何变更前主动保存当前真实 affinity 和稳定身份用于恢复，不能仅依赖较旧采集快照。`taskset` 不迁移既有内存页。
 - 纯拓扑偏离只能是潜在配置风险。提高 NUMA 性能风险需相互关联的跨节点运行迁移、实际内存位置/远端访问、明显等待与性能证据；页分布本身不能证明远端访存流量。不机械建议修改全局调度参数。复采根据 Manifest 的原因和可解决性判断，常规完整入口不再依赖额外开关。
@@ -94,14 +102,14 @@ python3 -m analyzer analyze <采集包或trace> --output-dir <输出目录>
 python3 <Skill路径>/analyzer/analyze_cpu_trace.py <采集包或trace> --output-dir <输出目录>
 ```
 
-查看生成的 `hostbound_report.html`。分析器不应因缺少 GIL、PMU、msprof 而失败；必须在报告的数据覆盖与限制章节明确这些数据是否存在。
+查看生成的 `hostbound_report.html`。分析器不应因缺少 GIL、PMU、msprof 而失败；工具证据覆盖保留在 report_data.json。影响当前问题判断的缺口写入第1节。
 
 
 ## 频率、线程竞争与全核报告（v2）
 
 采集与数据契约需要核对时读取 [v2分析说明](references/analysis_v2.md)。全量显式使用`--full`，默认低开销sysfs轮询1秒，可用`--frequency-interval 2`调整（最小0.2秒）；`--minimal`仅sched_switch，仍保留sysfs频率，不支持完整wakeup延迟。重复采集自动生成独立时间目录，不覆盖旧数据。私有trace instance不受支持时安全停止全局采集，可由客户提供已有trace或已保留的只读快照。
 
-分析后查看`hostbound_report.html`，并保留`report_data.json`（包含`metrics.binding_plan.tasks/actions/commands/script`，schema_version=2，时间秒/延迟ms/频率MHz/比例百分比；新增字段向后兼容）。HTML 每类明细最多展示100条，标明总数；长表默认收缩，搜索/排序作用于展示的前100条。全部指标、进程/线程和证据仍保留在 JSON，不因展示限制截断分析。2.3不展示逐PID全线程原始证据表，只保留判断摘要与来源。第6节全CPU图与收缩表；第9节 Frequency MHz 左轴与 Idle Residency % 右轴共享时间轴，支持 Policy/CPU/NUMA 和系列勾选；第10节优先 AI 任务、真实时间重叠的潜在竞争者、系统任务摘要，无关任务明细置于收缩区域，完整数据仍在 JSON。
+分析后查看`hostbound_report.html`，并保留`report_data.json`（包含`metrics.binding_plan.tasks/actions/commands/script`，schema_version=2，时间秒/延迟ms/频率MHz/比例百分比；新增字段向后兼容）。HTML 每类明细最多展示100条，标明总数；长表默认收缩，搜索/排序作用于展示的前100条。全部指标、进程/线程和证据仍保留在 JSON，不因展示限制截断分析。2.3不展示逐PID全线程原始证据表，只保留判断摘要与来源。第5节展示全 CPU 图和收缩表。频率/空闲时序、线程排名和所有候选竞争重叠窗口见 JSON。
 
 - 缺少cpu_frequency事件时先查看主状态与事件子状态：区分TRACE_AVAILABLE、SYSFS_AVAILABLE、STATIC_ONLY、NO_TRANSITION、UNSUPPORTED、COLLECTION_FAILED，以及NOT_REQUESTED/UNKNOWN。有效sysfs数据不能因为trace没有转换而被否定。NO_TRANSITION不表示降频，缺失不显示0MHz。
 - 频率按related_cpus策略域去重；标准接口kHz显式转MHz；时间加权平均只覆盖已知样本持续区间。低频比例仅使用cpuinfo_max_freq参考；驱动请求频率不是已经验证的实际频率。PMU未获平台语义/权限验证时保持NOT_VALIDATED，不运行或输出估算频率。
@@ -115,4 +123,4 @@ python3 <Skill路径>/analyzer/analyze_cpu_trace.py <采集包或trace> --output
 
 ## 旧包绑核兼容
 
-报告和预览以 metrics.binding_plan 为准。旧包已确认宿主机身份、主进程 starttime、显式 NPU 映射和完整线程掩码时，可生成待现场核验的主进程命令。缺逐线程 cpuset 时，以该线程当前 allowed 与 NPU 本地在线 CPU 的交集为边界。执行前用新 plan.json 核验现场线程，使用 state.json 恢复。身份冲突、未知 NPU 映射、不同安全掩码或同一 PID 使用不同 NPU CPU 池时，在清单标出具体阻碍。
+报告和预览以 metrics.binding_plan 为准。旧包已确认宿主机身份、主进程 starttime、显式 NPU 映射和完整线程掩码时，可生成待现场核验的主进程命令。缺逐线程 cpuset 时，以该线程当前 allowed 与 NPU 本地在线 CPU 的交集为边界。执行前用新 plan.json 核验现场线程，使用 state.json 恢复。身份冲突、未知 NPU 映射、缺少安全公共目标或同一 PID 使用不同 NPU CPU 池时，在命令区标出主 PID 与具体阻碍。

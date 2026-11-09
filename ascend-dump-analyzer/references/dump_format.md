@@ -2,6 +2,16 @@
 
 Complete schema for dump JSON files produced by `msprechecker_dump.py` or `msprechecker dump`.
 
+## Schema 1.2 additions
+
+- `system.os_release`, `system.libc`: OS distribution and collector libc evidence.
+- `ascend.<component>`: attempted paths, selected source/real path, and discovered version candidates. New optional component probes cover runtime/compiler/HCCL/OPP/ops/AI CPU/SiP and custom OPP directories. Candidates describe installation evidence; absence or unknown manifest format means unavailable.
+- `npu.devices[]`: board Software Version maps to `driver_version`; Firmware Version maps to `firmware_version`; Compatibility is separate. The aggregate firmware field is emitted only when all collected device records have the same known firmware. In schema 1.1 and older, check board raw evidence before comparing the firmware label. `npu.inventory` records raw NPU ID, chip mapping, and topology queries with return codes.
+- `runtime.packages.watched_locations`: collector-interpreter distribution versions and install locations. `network.rules4_raw/rules6_raw`: policy routing evidence.
+- `workload`: always present with `scope=explicit_pid` and `targets` keyed by a caller-supplied role. Each target may contain PID/start time, executable/cwd, proc status, resource limits, cgroup membership and resolved v2 limits, filtered exec environment, and mapped shared library paths. `environment.unset` covers exact keys only. Each unavailable subfield records collection status and reason. An empty targets map means no PID was supplied. `/proc/<pid>/environ` is the exec-time view.
+- `rank_table`: when supplied and valid, records source, schema scene/version, declared and parsed counts and normalized per-host device records. vLLM records retain prefill/decode role and the parser's derived rank value. `--no-probes` keeps this section while skipping active connectivity tests.
+- `_meta.schema_version` is `"1.2"`. Existing 1.1 sections remain readable. Compare like views and roles. Orchestrator-side image digests and in-process config overrides require evidence from the orchestrator or application.
+
 ## Top-Level Structure
 
 ```json
@@ -37,7 +47,7 @@ Collection metadata. Exclude the exact `_meta` section from comparison, include 
 
 Version 1.1 adds (existing data section names remain unchanged):
 
-- `schema_version`: `"1.1"`.
+- `schema_version`: `"1.2"` for the current collector. See the additions above.
 - `status`: `success` or `partial`; any failed/partial collector makes the dump partial.
 - `collection`: section name to `{status, errors, command_failures, reason?}`. `success` means the collector completed without a recorded failure, not that every possible field was observed or that the host is healthy. Inspect field evidence before diagnosing.
 - Status `skipped` means an optional input was not supplied; `failed` means a requested operation failed; `partial` means some data remains usable. Errors inside structured sub-results and external command failures are retained.

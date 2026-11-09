@@ -242,6 +242,8 @@ class DumpComparator:
         "ascend": "ascend",
         "npu": "npu",
         "runtime": "runtime",
+        "workload": "runtime",
+        "rank_table": "network",
         "network": "network",
         "env": "env",
         "mies config": "config",

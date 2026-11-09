@@ -65,16 +65,10 @@ def _process_html(row):
 def binding_html(data, integrity=None, plan=None):
     from urllib.parse import quote
     from .report_sections import table
-    plan = plan or data.get('binding_plan', {})
+    if plan is None:
+        plan = data.get('binding_plan', {})
     tasks = plan.get('tasks', [])
-    parts = ['<h3>AI 进程与线程清单</h3>', '<p>%s</p>' % escape(plan.get('note', '根据已采集的NPU、进程和线程关系整理。'))]
-    if tasks:
-        parts.append(table(['NPU','PID/TGID','TID','父PID','Rank / Local Rank（环境标签）','对象','名称','角色','当前CPU','绑定CPU','NUMA','状态 / 原因'], [
-            [row.get('npu_ids'),row['pid'],row['tid'],row.get('ppid'),'%s / %s'%(row.get('rank') or '未知',row.get('local_rank') or '未知'),row['object_type'],row['name'],row['role'],row['current_cpu'],row['target_cpu'] or '无法确定',row['numa'],row['status']+'；'+row['reason']]
-            for row in tasks], True, title='AI 进程与线程清单'))
-    else:
-        parts.append('<p>未识别到可关联的 AI 对象；不能用任意 Python 进程或示例 PID 代替。</p>')
-    parts += ['<h3>具体绑核命令与脚本</h3><p>%s</p>' % escape(_OPERATIONS)]
+    parts = ['<h3>具体绑核命令与脚本</h3><p>%s</p>' % escape(_OPERATIONS)]
     commands = ((plan.get('commands') if plan else data.get('commands')) or '').splitlines()
     if commands:
         parts.append('<div class="code-panel"><button type="button" class="copy-code" onclick="copyBinding(this)">复制绑核命令</button><pre><code>%s</code></pre></div>' % escape('\n'.join(commands[:DISPLAY_LIMIT])))
@@ -84,5 +78,24 @@ def binding_html(data, integrity=None, plan=None):
             parts.append('<p><a download="bind_cpu.sh" href="data:text/x-shellscript;charset=utf-8,%s">下载绑核入口 bind_cpu.sh</a>（默认只预览。--apply 委托 Skill 的 scripts/ascend_bind.py，现场重新核验并生成计划、保存回滚日志、执行与读回；需 Python 3.8+ 及完整 Skill 目录。）</p>' % quote(plan['script'], safe=''))
             parts.append('<p>闭环顺序：本报告诊断 → plan 自动识别实际 NPU / Rank 标签 / 子进程线程 → NUMA 计划 → apply → 同负载复采及业务样本 verify → 无收益或异常 rollback。角色名称不能证明专核需求；Rank 标签不能代替实际设备归属。用 bash bind_cpu.sh --help 查看执行与回滚方式；详细指标格式见 Skill 的 references/binding_workflow.md。</p>')
     else:
-        parts.append('<p>没有通过身份/CPU核验的执行项。逐对象的缺项与原因已在上表列出；缺少原始事实时不生成虚构命令。</p>')
+        parts.append('<p>本次没有通过核验的绑核命令。</p>')
+    blocked = [row for row in tasks if row['object_type'] == 'NPU 主进程' and row['status'] == 'BLOCKED']
+    if blocked:
+        parts.append('<h4>待核验的主进程</h4><ul>')
+        parts.extend('<li>PID %d · %s</li>' % (row['pid'], escape(row['reason']))
+                     for row in blocked[:DISPLAY_LIMIT])
+        parts.append('</ul>')
+        if len(blocked) > DISPLAY_LIMIT:
+            parts.append('<p>显示前 %d / %d 个待核验 PID。完整清单见 report_data.json。</p>'
+                         % (DISPLAY_LIMIT, len(blocked)))
+    elif not commands:
+        parts.append('<p>未确认占卡主 PID。可查看 <a href="#sec-2">NPU 任务与 NUMA 亲和性</a>和'
+                     '<a href="#core-problems">核心问题与数据说明</a>。</p>')
+    parts += ['<h3>AI 进程与线程清单</h3>', '<p>%s</p>' % escape(plan.get('note', '根据已采集的NPU、进程和线程关系整理。'))]
+    if tasks:
+        parts.append(table(['NPU','PID/TGID','TID','父PID','Rank / Local Rank（环境标签）','对象','名称','角色','当前CPU','绑定CPU','NUMA','状态 / 原因'], [
+            [row.get('npu_ids'),row['pid'],row['tid'],row.get('ppid'),'%s / %s'%(row.get('rank') or '未知',row.get('local_rank') or '未知'),row['object_type'],row['name'],row['role'],row['current_cpu'],row['target_cpu'] or '无法确定',row['numa'],row['status']+'；'+row['reason']]
+            for row in tasks], True, title='AI 进程与线程清单'))
+    else:
+        parts.append('<p>未识别到可关联的 AI 对象；不能用任意 Python 进程或示例 PID 代替。</p>')
     return ''.join(parts)

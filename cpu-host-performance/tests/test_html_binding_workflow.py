@@ -32,6 +32,39 @@ def fixture(narrow=False):
 
 
 class HtmlBindingWorkflowTests(unittest.TestCase):
+    def test_different_cpusets_use_the_common_cpu_mask_in_report_and_script(self):
+        from analyzer.binding_plan import build_binding_plan
+        from analyzer.npu_affinity import analyze_npu_affinity
+        from analyzer.npu_report import binding_html
+
+        m = fixture()
+        for phase in ('start', 'end'):
+            key = 'hostbound/process_%s.json' % phase
+            batch = json.loads(m['snapshot'][key])
+            for row in batch['threads']:
+                if row['tid'] == 4001:
+                    row.update(allowed_cpus=[0, 1], cpuset_cpus_effective=[0, 1, 32, 33, 34])
+                if row['tid'] == 4002:
+                    row.update(allowed_cpus=[0, 1], cpuset_cpus_effective=[0, 1, 33, 34, 35],
+                               starttime=None)
+            m['snapshot'][key] = json.dumps(batch)
+        m['npu_affinity'] = analyze_npu_affinity(m)
+        plan = build_binding_plan(m)
+        command = 'taskset -apc 33-34 4001'
+        self.assertEqual(plan['commands'], command)
+        self.assertIn(command, plan['script'])
+        report = binding_html(m['npu_affinity'], plan=plan)
+        self.assertLess(report.index(command), report.index('AI 进程与线程清单'))
+
+    def test_blocked_pid_is_visible_next_to_commands(self):
+        from analyzer.npu_report import binding_html
+        m = fixture(narrow=True)
+        report = binding_html(m['npu_affinity'], plan=m['binding_plan'])
+        summary = report.split('AI 进程与线程清单', 1)[0]
+        self.assertIn('PID 4001', summary)
+        self.assertIn('掩码', summary)
+        self.assertNotIn('复制绑核命令', report)
+
     def test_unrelated_thread_without_tgid_is_not_a_report_error(self):
         from analyzer.parser import TraceData,Event
         from analyzer.metrics import compute_metrics

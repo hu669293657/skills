@@ -44,7 +44,7 @@ def frequency_section(m,html=False):
     idle=m.get('idle',{})
     out.append(heading('CPU Idle Residency',html))
     out.append(paragraph('Idle状态：%s；来源：%s；可靠性：%s。%s'%(idle.get('status','NO_EVENTS'),idle.get('source','ftrace:power/cpu_idle'),idle.get('reliability','UNKNOWN'),'；'.join(idle.get('reasons',[]))),html))
-    out.append(paragraph(idle.get('note','没有可用cpu_idle事件；缺失值为N/A。swapper近似空闲率另见第6节。'),html))
+    out.append(paragraph(idle.get('note','没有可用cpu_idle事件；缺失值为N/A。swapper近似空闲率另见第5节。'),html))
     if html: out.append(render_frequency_idle(m))
     out.append(table(['CPU','整窗Idle Residency','已知Idle秒','有效覆盖','整窗Idle下界','各C-state持续秒'],[
         [p['cpu'],fmt(p.get('residency_percent'),'%'),fmt(p.get('idle_sec'),' s'),fmt(p.get('coverage_percent'),'%'),fmt(p.get('idle_lower_bound_percent'),'%'),'; '.join('state%s: %.6f s'%(x['state'],x['residency_sec']) for x in p.get('states',[])) or 'N/A'] for p in idle.get('cpus',[])],html,title='全部CPU Idle Residency',force=html))

@@ -61,12 +61,26 @@ def pools_for(topology, allocation):
     return pools
 
 
-def thread_target(allowed, ceiling, pool):
-    """Keep an existing local mask or constrain it to the allowed NPU pool."""
-    permitted = set(ceiling) if ceiling is not None else allowed
-    if allowed and allowed <= pool and allowed <= permitted:
-        return allowed
-    return pool & permitted
+def process_target(affinities, pool):
+    """Intersect thread CPU ceilings and preserve existing local masks."""
+    common = set(pool)
+    local_masks = set()
+    for allowed, ceiling in affinities:
+        if not allowed:
+            return set()
+        permitted = set(ceiling) if ceiling is not None else allowed
+        common &= permitted
+        if allowed <= pool and allowed <= permitted:
+            local_masks.add(frozenset(allowed))
+    if not common or len(local_masks) > 1:
+        return set()
+    if not local_masks:
+        return common
+    existing = set(next(iter(local_masks)))
+    # Keep an existing mask without shrinking other threads just to match it.
+    if existing == common or (existing <= common and all(mask == existing for mask, _ in affinities)):
+        return existing
+    return set()
 
 
 def make_plan(snapshot, report, allocation='locality'):
@@ -113,22 +127,20 @@ def make_plan(snapshot, report, allocation='locality'):
         threads = sorted(p['threads'], key=lambda t: t['tid'])
         if not threads or pid not in {t['tid'] for t in threads}:
             raise BindError('Main PID %s has an incomplete thread list' % pid)
-        targets = []
+        affinities = []
         for t in threads:
             allowed = set(t['affinity'])
             if not allowed or not str(t['starttime']).isdigit():
                 raise BindError('Invalid thread identity/affinity')
-            target = thread_target(allowed, t.get('ceiling'), pool)
-            if not target:
-                raise BindError('Empty local cpuset intersection for TID %s' % t['tid'])
-            targets.append(target)
-        if any(target != targets[0] for target in targets):
-            raise BindError('PID %s has different safe thread masks; a single taskset -apc would override an existing policy' % pid)
+            affinities.append((allowed, t.get('ceiling')))
+        target = process_target(affinities, pool)
+        if not target:
+            raise BindError('PID %s has no common safe mask that preserves existing local affinity' % pid)
         for t in threads:
             actions.append(dict(pid=pid, tid=t['tid'], process_starttime=str(p['starttime']),
                 thread_starttime=str(t['starttime']), ppid=p['ppid'], root_pid=pid,
                 role=role(t['name'],t['tid'],pid), name=t['name'],
-                original=sorted(t['affinity']), target=sorted(targets[0]), ceiling=t.get('ceiling')))
+                original=sorted(t['affinity']), target=sorted(target), ceiling=t.get('ceiling')))
     if not actions:raise BindError('No live threads')
     plan=dict(schema_version=1,binding_scope='main_process',context=copy.deepcopy(context),topology=copy.deepcopy(snapshot['topology']),
               selection=copy.deepcopy(snapshot['selection']),allocation=allocation,pools=pools,

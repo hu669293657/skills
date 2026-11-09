@@ -11,6 +11,8 @@ import re
 
 from .metrics import METRIC_EXPLANATIONS, freq_to_mhz
 
+SEVERITY_RANK = {"CRITICAL": 3, "WARNING": 2, "INFO": 1, "OK": 0}
+
 # 经验阈值 (报告中展示, 单位见说明)
 THRESHOLDS = {
     "util_critical": 90.0,      # 单核利用率 % 超过则视为饱和
@@ -179,7 +181,8 @@ def diagnose(m):
         top_irq_c = max(irq_cpus, key=lambda c: per_cpu[c]["irq_ratio"])
         v = per_cpu[top_irq_c]["irq_ratio"]
         if v >= T["irq_ratio_warn"] and v >= med_irq * T["hotspot_mult"]:
-            top_names = ", ".join("%s(%d 次)" % (n, cnt) for n, cnt, _t in m["irq"]["top_names"][:3]) or "见下表"
+            top_names = ", ".join("%s(%.0f ms)" % (row['name'], row['seconds'] * 1000)
+                                  for row in m["irq"].get("peak_sources", [])) or "该核来源未知"
             add("IRQ_HOTSPOT", "WARNING" if v < 30 else "CRITICAL",
                 "HIGH" if m["irq"]["total_count"] > 100 else "MEDIUM",
                 "硬中断集中于 %s" % cpu_label(top_irq_c),
@@ -187,7 +190,7 @@ def diagnose(m):
                   "threshold": "≥%.0f%% 且≥中位数 %.1f 倍" % (T["irq_ratio_warn"], T["hotspot_mult"])},
                  {"metric": "Top 中断源", "value": top_names, "threshold": "-"}],
                 "中断处理与计算线程争抢 CPU，增加调度延迟，可能造成 NPU 供数不稳",
-                "该核承载了大量设备中断 (存储/网络/IPI)，未做中断亲和性分散",
+                "该核的设备中断处理时间偏高，需核验设备队列与 IRQ 亲和性",
                 ["cat /proc/interrupts 定位中断源设备",
                  "用 irqbalance 或手工修改 /proc/irq/*/smp_affinity 分散中断",
                  "避免将业务关键线程绑定到中断密集核"])
@@ -198,9 +201,10 @@ def diagnose(m):
         top_soft_c = max(soft_cpus, key=lambda c: per_cpu[c]["softirq_ratio"])
         v = per_cpu[top_soft_c]["softirq_ratio"]
         if v >= T["softirq_ratio_warn"] and v >= med_soft * T["hotspot_mult"]:
-            top_act = ", ".join("%s(%.0fms)" % (n, t * 1000) for n, cnt, t in m["softirq"]["top_actions"][:3]) or "见下表"
-            is_net = bool(m["softirq"]["top_actions"] and m["softirq"]["top_actions"][0][0] in ("NET_RX","NET_TX"))
-            root = "该核集中处理了软中断" + ("，且以网络收包 (NET_RX) 为主：网卡队列中断亲和性固定于单核，通信/收包量大时极易打满" if is_net else "")
+            sources = m["softirq"].get("peak_sources", [])
+            top_act = ", ".join("%s(%.0fms)" % (row["name"], row["seconds"] * 1000) for row in sources) or "该核来源未知"
+            is_net = bool(sources and sources[0]["name"] in ("NET_RX","NET_TX"))
+            root = "该核集中处理了软中断" + ("，网络软中断耗时居前，需核验流量与队列分布" if is_net else "")
             rec = ["检查 /proc/softirqs 与 /proc/interrupts 中网络中断分布",
                    "开启/调大网卡多队列 (RSS) 并用 ethtool -X 均衡队列",
                    "用 irqbalance 或 smp_affinity 将 NET_RX 分散到多核",
@@ -410,7 +414,7 @@ def diagnose(m):
             'NPU Worker TID%d 存在同核竞争候选 TID%d' % (candidate['target_tid'],candidate['contender_tid']),
             [{'metric':'等待窗口内同核运行重叠','value':'%.3f ms；CPU %s；NPU %s' % (candidate['overlap_sec']*1000,candidate['cpus'],candidate['npu_ids']),
               'threshold':'仅作候选；重叠>=5ms为经验筛选','source':'sched_wakeup/sched_switch/迁移 + proc TID/TGID + npu-smi',
-              'time_window':str(candidate['windows'][:3])+"（完整已观测窗口见第10节/JSON）"}],
+              'time_window':str(candidate['windows'][:3])+"（完整已观测窗口见 report_data.json）"}],
             'Worker 获得CPU可能延迟；是否拖慢NPU需Device同域时间线与复测',
             '可运行等待与其他任务执行相关，因果关系尚未证实',
             ['核验候选线程职责、优先级与有效Affinity/cpuset，比较相同负载下的等待分位数与吞吐',
@@ -432,9 +436,8 @@ def diagnose(m):
             ['结合相同业务窗口的吞吐/时延与 Device 时间线核验；资源压力本身不等于已确认的 HostBound 根因'])
         findings[-1]['evidence_state'] = candidate['evidence_state']
     # ============ 汇总 ============
-    sev_rank = {"CRITICAL": 3, "WARNING": 2, "INFO": 1, "OK": 0}
     conf_rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
-    findings.sort(key=lambda f: (-sev_rank.get(f["severity"], 0), -conf_rank.get(f["confidence"], 0)))
+    findings.sort(key=lambda f: (-SEVERITY_RANK.get(f["severity"], 0), -conf_rank.get(f["confidence"], 0)))
     # 未知事件提示
     unknown = sorted(av - set(_KNOWN_EVENTS))
     if unknown:

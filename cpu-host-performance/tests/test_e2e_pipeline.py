@@ -21,7 +21,7 @@ class PipelineTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temp.cleanup()
 
-    def test_raw_archive_to_manifest_to_json_and_13_section_html(self):
+    def test_raw_archive_to_manifest_to_json_and_merged_diagnosis_html(self):
         m = self.data['metrics']
         self.assertEqual(m['metadata']['data_origin'], 'SYNTHETIC_TEST_DATA')
         self.assertEqual(m['collection_integrity']['manifest_status'], 'COLLECTED')
@@ -37,10 +37,20 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn('<script src=', html)
         self.assertNotIn('最小补采集', html)
         self.assertIn('NUMA', html)
-        self.assertIn('Idle Residency', html)
+        self.assertNotIn('Idle Residency', html)
         self.assertEqual(len(m['per_cpu']), 256)
-        for n in range(1, 14):
-            self.assertIn("id='sec-%d'" % n, html)
+        self.assertNotIn("id='sec-13'", html)
+        for n in range(1, 6):
+            self.assertIn("<h2 id='sec-%d'>" % n, html)
+        self.assertNotIn("id='sec-6'", html)
+        visible = html.split("<h2 id='sec-2'>", 1)[0]
+        self.assertIn('核心问题：调度延迟严重', visible)
+        self.assertIn('同一个 CPU 核', visible)
+        self.assertIn('限流', visible)
+        self.assertIn('0.021–0.060', visible)
+        self.assertNotIn('Top CPU Runtime', html)
+        self.assertIn('忙核所在的 CPU 组报告过低频', visible)
+        self.assertIn('业务任务的 CPU 运行范围需要核对', visible)
 
     def test_real_evidence_binding_targets_stay_disjoint_in_cpuset(self):
         rows = self.data['metrics']['npu_affinity']['rows']

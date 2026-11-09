@@ -165,19 +165,32 @@ def render_markdown(source):
     return '\n'.join(output)
 
 
-def document(source, filename):
+def document(source, filename, template=None):
     title = next((m[2] for line in source.splitlines() if (m := HEADING.match(line)) and len(m[1]) == 1), Path(filename).stem)
+    body = render_markdown(source)
+    if template:
+        template_path = Path(__file__).with_name(
+            {'single': 'template_single_dump.md', 'comparison': 'template_comparison.md'}[template])
+        required = re.findall(r'^## (.+)$', template_path.read_text(encoding='utf-8'), re.MULTILINE)
+        actual = re.findall(r'<h2>(.*?)</h2>', body)
+        expected_headings = [inline(heading) for heading in required]
+        missing = [heading for heading in expected_headings if heading not in actual]
+        if missing:
+            raise ValueError('缺少模板章节：' + '、'.join(missing))
+        if [heading for heading in actual if heading in expected_headings] != expected_headings:
+            raise ValueError('模板章节必须按模板顺序出现且不得重复')
     return ('<!DOCTYPE html>\n<html lang="zh-CN">\n<head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             '<title>' + escape(title, quote=True) + '</title><style>' + CSS + '</style></head>\n'
             '<body><main><p class="source">Markdown 源文件：' + escape(filename, quote=True) + '</p>\n'
-            + render_markdown(source) + '\n</main></body></html>\n')
+            + body + '\n</main></body></html>\n')
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='从已完成的 Markdown 报告生成同名离线 HTML；不执行诊断或脱敏。')
     parser.add_argument('markdown', type=Path, help='已写入的 UTF-8 .md / .markdown 报告')
     parser.add_argument('--check', action='store_true', help='只读检查两个文件存在、非空且内容同步；失败返回非零')
+    parser.add_argument('--template', choices=('single', 'comparison'), help='校验指定分析模板的必需章节')
     args = parser.parse_args(argv)
     md = args.markdown.resolve()
     html = md.with_suffix('.html')
@@ -187,7 +200,7 @@ def main(argv=None):
         source = md.read_text(encoding='utf-8-sig')
         if not source.strip():
             raise ValueError('Markdown report is empty')
-        expected = document(source, md.name)
+        expected = document(source, md.name, args.template)
         if args.check:
             if html.read_text(encoding='utf-8') != expected:
                 raise ValueError('HTML is stale or modified; regenerate it from the current Markdown report')

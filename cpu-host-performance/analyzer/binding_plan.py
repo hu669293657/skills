@@ -3,7 +3,7 @@ import re
 from collections import defaultdict
 from .npu_affinity import _pid_evidence, cpus, cpu_list, _get, _topology
 from .process_evidence import process_batch
-from hostbind.planner import thread_target
+from hostbind.planner import process_target
 
 
 def _role(name, process, tid, pid, direct):
@@ -158,18 +158,20 @@ def build_binding_plan(m):
         if not tids:
             tids = [dict(tid=pid, tgid=pid, name=p.get('name'), allowed_cpus=[], starttime=None)]
         masks = [set(t.get('allowed_cpus') or ev['allowed'].get(t['tid'], set())) for t in tids]
-        targets = [thread_target(mask, t['cpuset_cpus_effective'] if t.get('cpuset_cpus_effective') is not None
-                                 else ev['thread_cpuset'].get(t['tid']) or None, desired)
-                   for t, mask in zip(tids, masks)]
         if not problem and pid not in roots:
             problem = '关联进程或辅助任务，仅展示'
         if not problem and (not ev['complete'] or {t['tid'] for t in tids} != set(ev['tids'])):
             problem = '主进程线程清单不完整'
-        if not problem and (not targets[0] or not all(targets)):
-            problem = '部分线程没有可用的本地 CPU'
-        if not problem and any(target != targets[0] for target in targets):
-            problem = '各线程的安全目标掩码不同，无法用同一主进程掩码保留已有亲和策略'
-        target = targets[0] if not problem else set()
+        target = set()
+        if not problem:
+            affinities = [
+                (mask, t['cpuset_cpus_effective'] if t.get('cpuset_cpus_effective') is not None
+                 else ev['thread_cpuset'].get(t['tid']) or None)
+                for t, mask in zip(tids, masks)
+            ]
+            target = process_target(affinities, desired)
+            if not target:
+                problem = '没有可统一使用的本地 CPU 掩码，或现有本地线程掩码不同、需保留'
         command = ''
         if target:
             command = 'taskset -apc %s %d' % (cpu_list(target), pid)

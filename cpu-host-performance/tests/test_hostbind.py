@@ -92,13 +92,22 @@ class HostbindTests(unittest.TestCase):
         s=snapshot();s['topology']['npu_cpus']['1']=[4,5,6,7,12,13,14,15]
         with self.assertRaises(BindError): make_plan(s, report(), allocation='partition')
 
-    def test_cpuset_is_per_thread(self):
-        s=snapshot();s['processes'][0]['threads'][0]['ceiling']=[2,3]
-        with self.assertRaisesRegex(BindError, 'different safe thread masks'):
+    def test_process_target_intersects_thread_cpusets(self):
+        s = snapshot()
+        threads = s['processes'][0]['threads']
+        threads[0].update(affinity=[2, 4], ceiling=[2, 3, 4])
+        threads[1].update(affinity=[3, 5], ceiling=[2, 3, 5])
+        plan = make_plan(s, report(), allocation='partition')
+        self.assertEqual([a['target'] for a in plan['actions']], [[2, 3], [2, 3]])
+        threads[1].update(affinity=[5], ceiling=[5, 8])
+        with self.assertRaisesRegex(BindError, 'no common safe mask'):
             make_plan(s, report(), allocation='partition')
-        s['processes'][0]['threads'][1]['ceiling']=[2,3]
-        p=make_plan(s, report(), allocation='partition')
-        self.assertEqual(p['actions'][0]['target'], [2,3])
+
+    def test_process_target_preserves_existing_local_thread_policy(self):
+        s = snapshot()
+        s['processes'][0]['threads'][1]['affinity'] = [2]
+        with self.assertRaisesRegex(BindError, 'no common safe mask'):
+            make_plan(s, report(), allocation='partition')
 
     def test_missing_cpuset_uses_current_affinity(self):
         s=snapshot()

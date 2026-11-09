@@ -315,6 +315,18 @@ details > .details-body { padding: 0.5rem 0; }
 <!-- ===== ASSESSMENT BANNER ===== -->
 {{ASSESSMENT_BANNER}}
 
+<section class="section" id="scope-comparison">
+  <div class="section-head">
+    <div class="sh-title">输入与比对覆盖</div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>输入</th><th>采集视图 / 角色</th><th>Schema</th><th>可比范围和限制</th></tr></thead>
+      <tbody>{{SCOPE_COMPARISON_ROWS}}</tbody>
+    </table>
+  </div>
+</section>
+
 <!-- ===== SECTION STATISTICS ===== -->
 <section class="section" id="section-stats">
   <div class="section-head">
@@ -324,7 +336,7 @@ details > .details-body { padding: 0.5rem 0; }
     <table>
       <thead><tr><th>Section</th><th>总路径数</th><th>一致</th><th>差异</th><th>存在性</th></tr></thead>
       <tbody>
-        <!-- Repeat for each section: hardware, system, npu, ascend, runtime, env, config, network, weight, other -->
+        <!-- Include workload and rank_table when present; classify under runtime and network. -->
         {{SECTION_STAT_ROWS}}
       </tbody>
     </table>

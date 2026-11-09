@@ -194,15 +194,15 @@ class NpuAffinityTests(unittest.TestCase):
         self.assertEqual([(r['pid'], r['memory']) for r in rows if r['npu'] == 0], [(4115, 101), (4117, 20)])
         self.assertEqual(rows[0].get('chips'), [0, 1])
 
-    def test_report_merges_cause_and_moves_advice_before_details(self):
+    def test_report_merges_cause_and_puts_resources_after_advice(self):
         m = metrics(snapshots(), measured=True)
         diag = diagnose(m)
         html = render_html(m, diag, svg_bar_chart, svg_line_chart, _esc, SEV_COLOR, SEV_CN, STATUS_CN)
         sections = re.findall(r"<h2 id='sec-(\d+)'>([^<]+)",html)
-        self.assertEqual([int(n) for n,_ in sections],list(range(1,14)))
+        self.assertEqual([int(n) for n,_ in sections],list(range(1,6)))
         self.assertIn('根因',sections[1][1])
         self.assertIn('优化建议',sections[2][1])
-        self.assertIn('问题详情',sections[3][1])
+        self.assertIn('机器资源',sections[3][1])
         self.assertIn('4115',html)
         self.assertIn('144-155',html)
         self.assertIn('taskset -apc 144-155 4115',html)
