@@ -240,7 +240,7 @@ details > .details-body { padding: 0.5rem 0; }
 </head>
 <body>
 
-<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle navigation">&#9776;</button>
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="切换导航">&#9776;</button>
 
 <!-- ===== SIDEBAR ===== -->
 
@@ -250,7 +250,7 @@ details > .details-body { padding: 0.5rem 0; }
       <span class="dot"></span>
       <div>
         Ascend 对比报告
-        <div class="sub">Environment Diff Analyzer</div>
+        <div class="sub">多份比对</div>
       </div>
     </div>
   </div>
@@ -258,7 +258,7 @@ details > .details-body { padding: 0.5rem 0; }
     {{{NAV_ITEMS}}}
   </div>
   <div class="sidebar-footer">
-    {{TOOL_NAME}} v{{TOOL_VERSION}}<br>{{REPORT_DATE}}
+    报告日期 · {{REPORT_DATE}}
   </div>
 </nav>
 
@@ -299,10 +299,13 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 </section>
 
-<!-- ===== STATS ===== -->
-<section class="stat-strip" id="stats">
-  <!-- Repeat for each category: version/env/system/config/network/weight/other + identical -->
-  {{{STAT_TILES}}}
+<section class="section" id="overview">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🔎</span> 状态总览</div>
+  </div>
+  <div class="stat-strip">{{{STAT_TILES}}}</div>
+  {{{ASSESSMENT_BANNER}}}
+  {{{FINDING_BANNERS}}}
 </section>
 
 <!-- ===== LEGEND ===== -->
@@ -312,17 +315,26 @@ details > .details-body { padding: 0.5rem 0; }
   <div class="legend-item"><div class="legend-dot mod"></div> 修改</div>
 </div>
 
-<!-- ===== ASSESSMENT BANNER ===== -->
-{{{ASSESSMENT_BANNER}}}
-
 <section class="section" id="scope-comparison">
   <div class="section-head">
     <div class="sh-title">输入与比对覆盖</div>
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>输入</th><th>采集视图 / 角色</th><th>Schema</th><th>可比范围和限制</th></tr></thead>
+      <thead><tr><th>输入</th><th>采集视图 / 角色</th><th>数据格式</th><th>可比范围</th></tr></thead>
       <tbody>{{{SCOPE_COMPARISON_ROWS}}}</tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section" id="compatibility">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">⚡</span> 版本配套检查</div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>环境</th><th>检查项</th><th>实测</th><th>配套要求</th><th>结论</th><th>依据</th></tr></thead>
+      <tbody>{{{COMPATIBILITY_ROWS}}}</tbody>
     </table>
   </div>
 </section>
@@ -330,11 +342,11 @@ details > .details-body { padding: 0.5rem 0; }
 <!-- ===== SECTION STATISTICS ===== -->
 <section class="section" id="section-stats">
   <div class="section-head">
-    <div class="sh-title"><span class="sh-icon">📊</span> Section 统计</div>
+    <div class="sh-title"><span class="sh-icon">📊</span> 分类统计</div>
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Section</th><th>总路径数</th><th>一致</th><th>差异</th><th>存在性</th></tr></thead>
+      <thead><tr><th>分类</th><th>字段数</th><th>一致</th><th>差异</th><th>覆盖</th></tr></thead>
       <tbody>
         <!-- Include workload and rank_table when present; classify under runtime and network. -->
         {{{SECTION_STAT_ROWS}}}
@@ -371,15 +383,6 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 </section>
 
-<!-- ===== KEY FINDINGS ===== -->
-<section class="section" id="findings">
-  <div class="section-head">
-    <div class="sh-title"><span class="sh-icon">🔍</span> 关键发现与建议</div>
-  </div>
-  <!-- Repeat for each finding. Each finding is a banner (ok/warn/fail/info). -->
-  {{{FINDING_BANNERS}}}
-</section>
-
 <!-- ===== RAW DATA COMPARISON ===== -->
 <section class="section" id="raw-data">
   <div class="section-head">
@@ -406,7 +409,7 @@ details > .details-body { padding: 0.5rem 0; }
 </section>
 
 <div class="footer">
-  {{TOOL_NAME}} · {{TOOL_VERSION}} · {{REPORT_TIMESTAMP}}
+  昇腾环境比对 · {{REPORT_TIMESTAMP}}
 </div>
 
 </div><!-- /main -->

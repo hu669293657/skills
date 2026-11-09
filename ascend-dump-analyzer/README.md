@@ -16,5 +16,6 @@ python3 msprechecker_dump.py --filter --no-probes \
 ## 输出
 
 - **完整 HTML 报告**直接使用 [单份模板](references/template_single_dump.html) 或 [比对模板](references/template_comparison.html)，包含证据、发现和覆盖限制。
+- **版本配套**对每份快照运行离线核验，状态总览汇报关键偏差，配套表列实测版本和依据。[查看规则](references/version_compatibility.md)
 - **Markdown 摘要**保留总体结论、最重要的发现和下一步。
 - 将现有 dump 或目录交给 skill，说明分析一份还是比对多份即可。历史 dump 可直接使用。

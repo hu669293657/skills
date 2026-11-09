@@ -26,7 +26,8 @@ class ReportExportTests(unittest.TestCase):
         for derived in ('SCORE_OFFSET', 'SIMILARITY_WIDTH'):
             fields.pop(derived, None)
         fields.update(SCORE_COLOR='var(--ink-muted)', NAV_ITEMS='<a class="nav-item" href="#hero">概览</a>',
-                      ASSESSMENT_BANNER='<div class="banner info">证据不足</div>')
+                      ASSESSMENT_BANNER='<div class="banner info">证据不足</div>',
+                      COMPATIBILITY_ROWS='<tr><td colspan="5">待核验</td></tr>')
         if mode == 'single':
             fields.update(HOSTNAME='<img src=x onerror=alert(1)>', HEALTH_SCORE=None,
                           META_DATA_ROWS='<tr><td>输入</td><td>snapshot.json</td><td>UNKNOWN</td></tr>',
@@ -34,6 +35,7 @@ class ReportExportTests(unittest.TestCase):
         else:
             fields.update(SIMILARITY=None, FILE_COUNT=0, DIFF_COUNT=None, IDENTICAL_COUNT=None,
                           SCOPE_COMPARISON_ROWS='<tr><td>请求输入</td><td>未知</td><td>未知</td><td>读取失败</td></tr>',
+                          COMPATIBILITY_ROWS='<tr><td colspan="6">待核验</td></tr>',
                           FINDING_BANNERS='<div class="banner info">证据不足</div>')
         return fields
 
@@ -50,7 +52,12 @@ class ReportExportTests(unittest.TestCase):
         result = self.run_cli('single', slots)
         self.assertEqual(result.returncode, 0, result.stderr)
         html = self.report.read_text(encoding='utf-8')
-        self.assertIn('Single Dump Analyzer', html)
+        self.assertIn('单份分析', html)
+        self.assertIn('状态总览', html)
+        self.assertIn('版本配套检查', html)
+        self.assertIn('待核验', html)
+        self.assertLess(html.index('需要补采'), html.index('id="system"'))
+        self.assertNotIn('id="diagnosis"', html)
         self.assertIn('<nav class="sidebar"', html)
         self.assertIn('<td>snapshot.json</td>', html)
         self.assertIn('&lt;img', html)
@@ -64,7 +71,8 @@ class ReportExportTests(unittest.TestCase):
         result = self.run_cli('comparison', slots)
         self.assertEqual(result.returncode, 0, result.stderr)
         html = self.report.read_text(encoding='utf-8')
-        self.assertIn('Environment Diff Analyzer', html)
+        self.assertIn('多份比对', html)
+        self.assertIn('状态总览', html)
         self.assertIn('id="scope-comparison"', html)
         self.assertIn('读取失败', html)
         self.assertIn('相似度 —', html)

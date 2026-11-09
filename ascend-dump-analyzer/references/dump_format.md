@@ -68,7 +68,7 @@ Compatibility and report rules:
 | Field | Type | Description |
 |-------|------|-------------|
 | `tool` | string | Tool name (`msprechecker_dump.py` or `msprechecker`) |
-| `version` | string | Tool version |
+| `version` | string | Historical collector self-version; new dumps omit it. Use `schema_version` for format detection. |
 | `timestamp` | string | Collection time `YYYY-MM-DD HH:MM:SS` |
 | `hostname` | string | Server hostname |
 | `python_version` | string | Python version |

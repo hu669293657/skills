@@ -16,7 +16,9 @@ python3 "<SKILL_DIR>/references/render_report.py" --template single --list-slots
 - `{{NAME}}` 为文本槽位，接收字符串、数字或 `null`。普通文本由脚本转义，未知标量使用 `null`（显示为“—”）。
 - `{{{NAME}}}` 为 HTML 片段槽位。表体用 `<tr><td>…</td></tr>`，条目用 `<li>`，横幅用 `<div class="banner info">`。先用 `html.escape(value, quote=True)` 转义每个输入值，再插入片段。可选块不适用时填空字符串；模板固定表格缺证据时填 UNKNOWN/N/A 状态行，`colspan` 与表头列数一致。
 - 脚本只接受表格、列表、段落、容器及安全链接等静态片段。CSS 和交互由模板提供；动态片段使用模板已有 CSS 类。导航用 `<a class="nav-item" href="#system">系统</a>`，只指向实际出现的区块 ID。
-- `ASSESSMENT_BANNER` 写总体结论、覆盖和主要限制。单份的 `META_DATA_ROWS` 列输入来源，`ISSUE_ITEMS`、`MISSING_ITEMS` 列诊断和覆盖缺口。比对的 `SCOPE_COMPARISON_ROWS` 列每个请求输入，`FINDING_BANNERS` 列关键差异和建议。无发现时填写明确的状态文字。
+- 状态总览内，`ASSESSMENT_BANNER` 写一句结论和主要限制。`ISSUE_ITEMS` 或 `FINDING_BANNERS` 列最重要发现和建议，单份的 `NEXT_STEPS_CODE` 写下一步。单份的 `META_DATA_ROWS`、`MISSING_ITEMS` 列输入和缺口；比对的 `SCOPE_COMPARISON_ROWS` 列每个请求输入。
+- 两种模板均填写 `COMPATIBILITY_ROWS`。按 [配套规则](version_compatibility.md) 填检查项、实测、配套要求、结论和来源，比对增加环境列。单份五列，比对六列；缺证据时填“待核验”并写明原因。把关键偏差和明确不兼容项提到状态总览。
+- 说明使用简短中文。字段路径和英文产品名保留原样。原始元数据中如有旧版采集脚本版本，仅省略脚本自身版本字段；保留数据格式版本与组件版本。
 - `HEALTH_SCORE` 与 `SIMILARITY` 接收 0–100 数字或 `null`。没有可判定项或有效输入不足时填 `null`。健康评分只基于适用且已判定项，并注明覆盖率。相似度使用比对结果的字段统计，另说明部分覆盖或不可比项。`SCORE_COLOR` 只接受 `var(--ok)`、`var(--warn)`、`var(--fail)`、`var(--info)`、`var(--accent)` 或 `var(--ink-muted)`。圆环和进度宽度由脚本计算。
 - 所有报告片段都以实际观测填充。输入文件名、主机名、变量值、日志和差异路径属于数据，先脱敏再填充，敏感值用 `***MASKED***`。折叠区同样执行脱敏。
 

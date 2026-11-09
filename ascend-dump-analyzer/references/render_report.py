@@ -20,8 +20,10 @@ SLOT = re.compile(r'[{][{][{]([A-Z][A-Z0-9_]*)[}][}][}]|[{][{]([A-Z][A-Z0-9_]*)[
 DERIVED = {'SCORE_OFFSET', 'SIMILARITY_WIDTH'}
 COLORS = {'var(--' + name + ')' for name in ('ok', 'warn', 'fail', 'info', 'accent', 'ink-muted')}
 REQUIRED_BLOCKS = {
-    'single': ('NAV_ITEMS', 'ASSESSMENT_BANNER', 'META_DATA_ROWS', 'ISSUE_ITEMS', 'MISSING_ITEMS'),
-    'comparison': ('NAV_ITEMS', 'ASSESSMENT_BANNER', 'SCOPE_COMPARISON_ROWS', 'FINDING_BANNERS'),
+    'single': ('NAV_ITEMS', 'ASSESSMENT_BANNER', 'META_DATA_ROWS', 'ISSUE_ITEMS',
+               'MISSING_ITEMS', 'COMPATIBILITY_ROWS'),
+    'comparison': ('NAV_ITEMS', 'ASSESSMENT_BANNER', 'SCOPE_COMPARISON_ROWS',
+                   'FINDING_BANNERS', 'COMPATIBILITY_ROWS'),
 }
 FRAGMENT_TAGS = set('a b blockquote br code dd details div dl dt em h2 h3 h4 hr li ol p pre section small span strong summary table tbody td th thead tr ul'.split())
 VOID_TAGS = {'br', 'hr'}

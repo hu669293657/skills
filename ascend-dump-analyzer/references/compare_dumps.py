@@ -29,7 +29,6 @@ from html import escape
 from collections import defaultdict, OrderedDict
 from datetime import datetime
 
-__version__ = "1.1.0"
 
 # Keep this helper identical in both standalone scripts; no deployment dependency.
 SENSITIVE_KEY = re.compile(
@@ -811,7 +810,7 @@ tr.diff-only td:first-child {{ border-left: 3px solid var(--info); }}
 
 {cat_sections}
 
-<div class="footer">本报告由 compare_dumps.py {__version__} 生成 · {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
+<div class="footer">环境比对 · {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
 
 </div>
 </body>
@@ -856,7 +855,6 @@ def main():
         "--text", action="store_true",
         help="输出终端文本格式（默认）"
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
 

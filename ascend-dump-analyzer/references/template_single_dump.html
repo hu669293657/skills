@@ -232,7 +232,7 @@ details > .details-body { padding: 0.5rem 0; }
 </head>
 <body>
 
-<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle navigation">&#9776;</button>
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="切换导航">&#9776;</button>
 
 <!-- ===== SIDEBAR ===== -->
 <nav class="sidebar" id="sidebar">
@@ -241,7 +241,7 @@ details > .details-body { padding: 0.5rem 0; }
       <span class="dot"></span>
       <div>
         Ascend 环境报告
-        <div class="sub">Single Dump Analyzer</div>
+        <div class="sub">单份分析</div>
       </div>
     </div>
   </div>
@@ -249,7 +249,7 @@ details > .details-body { padding: 0.5rem 0; }
     {{{NAV_ITEMS}}}
   </div>
   <div class="sidebar-footer">
-    {{TOOL_NAME}} v{{TOOL_VERSION}}<br>{{REPORT_DATE}}
+    报告日期 · {{REPORT_DATE}}
   </div>
 </nav>
 
@@ -283,19 +283,22 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 </section>
 
-<!-- ===== HEALTH STAT TILES ===== -->
-<section class="stat-strip" id="stats">
-  {{{STAT_TILES}}}
+<section class="section" id="overview">
+  <div class="section-head">
+    <div class="sh-title"><span class="sh-icon">🔎</span> 状态总览</div>
+  </div>
+  <div class="stat-strip">{{{STAT_TILES}}}</div>
+  {{{ASSESSMENT_BANNER}}}
+  <ul class="issue-list">{{{ISSUE_ITEMS}}}</ul>
+  <div class="sub-head">下一步</div>
+  {{{NEXT_STEPS_CODE}}}
 </section>
-
-<!-- ===== ASSESSMENT BANNER ===== -->
-{{{ASSESSMENT_BANNER}}}
 
 <!-- ===== SYSTEM HEALTH ===== -->
 <section class="section" id="system">
   <div class="section-head">
     <div class="sh-title"><span class="sh-icon">🖥</span> 系统健康检查</div>
-    <span class="sh-count">{{SYSTEM_OK_COUNT}}/{{SYSTEM_TOTAL_COUNT}} OK</span>
+    <span class="sh-count">{{SYSTEM_OK_COUNT}}/{{SYSTEM_TOTAL_COUNT}} 项正常</span>
   </div>
   <div class="table-wrap">
     <table>
@@ -362,12 +365,12 @@ details > .details-body { padding: 0.5rem 0; }
     {{{COMPONENT_CARDS}}}
   </div>
 
-  <div class="sub-head">版本一致性检查</div>
+  <div class="sub-head">版本配套检查</div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>组件对比</th><th>版本 A</th><th>版本 B</th><th>状态</th></tr></thead>
+      <thead><tr><th>检查项</th><th>实测</th><th>配套要求</th><th>结论</th><th>依据</th></tr></thead>
       <tbody>
-        {{{VERSION_CONSISTENCY_ROWS}}}
+        {{{COMPATIBILITY_ROWS}}}
       </tbody>
     </table>
   </div>
@@ -384,7 +387,7 @@ details > .details-body { padding: 0.5rem 0; }
 
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Device</th><th>型号</th><th>健康</th><th>温度</th><th>功耗</th><th>AICore</th><th>HBM</th><th>ECC / 告警</th></tr></thead>
+      <thead><tr><th>设备</th><th>型号</th><th>状态</th><th>温度</th><th>功耗</th><th>AI 核</th><th>显存</th><th>ECC / 告警</th></tr></thead>
       <tbody>
         {{{NPU_DEVICE_ROWS}}}
       </tbody>
@@ -509,20 +512,6 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 </section>
 
-<!-- ===== DIAGNOSIS ===== -->
-<section class="section" id="diagnosis">
-  <div class="section-head">
-    <div class="sh-title"><span class="sh-icon">🔬</span> 综合诊断</div>
-  </div>
-
-  <ul class="issue-list">
-    {{{ISSUE_ITEMS}}}
-  </ul>
-
-  <div class="sub-head">建议下一步</div>
-  {{{NEXT_STEPS_CODE}}}
-</section>
-
 <!-- ===== RAW DATA ===== -->
 <section class="section" id="raw-data">
   <div class="section-head">
@@ -552,7 +541,7 @@ details > .details-body { padding: 0.5rem 0; }
   <div class="sub-head">Ascend 组件 (ascend)</div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>组件</th><th>版本</th><th>时间戳 / Commit</th><th>说明</th></tr></thead>
+      <thead><tr><th>组件</th><th>版本</th><th>时间 / 提交</th><th>说明</th></tr></thead>
       <tbody>
         {{{ASCEND_DATA_ROWS}}}
       </tbody>
@@ -643,7 +632,7 @@ details > .details-body { padding: 0.5rem 0; }
 </section>
 
 <div class="footer">
-  {{TOOL_NAME}} · {{TOOL_VERSION}} · {{REPORT_TIMESTAMP}}
+  昇腾环境分析 · {{REPORT_TIMESTAMP}}
 </div>
 
 </div><!-- /main -->

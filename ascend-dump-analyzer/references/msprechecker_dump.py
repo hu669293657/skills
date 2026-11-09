@@ -39,7 +39,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
-__version__ = "1.2.0"
 
 # Keep this helper identical in both standalone scripts; no deployment dependency.
 SENSITIVE_KEY = re.compile(
@@ -2057,6 +2056,7 @@ class RuntimeCollector:
         "mindspore", "mindie", "numpy", "triton", "onnx", "onnxruntime",
         "mindie-llm", "mindie-motor", "atb-llm", "mindspeed", "megatron-core",
         "deepspeed", "accelerate", "sglang", "ray", "safetensors",
+        "mindspeed-llm", "modellink", "triton-ascend", "fsdpturbo",
     )
     TARGET_PROCESS_KEYWORDS = ("mindie", "vllm", "torchrun", "python")
     MAX_TARGET_PROCESSES = 40
@@ -2634,7 +2634,6 @@ def main():
         choices=[32, 64, 128, 256], type=int, default=32,
         help="计算权重 SHA256 时的块大小 (MB)。默认: 32"
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
     args.targets = {}
@@ -2653,7 +2652,6 @@ def main():
     # 添加元数据
     dump_content.setdefault("_meta", {}).update({
         "tool": "msprechecker_dump.py",
-        "version": __version__,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         "hostname": platform.node(),
         "python_version": platform.python_version(),
