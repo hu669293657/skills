@@ -38,7 +38,8 @@ class ReportTests(unittest.TestCase):
         visible = h.split("<h2 id='sec-2'>", 1)[0]
         self.assertIn('数据不足', visible)
         self.assertNotIn('未见明显异常', visible)
-        self.assertNotRegex(h, r'''(?:id|href)=["']#?sec-(?:[6-9]|1[0-2])["']''')
+        self.assertIn("<a href='#sec-6'", h)
+        self.assertNotRegex(h, r'''(?:id|href)=["']#?sec-(?:[7-9]|1[0-2])["']''')
 
     def test_diagnosis_with_healthy_wait_sample_needs_no_action(self):
         m = sample()

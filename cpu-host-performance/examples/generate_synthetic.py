@@ -14,7 +14,7 @@ if __package__ in (None,''):
 from analyzer.analyze_cpu_trace import run_analysis
 
 
-def generate(output):
+def generate(output, include_environment=True):
     output=Path(output)
     capture=output/'synthetic_capture'/'cpu_trace'
     capture.mkdir(parents=True,exist_ok=False)
@@ -151,10 +151,31 @@ def generate(output):
              ('numa_process','hostbound/process_end.json'),('frequency','hostbound/frequency_samples.jsonl'),
              ('irq','interrupts.txt'),('softirq','softirqs.txt'),('proc_stat','proc_stat.txt'),('schedstat','schedstat.txt'),
              ('idle','trace.txt'),('trace','trace.txt'),('resources','hostbound/resource_start.json'),('resources','hostbound/resource_end.json'),('resources','hostbound/resources/df_blocks.txt'),('resources','hostbound/resources/df_inodes.txt'),('resources','hostbound/resources/lsblk.txt')]
+    environment_sources = {}
+    if include_environment:
+        for name, category, source, text in (
+                ('host/os_release.txt', 'environment_host', '/etc/os-release', 'PRETTY_NAME="Synthetic Linux"\n'),
+                ('host/numa_balancing.txt', 'environment_host', '/proc/sys/kernel/numa_balancing', '1\n'),
+                ('ascend/runtime.txt', 'environment_ascend', '/usr/local/Ascend/cann/runtime/version.info', 'version=0.0.synthetic\n')):
+            path = 'hostbound/environment/' + name
+            write(path, text)
+            paths.append((category, path))
+            environment_sources[path] = source
+        target = {'pid': 4000, 'starttime': 400000}
+        for field, source, text in (
+                ('exe', 'exe', '/synthetic/venv/bin/python3'),
+                ('environment', 'environ', 'LOCAL_RANK=0\nOMP_NUM_THREADS=8'),
+                ('limits', 'limits', 'Max open files            1024                 4096                 files'),
+                ('libraries', 'maps', '/synthetic/Ascend/lib/libhccl.so')):
+            target[field] = {'status': 'COLLECTED', 'source': '/proc/4000/' + source, 'reason': '', 'text': text}
+        js('environment/pid_4000.json', target)
+        paths.append(('environment_process', 'hostbound/environment/pid_4000.json'))
     for category,path in paths:
         manifest['entries'].append({'category':category,'requested':True,'command':['synthetic_fixture_generator'],
             'command_exists':True,'returncode':0,'raw_path':path,'raw_exists':True,'empty':False,
             'parse_success':None,'parsed_count':None,'started_at':None,'ended_at':None,'failure_reason':'','status':'COLLECTED'})
+        if path in environment_sources:
+            manifest['entries'][-1]['source'] = environment_sources[path]
     write('collection_manifest.json',json.dumps(manifest,ensure_ascii=False))
     archive=output/'synthetic_256_capture.tar.gz'
     with tarfile.open(str(archive),'w:gz') as tf:tf.add(str(capture),arcname='cpu_trace')

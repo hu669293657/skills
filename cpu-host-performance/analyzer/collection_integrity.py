@@ -9,6 +9,7 @@ from collections import Counter
 
 from .npu_affinity import _topology
 from .npu_parser import parse_npu_info, parse_npu_mapping, parse_npu_topology
+from .environment_analysis import ENV_CATEGORIES, PREFIX, parse_environment_value
 
 
 SUCCESS = {'COLLECTED', 'NO_ACTIVE_PROCESS'}
@@ -44,6 +45,12 @@ def _manifest(snapshot):
 
 def _validate(category, path, raw, m):
     """Return (success or unknown, count or unknown, reason, status override)."""
+    if category in ENV_CATEGORIES:
+        try:
+            parse_environment_value(category, path, raw)
+            return True, 1, '', None
+        except (ValueError, TypeError) as exc:
+            return False, 0, '环境证据解析失败：' + str(exc), None
     name = path.rsplit('/', 1)[-1]
     if category == 'npu_info' and name.endswith('.txt'):
         parsed = parse_npu_info(raw)
@@ -146,6 +153,14 @@ def _legacy_entries(snapshot):
             for path in paths:
                 entries.append({'category': category, 'status': 'COLLECTED', 'requested': None,
                                 'raw_path': path, 'raw_exists': True, 'failure_reason': '', 'inferred': True})
+    for path in sorted(p for p in snapshot if p.startswith(PREFIX)):
+        group = path[len(PREFIX):].partition('/')[0]
+        category = {'host': 'environment_host', 'ascend': 'environment_ascend'}.get(group)
+        if group.startswith('pid_') and group.endswith('.json'):
+            category = 'environment_process'
+        if category:
+            entries.append({'category': category, 'status': 'COLLECTED', 'requested': None,
+                            'raw_path': path, 'inferred': True})
     return entries
 
 
@@ -235,7 +250,7 @@ def analyze_collection_integrity(m, source_files=None):
                         'action': '先核对丢失所在 CPU、导出错误和内存预算；需要完整调度时间线时，以 16384 KiB/CPU 重采并核对丢失计数。',
                         'recollect': True, 'command': DEFAULT_COMMAND,
                         'requirements': 'root、私有 trace instance；增大 --buffer-size 前检查内存预算。'})
-    hb = [r for r in entries if r.get('category') not in ('trace', 'external_tools', 'manifest')]
+    hb = [r for r in entries if r.get('category') not in ('trace', 'external_tools', 'manifest') + ENV_CATEGORIES]
     categories = {r['category'] for r in hb}
     return {'manifest_status': manifest_status, 'schema_version': manifest.get('schema_version'),
             'entries': entries, 'ftrace': ftrace,

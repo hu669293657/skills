@@ -9,7 +9,7 @@ from .npu_report import affinity_html, binding_html
 from .report_explanation import explanations_html, fmt
 from .report_tables import enhance_long_tables, table_script
 from .report_findings import diagnosis_overview
-from .report_sections import core_table, resource_section
+from .report_sections import core_table, environment_section, resource_section
 from .core_balance import render_core_balance
 
 
@@ -234,6 +234,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A("<h2>5. CPU Core Balance（各核心负载）</h2>")
     A(render_core_balance(m))
     A(core_table(m,True))
+    A("<h2>6. 采集环境与软件栈</h2>")
+    A(environment_section(m.get("environment", {})))
     A("<div class='footer'>HostBound 性能诊断 Skill 生成 ｜ 仅标准库渲染，可离线打开</div>")
     A("</div></body></html>")
     return _inject_toc(enhance_long_tables("\n".join(L))).replace("</body>", table_script()+"</body>", 1)

@@ -57,7 +57,9 @@ def run_analysis(input_path, out_dir=None, quiet=False):
     td = load_input(input_path)
     try:
         sidecars=("frequency_start.json","frequency_end.json","frequency_samples.jsonl","process_start.json","resource_start.json","resource_end.json","capabilities.tsv","capabilities.json","collection_manifest.json")
-        if not td.events and not any(name.rsplit("/",1)[-1] in sidecars for name in td.snapshot):
+        from analyzer.environment_analysis import PREFIX
+        if not td.events and not any(name.rsplit("/",1)[-1] in sidecars or name.startswith(PREFIX)
+                                     for name in td.snapshot):
             raise ValueError(
                 "未能从输入中解析出任何事件。当前识别格式：%s。"
                 "支持的格式：采集脚本 tar.gz/zip、解包目录、裸 ftrace 文本、"

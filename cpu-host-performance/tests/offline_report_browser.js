@@ -10,7 +10,8 @@ const {chromium} = require(process.argv[2]);
     await page.route(/^https?:/, route => { errors.push('unexpected network access'); return route.abort(); });
     await page.goto(process.argv[4]);
     const problems = page.locator('#core-problems');
-    assert.equal(await page.locator('h2[id^="sec-"]').count(),5,'five main report sections');
+    assert.equal(await page.locator('h2[id^="sec-"]').count(),6,'six main report sections');
+    assert.match(await page.locator('#sec-6').innerText(), /采集环境与软件栈/);
     assert.equal(await problems.locator('xpath=preceding::h2[1]').getAttribute('id'),'sec-1','findings live in section one');
     assert.equal(await page.locator('#diagnosis-evidence, #frequency-idle, #metric-help').count(),0,'removed technical sections are absent');
     if (process.argv[5] === '--e2e') {

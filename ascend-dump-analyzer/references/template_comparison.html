@@ -3,10 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ascend 环境对比分析报告 — {{HOST_A}} vs {{HOST_B}}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700;800&family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<title>Ascend 环境对比分析报告</title>
 <style>
 :root {
   --bg-base: #0a0e1a;
@@ -34,9 +31,9 @@
   --info: #3b82f6;
   --info-bg: rgba(59, 130, 246, 0.08);
   --info-border: rgba(59, 130, 246, 0.3);
-  --font-display: 'Sora', sans-serif;
-  --font-body: 'DM Sans', sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: system-ui, 'Microsoft YaHei', sans-serif;
+  --font-body: system-ui, 'Microsoft YaHei', sans-serif;
+  --font-mono: Consolas, monospace;
   --radius: 12px;
   --radius-sm: 8px;
   --sidebar-w: 240px;
@@ -246,7 +243,7 @@ details > .details-body { padding: 0.5rem 0; }
 <button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle navigation">&#9776;</button>
 
 <!-- ===== SIDEBAR ===== -->
-<!-- Navigation items use {{NAV_ITEMS}} placeholder for dynamic generation -->
+
 <nav class="sidebar" id="sidebar">
   <div class="sidebar-header">
     <div class="sidebar-logo">
@@ -258,7 +255,7 @@ details > .details-body { padding: 0.5rem 0; }
     </div>
   </div>
   <div class="sidebar-nav" id="nav">
-    {{NAV_ITEMS}}
+    {{{NAV_ITEMS}}}
   </div>
   <div class="sidebar-footer">
     {{TOOL_NAME}} v{{TOOL_VERSION}}<br>{{REPORT_DATE}}
@@ -273,28 +270,31 @@ details > .details-body { padding: 0.5rem 0; }
   <div class="hero-top">
     <div>
       <h1>Ascend 环境对比分析报告</h1>
-      <div class="subtitle">{{FILE_COUNT}} 个文件比对 · {{DIFF_COUNT}} 项差异 · 相似度 {{SIMILARITY}}%</div>
+      <div class="subtitle">{{FILE_COUNT}} 个文件比对 · {{DIFF_COUNT}} 项差异 · 相似度 {{SIMILARITY}}</div>
     </div>
     <div class="score-ring">
-      <!-- SVG ring: stroke-dashoffset = 213.6 * (1 - similarity/100) -->
-      {{SCORE_RING_SVG}}
+      <svg width="80" height="80" viewBox="0 0 80 80" aria-hidden="true">
+        <circle cx="40" cy="40" r="34" fill="none" stroke="var(--border)" stroke-width="5"/>
+        <circle cx="40" cy="40" r="34" fill="none" stroke="{{SCORE_COLOR}}" stroke-width="5"
+                stroke-dasharray="213.63" stroke-dashoffset="{{SCORE_OFFSET}}"/>
+      </svg>
       <div class="score-text">
-        <div class="score-num" style="color: {{SCORE_COLOR}};">{{SIMILARITY}}%</div>
+        <div class="score-num" style="color: {{SCORE_COLOR}};">{{SIMILARITY}}</div>
         <div class="score-label">相似度</div>
       </div>
     </div>
   </div>
 
   <!-- File pair cards: repeat for each file with VS between them -->
-  {{FILE_PAIR_CARDS}}
+  {{{FILE_PAIR_CARDS}}}
 
   <div class="sim-bar">
     <div class="sim-bar-head">
       <span class="label">环境相似度</span>
-      <span class="value">{{SIMILARITY}}% · {{DIFF_COUNT}} 项差异 · {{IDENTICAL_COUNT}} 项一致</span>
+      <span class="value">{{SIMILARITY}} · {{DIFF_COUNT}} 项差异 · {{IDENTICAL_COUNT}} 项一致</span>
     </div>
     <div class="sim-track">
-      <div class="sim-fill" style="width: {{SIMILARITY}}%"></div>
+      <div class="sim-fill" style="width: {{SIMILARITY_WIDTH}}%"></div>
     </div>
   </div>
 </section>
@@ -302,7 +302,7 @@ details > .details-body { padding: 0.5rem 0; }
 <!-- ===== STATS ===== -->
 <section class="stat-strip" id="stats">
   <!-- Repeat for each category: version/env/system/config/network/weight/other + identical -->
-  {{STAT_TILES}}
+  {{{STAT_TILES}}}
 </section>
 
 <!-- ===== LEGEND ===== -->
@@ -313,7 +313,7 @@ details > .details-body { padding: 0.5rem 0; }
 </div>
 
 <!-- ===== ASSESSMENT BANNER ===== -->
-{{ASSESSMENT_BANNER}}
+{{{ASSESSMENT_BANNER}}}
 
 <section class="section" id="scope-comparison">
   <div class="section-head">
@@ -322,7 +322,7 @@ details > .details-body { padding: 0.5rem 0; }
   <div class="table-wrap">
     <table>
       <thead><tr><th>输入</th><th>采集视图 / 角色</th><th>Schema</th><th>可比范围和限制</th></tr></thead>
-      <tbody>{{SCOPE_COMPARISON_ROWS}}</tbody>
+      <tbody>{{{SCOPE_COMPARISON_ROWS}}}</tbody>
     </table>
   </div>
 </section>
@@ -337,54 +337,35 @@ details > .details-body { padding: 0.5rem 0; }
       <thead><tr><th>Section</th><th>总路径数</th><th>一致</th><th>差异</th><th>存在性</th></tr></thead>
       <tbody>
         <!-- Include workload and rank_table when present; classify under runtime and network. -->
-        {{SECTION_STAT_ROWS}}
+        {{{SECTION_STAT_ROWS}}}
       </tbody>
     </table>
   </div>
 </section>
 
 <!-- ===== DIFF DETAIL SECTIONS ===== -->
-<!-- The {{DIFF_SECTIONS}} placeholder should be replaced with one or more
-     <section> blocks, one per diff category
-     (hardware/system/npu/ascend/runtime/env/config/network/weight/other).
-     Only include categories that have diffs. Each block should follow this structure:
 
-  <section class="section" id="CATEGORY_ID">
-    <div class="section-head">
-      <div class="sh-title"><span class="sh-icon">ICON</span> CATEGORY_TITLE</div>
-      <span class="sh-count">N 项</span>
-    </div>
-    OPTIONAL_BANNERS
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>路径</th><th>文件A</th><th>文件B</th></tr></thead>
-        <tbody>DIFF_TABLE_ROWS</tbody>
-      </table>
-    </div>
-  </section>
--->
-
-{{DIFF_SECTIONS}}
+{{{DIFF_SECTIONS}}}
 
 <!-- ===== SENSITIVE VARIABLES (conditional) ===== -->
 <!-- Only include if sensitive vars detected. Otherwise omit entirely. -->
-{{SENSITIVE_SECTION}}
+{{{SENSITIVE_SECTION}}}
 
 <!-- ===== MISSING SECTIONS (conditional) ===== -->
 <!-- Only include if some sections were not collected in either file. -->
-{{MISSING_SECTION}}
+{{{MISSING_SECTION}}}
 
 <!-- ===== DRIFT ASSESSMENT ===== -->
 <section class="section" id="drift">
   <div class="section-head">
     <div class="sh-title"><span class="sh-icon">📈</span> 漂移评估</div>
   </div>
-  {{DRIFT_BANNER}}
+  {{{DRIFT_BANNER}}}
   <div class="table-wrap">
     <table>
       <thead><tr><th>评估维度</th><th>状态</th><th>说明</th></tr></thead>
       <tbody>
-        {{DRIFT_ROWS}}
+        {{{DRIFT_ROWS}}}
       </tbody>
     </table>
   </div>
@@ -396,7 +377,7 @@ details > .details-body { padding: 0.5rem 0; }
     <div class="sh-title"><span class="sh-icon">🔍</span> 关键发现与建议</div>
   </div>
   <!-- Repeat for each finding. Each finding is a banner (ok/warn/fail/info). -->
-  {{FINDING_BANNERS}}
+  {{{FINDING_BANNERS}}}
 </section>
 
 <!-- ===== RAW DATA COMPARISON ===== -->
@@ -405,23 +386,23 @@ details > .details-body { padding: 0.5rem 0; }
     <div class="sh-title"><span class="sh-icon">📋</span> 原始数据对比</div>
   </div>
   <!-- Repeat for each section (system/ascend/env) with a sub-head + table -->
-  {{RAW_DATA_TABLES}}
+  {{{RAW_DATA_TABLES}}}
 
   <details>
     <summary>查看全部环境变量对比 ({{ENV_TOTAL_COUNT}} 项)</summary>
     <div class="details-body">
       <div class="table-wrap" style="margin-top:0.4rem;">
         <table>
-          <thead><tr><th>变量名</th>{{FILE_COL_HEADERS}}</tr></thead>
+          <thead><tr><th>变量名</th>{{{FILE_COL_HEADERS}}}</tr></thead>
           <tbody>
-            {{ALL_ENV_VAR_ROWS}}
+            {{{ALL_ENV_VAR_ROWS}}}
           </tbody>
         </table>
       </div>
     </div>
   </details>
 
-  {{RAW_DATA_SUMMARY_BANNER}}
+  {{{RAW_DATA_SUMMARY_BANNER}}}
 </section>
 
 <div class="footer">

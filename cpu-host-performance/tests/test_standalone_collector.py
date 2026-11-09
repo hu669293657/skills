@@ -47,6 +47,72 @@ def fixture(base):
 
 
 class StandaloneTests(unittest.TestCase):
+    def test_environment_snapshot_collects_versions_and_explicit_process(self):
+        from analyzer.analyze_cpu_trace import run_analysis
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            proc, sys, out = fixture(base)
+            put(base, 'etc/os-release', 'PRETTY_NAME="Fixture <Linux>"\n')
+            put(proc, 'sys/kernel/numa_balancing', '1\n')
+            put(base, 'Ascend/cann/runtime/version.info', 'version=8.0.fixture\n')
+            put(proc, '4001/environ', 'OMP_NUM_THREADS=8\x00API_KEY=FIXTURE_SECRET\x00'
+                'HCCL_CONNECT_TIMEOUT=unsafe://user:FIXTURE_SECRET@host\x00')
+            put(proc, '4001/maps', '123-456 r-xp 0000 00:00 1 /opt/site lib/libhccl.so.1\n')
+            put(proc, '4001/limits', 'Max open files            1024                 4096                 files\n')
+            put(proc, '4002/environ', 'OMP_NUM_THREADS=99\x00')
+            self.run_library(base, proc, sys, out,
+                'DURATION=3; MINIMAL=0; HOSTBOUND=1; DISCOVER=1; PID_LIST=4001,4999\n'
+                'hb_environment "%s" "%s"\nhb_manifest\n' % ((base/'etc').as_posix(), (base/'Ascend').as_posix()))
+            report = base/'report'
+            run_analysis(str(out), str(report), quiet=True)
+            raw = (report/'report_data.json').read_text(encoding='utf-8')
+            self.assertNotIn('FIXTURE_SECRET', raw)
+            env = json.loads(raw)['metrics']['environment']
+            host = {row['id']: row for row in env['host']}
+            self.assertEqual(host['os_release']['value'], 'Fixture <Linux>')
+            self.assertEqual(host['numa_balancing']['value'], '1')
+            components = {row['id']: row for row in env['ascend']}
+            self.assertEqual(components['runtime']['value'], '8.0.fixture')
+            self.assertEqual(components['driver']['status'], 'UNSUPPORTED')
+            targets = {row['pid']: row for row in env['targets']}
+            self.assertEqual(set(targets), {4001, 4999})
+            self.assertEqual(targets[4001]['starttime'], 10)
+            self.assertEqual(targets[4001]['environment']['value'], {'OMP_NUM_THREADS': '8'})
+            self.assertEqual(targets[4001]['libraries']['value'], ['/opt/site lib/libhccl.so.1'])
+            self.assertEqual(targets[4001]['limits']['value']['Max open files']['hard'], '4096')
+            self.assertEqual(targets[4999]['status'], 'EXECUTION_FAILED')
+            html = (report/'hostbound_report.html').read_text(encoding='utf-8')
+            self.assertIn("<h2 id='sec-6'>6. 采集环境与软件栈</h2>", html)
+            self.assertNotIn('environment_ascend', html.split("<h2 id='sec-6'>", 1)[0])
+            self.assertIn('Fixture &lt;Linux&gt;', html)
+            self.assertIn('/opt/site lib/libhccl.so.1', html)
+
+            (out/'hostbound/environment/ascend/runtime.txt').unlink()
+            put(out, 'hostbound/environment/pid_4001.json', '{"pid":4002}')
+            run_analysis(str(out), str(report), quiet=True)
+            metrics = json.loads((report/'report_data.json').read_text(encoding='utf-8'))['metrics']
+            self.assertEqual(metrics['environment']['targets'][0]['status'], 'PARSE_FAILED')
+            runtime = next(row for row in metrics['environment']['ascend'] if row['id'] == 'runtime')
+            self.assertEqual(runtime['status'], 'NOT_INCLUDED')
+
+    def test_environment_discards_snapshot_if_target_exits_mid_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            proc, sys, out = fixture(base)
+            put(proc, '4001/environ', 'OMP_NUM_THREADS=8\x00')
+            self.run_library(base, proc, sys, out, """
+DURATION=3; MINIMAL=0; HOSTBOUND=1; DISCOVER=1
+mkdir -p "$SNAP/hostbound/environment"
+hb_environment_libraries(){ rm -- "$HB_PROC/4001/stat"; }
+hb_environment_pid 4001
+hb_manifest
+""")
+            self.assertFalse((out/'hostbound/environment/pid_4001.json').exists())
+            rows = json.loads((out/'collection_manifest.json').read_text(encoding='utf-8'))['entries']
+            self.assertEqual(rows[0]['status'], 'EXECUTION_FAILED')
+            self.assertFalse(rows[0]['raw_exists'])
+
     def test_rank_environment_is_whitelisted_without_secrets(self):
         with tempfile.TemporaryDirectory() as d:
             base=Path(d);proc,sys,out=fixture(base)
@@ -223,8 +289,10 @@ rmdir(){ :; }
             archive=archives[0]
             with tarfile.open(archive) as package:
                 self.assertIn(capture.name+'/hostbound/frequency_samples.jsonl',package.getnames())
+                self.assertIn(capture.name+'/hostbound/environment/host/kernel.txt',package.getnames())
             run_analysis(str(archive),str(base/'report'),quiet=True)
             metrics=json.loads((base/'report/report_data.json').read_text(encoding='utf-8'))['metrics']
+            self.assertEqual(metrics['environment']['target_scope'], 'NOT_REQUESTED')
             self.assertIn('taskset -apc 32-63 4001',metrics['npu_affinity']['commands'],str(metrics['npu_affinity']))
             self.assertNotIn(' 4002',metrics['npu_affinity']['commands'])
             self.assertEqual(metrics['binding_plan']['commands'],'taskset -apc 32-63 4001')

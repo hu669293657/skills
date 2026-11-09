@@ -14,7 +14,7 @@ class PipelineTests(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         cls.base = Path(cls.temp.name)
         cls.output = cls.base / 'tar-report'
-        cls.archive = generate(cls.output)
+        cls.archive = generate(cls.output, include_environment=False)
         cls.data = json.loads((cls.output / 'report_data.json').read_text(encoding='utf-8'))
 
     @classmethod
@@ -40,9 +40,10 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn('Idle Residency', html)
         self.assertEqual(len(m['per_cpu']), 256)
         self.assertNotIn("id='sec-13'", html)
-        for n in range(1, 6):
+        for n in range(1, 7):
             self.assertIn("<h2 id='sec-%d'>" % n, html)
-        self.assertNotIn("id='sec-6'", html)
+        self.assertEqual(m['environment']['status'], 'UNKNOWN')
+        self.assertIn('此采集包没有环境快照', html)
         visible = html.split("<h2 id='sec-2'>", 1)[0]
         self.assertIn('核心问题：调度延迟严重', visible)
         self.assertIn('同一个 CPU 核', visible)

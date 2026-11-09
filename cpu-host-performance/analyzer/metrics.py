@@ -135,6 +135,7 @@ def compute_metrics(td):
     from .contention_analysis import analyze_contention
     from .timeline import build_timeseries, task_compatibility
     from .collection_integrity import analyze_collection_integrity
+    from .environment_analysis import analyze_environment
     from .topology import analyze_topology
     events=sorted(td.events,key=lambda e:e.ts)
     lo=events[0].ts if events else 0.0
@@ -189,6 +190,7 @@ def compute_metrics(td):
     from .resource_analysis import analyze_resources
     m['resources']=analyze_resources(m)
     m['collection_integrity']=analyze_collection_integrity(m, getattr(td, 'source_files', {}))
+    m['environment']=analyze_environment(td.snapshot, m['collection_integrity'])
     m['source_files']=getattr(td, 'source_files', {})
     m['npu_affinity']['collection_integrity']=m['collection_integrity']
     return m

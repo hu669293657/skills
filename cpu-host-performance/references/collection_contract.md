@@ -12,8 +12,23 @@
 6. 资源原始快照位于 `hostbound/resource_start/end.json` 及 `resource_samples.jsonl`，包含boottime时间和 `/proc/stat/loadavg/meminfo/vmstat/diskstats/pressure/{cpu,memory,io}` 等原文及缺失状态。`hostbound/resources/df_blocks.txt`、`df_inodes.txt`、`lsblk.txt` 保留容量/inode/块设备原文。进程 cgroup 快照另含memory/pids限制；资源分析不依赖ftrace完整性。
 7. 根目录及 hostbound 的 Manifest 随整个 `cpu_trace/` 打包。`parser.py` 保留声明的原始文件和真实包内路径清单，不把 JSONL/vendor 原始输出误当 trace。
 8. `collection_integrity.py` 对账声明、包内存在性及实际解析；`report_data.json` 保留原文、字段、来源与诊断；HTML 展示摘要和可展开完整数据。
+9. `hostbound/environment/` 保存 ftrace 启动前的只读环境证据。分析器将它整理到 `metrics.environment`，在报告第6节展示。环境证据单独核验，原有 HostBound 和 ftrace 完整性各自计算。
 
 Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、`command`（argv数组或null）、`command_exists`、`returncode`、`raw_path`（相对 cpu_trace）、`raw_exists`、`empty`、`parse_success`、`parsed_count`、`started_at`、`ended_at`、`failure_reason`、`status`。允许附加 size_bytes、PID/starttime、item_errors 等。opaque 原文没有语义解析时 parse_success/count 为null；不能将非空文件本身视为已正确解析。
+
+## 环境快照
+
+| Manifest 类别 | 证据 | 范围 |
+|---|---|---|
+| `environment_host` | `host/*.txt` | `os-release`、`uname`、THP、NUMA balancing、swappiness、overcommit_memory、内核时钟源 |
+| `environment_ascend` | `ascend/*.txt` | `/usr/local/Ascend` 常见安装位置的驱动、CANN Toolkit/Runtime/Compiler、HCCL、OPP、ATB、MindIE 版本文件 |
+| `environment_process` | `pid_<TGID>.json` | 显式 `--pid` 指定的目标。记录 PID、starttime、可执行文件、启动变量、已映射的共享库和进程资源限额 |
+
+宿主机文件路径记录在 Manifest 的 `source` 中，命令来源记录在 `command` 中。组件路径缺失时只记录该候选路径的状态。自定义安装路径或容器内安装版本需用对应环境的独立证据核对。宿主机安装版本与进程实际映射的库路径含义不同。
+
+进程快照仅用于读取。先核对 TGID 和 starttime，读完再次核对 starttime。进程退出或身份变化时丢弃该次快照。启动变量取自 `/proc/<PID>/environ`，仅保留 Rank、可见设备、OpenMP/BLAS 线程设置、HCCL 超时等白名单键和允许的值格式。启动环境读取上限为 1 MiB，映射表读取上限为 4 MiB，库路径结果上限为 64 KiB。达到限制时记录字段失败原因。完整环境、进程代码执行、包枚举和主动网络探测在此快照范围之外。
+
+未提供 PID 或 HostBound 最终关闭时，进程环境记为 `NOT_REQUESTED`，仍保留宿主机和组件版本快照。`--minimal` 只缩减 trace 事件。较旧采集包没有环境证据时使用 `UNKNOWN` 并在 HTML 显示 N/A。环境证据缺失或格式问题按 Manifest 状态处理。
 
 ## 状态及行动
 

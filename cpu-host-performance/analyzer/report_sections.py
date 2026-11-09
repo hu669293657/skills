@@ -30,6 +30,78 @@ def heading(text,html):
     return '<h3>%s</h3>'%escape(text) if html else '### '+text+'\n\n'
 
 
+_ENV_LABELS = {
+    'os_release': '操作系统', 'kernel': '内核与架构', 'thp': '透明大页（THP）',
+    'numa_balancing': '自动 NUMA 平衡', 'swappiness': 'vm.swappiness',
+    'overcommit_memory': 'vm.overcommit_memory', 'clocksource': '内核时钟源',
+    'driver': 'Ascend 驱动', 'toolkit': 'CANN Toolkit', 'runtime': 'CANN Runtime',
+    'compiler': 'CANN Compiler', 'hccl': 'HCCL', 'opp': 'OPP', 'atb': 'ATB', 'mindie': 'MindIE',
+    'exe': '可执行文件', 'environment': '启动变量', 'limits': '进程资源限额', 'libraries': '已加载共享库',
+}
+
+
+def environment_section(data):
+    if data.get('status', 'UNKNOWN') == 'UNKNOWN':
+        return paragraph('此采集包没有环境快照。操作系统、软件版本和目标进程环境显示为 N/A。', True)
+
+    out = [paragraph('以下为采集时读取的环境信息，供同负载对照与排查。'
+                     '组件版本来自宿主机安装目录，目标进程以其已加载库为依据。', True)]
+    for key, title in (('host', '宿主机系统与内核'), ('ascend', 'Ascend 组件版本')):
+        out.append(heading(title, True))
+        rows = data.get(key, [])
+        if not rows:
+            out.append(paragraph('此采集包缺少这类证据。', True))
+            continue
+        out.append(table(['项目', '采集值', '来源', '状态', '采集时间（UTC）', '缺失原因'],
+                         [(_ENV_LABELS.get(row['id'], row['id']), row['value'], row['source'],
+                           row['status'], row.get('collected_at'), row.get('reason') or '—') for row in rows], True))
+
+    out.append(heading('业务进程启动环境与已加载库', True))
+    if not data.get('targets'):
+        reason = ('本次未通过 --pid 请求业务进程详情。' if data.get('target_scope') == 'NOT_REQUESTED'
+                  else '此采集包缺少业务进程环境记录。')
+        out.append(paragraph(reason, True))
+    targets = data.get('targets', [])
+    for target in targets[:100]:
+        pid, starttime = target['pid'], target.get('starttime')
+        identity = 'PID %s' % pid
+        if starttime is not None:
+            identity += ' · starttime %s' % starttime
+        out.append(heading(identity, True))
+        out.append(paragraph(' / '.join(str(value) for value in (
+            target['status'], target.get('collected_at'), target.get('reason')) if value), True))
+        rows = []
+        for field in ('exe', 'environment', 'limits', 'libraries'):
+            item = target.get(field)
+            if not item:
+                continue
+            value = item['value']
+            if field == 'environment':
+                summary = '%d 项白名单启动变量' % len(value) if value is not None else None
+            elif field in ('limits', 'libraries'):
+                summary = '%d 条记录' % len(value) if value is not None else None
+            else:
+                summary = value
+            rows.append((_ENV_LABELS[field], summary, item['source'], item['status'], item['reason'] or '—'))
+        if rows:
+            out.append(table(['项目', '采集结果', '来源', '状态', '缺失原因'], rows, True))
+        variables = target.get('environment', {}).get('value') or {}
+        if variables:
+            out.append(table(['启动变量', '值'], sorted(variables.items()), True, '白名单启动变量'))
+        limits = target.get('limits', {}).get('value') or {}
+        if limits:
+            out.append(table(['资源限额', '软限制', '硬限制', '单位'],
+                             [(name, row['soft'], row['hard'], row['unit'] or '—')
+                              for name, row in limits.items()], True, '进程资源限额', force=True))
+        libraries = target.get('libraries', {}).get('value') or []
+        if libraries:
+            out.append(table(['已加载共享库路径'], [(path,) for path in libraries],
+                             True, '已加载共享库', force=True))
+    if len(targets) > 100:
+        out.append(paragraph('仅展示前 100 / %d 个目标，完整记录见 report_data.json。' % len(targets), True))
+    return ''.join(out)
+
+
 def frequency_section(m,html=False):
     f=m.get('frequency',{});out=[heading('CPU Frequency Analysis',html)]
     out.append(paragraph('频率状态：%s；事件状态：%s；动态样本数：%s。%s'%(f.get('status','UNKNOWN'),f.get('event_status','UNKNOWN'),f.get('sample_count',0),'；'.join(f.get('reasons',[]))),html))

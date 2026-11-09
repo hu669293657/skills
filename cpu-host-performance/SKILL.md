@@ -1,6 +1,6 @@
 ---
 name: "cpu-host-performance"
-description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，需要采集/分析 ftrace、Host 快照、GIL/PMU/msprof，或需要 Rank/线程识别、NUMA 感知绑核、同负载性能验证与回滚时。适用 acl_thread、release_thread、DataLoader、HCCL、IRQ、CPU affinity、调度等待、Python GIL 和 Host/Device overlap；不用于仅 NPU 算子分析、通用 Prof 比对或故障日志排错。"
+description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，需要采集或分析 ftrace、Host 快照、系统与 Ascend 运行环境、GIL/PMU/msprof，或需要 Rank/线程识别、NUMA 感知绑核、同负载性能验证与回滚时。适用 acl_thread、release_thread、DataLoader、HCCL、IRQ、CPU affinity、调度等待、Python GIL 和 Host/Device overlap；不用于仅 NPU 算子分析、通用 Prof 比对或故障日志排错。"
 ---
 
 # HostBound 性能诊断
@@ -24,9 +24,11 @@ description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，�
 
 不默认执行 IRQ/dev 绑核、停 irqbalance、migratepages、强制内存绑定、训练启动或全局调优。有限 watch 仅审计，发现漂移/新任务即停止并恢复已跟踪项，不持续抢写框架策略。`taskset` 按 PID 枚举线程，执行器在调用前后核验身份和线程集合。
 
-报告采用 5 节。1 结论摘要，2 问题证据总表与根因判断，3 优化建议，4 机器资源与 CPU 总体状态，5 各核心负载。
+报告采用 6 节。1 结论摘要，2 问题证据总表与根因判断，3 优化建议，4 机器资源与 CPU 总体状态，5 各核心负载，6 采集环境与软件栈。
 
 第4节用一张离线资源图展示占用、等待压力与可能的性能限制。先筛选会影响当前任务的资源，再用可用快照计算指标。整机展示 CPU 忙碌与等待、内存峰值、磁盘 I/O 和最紧张挂载点；识别到任务资源限额时，再展示对应限额或限流。用颜色和文字区分正常、留意、紧张与缺数据。该节只展示图与简短图注，原始记录保留在 report_data.json。摘要与其他章节引用第4节。
+
+第6节分开展示宿主机系统与内核、Ascend 安装版本和明确指定的业务进程。进程按 PID 与 starttime 标识，展示可执行文件、启动变量、已加载共享库与进程资源限额，并注明证据来源和采集状态。旧包环境快照标为 N/A，仍按原规则分析调度、资源和亲和性。软件版本和静态参数用于解释环境差异，根因判断沿用时间窗证据和同负载对照。
 
 第1节在关键指标下的「核心问题」区域集中展示调度、线程、中断、频率/空闲和亲和性相关的问题。沿用诊断引擎的严重度，从严重、警告到提示排序。同级时首要诊断优先。仅供核查且尚未达到诊断规则的线索标为提示。每项同时标记「已观测到」或「待验证」，写明受影响的对象和关键证据、核查与调整条件、同负载复测方法。关键数据缺口另用一条「数据不足」说明影响和处理路径。完整技术指标、时序、线程排名及采集记录保留在 report_data.json。
 
@@ -49,6 +51,8 @@ sudo bash scripts/cpu_trace_collect.sh
 采集必须在物理机/宿主机运行。现场只需复制 `scripts/cpu_trace_collect.sh` 一个文件；所有采集逻辑内嵌 Bash/awk，不依赖 Python、jq、相邻脚本或 Analyzer。目标环境为 Linux、Bash 4+、awk 与常见核心工具（cat、cp、date、getconf、tar 等）；`npu-smi`、lscpu、numactl、numastat、pstree 等按能力探测，缺失/权限不足分别记入 Manifest。采集阶段不需要 Python；离线分析需要 Python，现场闭环执行需要完整 Skill 与 Python 3.8+。
 
 默认 3 秒、全量安全 ftrace、HostBound、全部进程/线程前后快照、NPU 原始表、CPU/NUMA/IRQ/频率/Idle/cgroup/NUMA 页分布，并记录机器资源原始快照。资源快照覆盖 CPU、内存/换页/OOM、磁盘容量/inode/I/O 和 PSI，任务 cgroup 快照补充 CPU/内存/PID 限额。默认 `--buffer-size 16384` KiB/CPU，实测丢失时按该配置重采并对比丢失计数。进程快照记录 PPID、TGID、TID、starttime、namespace、逐线程有效 cpuset 与 NUMA 页汇总，便于离线发现 AI 主进程、子进程和线程。`--duration` 调整时长，`--pid` 增加明确宿主机根 TGID 并保存其 NUMA 原始文件；`--hostbound`/`--discover` 为兼容参数。`--no-hostbound` 关闭进程/NPU采集；`--minimal` 仅精简 ftrace 事件，保留安全快照和低频轮询。每次在输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/`，压缩包同名；重复执行不会覆盖旧数据，也不要求用户换目录。
+
+环境快照在 ftrace 开始前采集。默认读取操作系统、内核参数和 Ascend 常见安装目录的组件版本。沿用 `--pid PID[,PID]` 追加明确的宿主机进程环境，读取前后核对 starttime，只保留经过键名和值格式筛选的启动变量。目标进程以其自身的 `/proc/<PID>` 证据为准，采集器环境不可替代。环境采集范围见 [采集契约](references/collection_contract.md#环境快照)。
 
 采集或完整性判断时读取 [采集契约与缺失状态](references/collection_contract.md)。先核对 `metrics.collection_integrity`：ftrace 的解析/丢失与 HostBound/NPU/NUMA 的文件/语义完整性独立呈现。`collector_status` 保留采集端声明，`status` 是 Analyzer 对实际包内文件的对账结果。仅 `actions[].recollect=true` 才提供相应复采命令；解析失败先修复解析器，未打包先取回已有文件，工具缺失/权限不足先说明条件，无活动进程不要求重复采集。
 

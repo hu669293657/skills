@@ -45,7 +45,9 @@ skills/
 - **采集**：零依赖单文件脚本，可在任意 Ascend 服务器上运行
 - **单环境分析**：系统健康检查、组件版本校验、关键环境变量检测、网络状态诊断
 - **环境对比**：对比两个或多个 dump JSON，识别配置漂移
-- **HTML 报告**：内置可视化模板，支持单环境报告和对比报告
+- **报告**：按单份分析或多份比对的 HTML 模板生成完整报告，另附 Markdown 摘要
+
+分发时复制 `ascend-dump-analyzer/`。维护者在仓库根目录运行 `python -m unittest discover -s tests/ascend-dump-analyzer`。
 
 ### 2. issue-analyzer
 

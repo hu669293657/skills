@@ -133,8 +133,7 @@ CPU Host 性能采集工具 (统一入口: 默认全量 ftrace + HostBound + 进
   -b, --buffer-size <KB>  单核 buffer 大小, 默认 16384
   -c, --cpu-list <列表>   CPU 列表, 如 1,2,3 或 0-47 (默认全量)
   -m, --minimal           精简模式: 仅 sched_switch；sysfs 频率仍低频轮询
-  -p, --pid <PID[,PID]>   追加 HostBound 只读快照: NUMA/NPU 拓扑、IRQ、目标进程与
-                          线程 affinity 等, 写入 hostbound/ 目录 (不改 ftrace 采集)
+  -p, --pid <PID[,PID]>   追加目标进程的 NUMA、affinity、启动变量白名单、已加载库与进程限额
       --hostbound        自动发现全部 NPU 占卡宿主机 PID 并采集亲和性快照
       --no-hostbound     显式关闭 NPU/目标进程/全进程发现；仍采集系统能力与频率
       --discover         只读 /proc 全进程/全线程前后快照与生命周期事件
@@ -307,12 +306,13 @@ hb_manifest(){
 }
 hb_entry(){
   local category=$1 status=$2 rel=$3 reason=${4:-} rc=${5:-null} parsed=${6:-null} count=${7:-null} requested=${8:-true} command=${9:-null} command_exists=${10:-null}
-  local present=false empty=null size=null
+  local present=false empty=null size=null source_field=""
+  if [[ -n "${11:-}" ]]; then source_field=",\"source\":$(printf '%s' "${11}" | hb_quote)"; fi
   if [[ -n "$rel" && -f "$SNAP/$rel" ]]; then
     present=true;empty=true;[[ -s "$SNAP/$rel" ]] && empty=false;size=$(wc -c < "$SNAP/$rel");size=${size//[[:space:]]/}
   fi
-  printf '{"category":"%s","requested":%s,"status":"%s","command":%s,"command_exists":%s,"returncode":%s,"raw_path":%s,"raw_exists":%s,"empty":%s,"size_bytes":%s,"parse_success":%s,"parsed_count":%s,"started_at":"%s","ended_at":"%s","failure_reason":%s}\n' \
-    "$category" "$requested" "$status" "$command" "$command_exists" "$rc" "$(if [[ -n "$rel" ]]; then printf '%s' "$rel" | hb_quote; else printf null; fi)" "$present" "$empty" "$size" "$parsed" "$count" "${HB_STARTED:-$(hb_now)}" "$(hb_now)" "$(if [[ -n "$reason" ]]; then printf '%s' "$reason" | hb_quote; else printf null; fi)" >> "$SNAP/hostbound/collection_entries.jsonl"
+  printf '{"category":"%s","requested":%s,"status":"%s","command":%s,"command_exists":%s,"returncode":%s,"raw_path":%s,"raw_exists":%s,"empty":%s,"size_bytes":%s,"parse_success":%s,"parsed_count":%s,"started_at":"%s","ended_at":"%s","failure_reason":%s%s}\n' \
+    "$category" "$requested" "$status" "$command" "$command_exists" "$rc" "$(if [[ -n "$rel" ]]; then printf '%s' "$rel" | hb_quote; else printf null; fi)" "$present" "$empty" "$size" "$parsed" "$count" "${HB_STARTED:-$(hb_now)}" "$(hb_now)" "$(if [[ -n "$reason" ]]; then printf '%s' "$reason" | hb_quote; else printf null; fi)" "$source_field" >> "$SNAP/hostbound/collection_entries.jsonl"
 }
 hb_file(){
   local category=$1 source=$2 rel=$3 status=COLLECTED reason="" rc=0
@@ -322,7 +322,7 @@ hb_file(){
     status=EXECUTION_FAILED;reason=$(cat "$SNAP/hostbound/.read_error");rc=1
     [[ "$reason" == *[Pp]ermission* || "$reason" == *'not permitted'* ]] && status=PERMISSION_DENIED
   fi
-  hb_entry "$category" "$status" "$rel" "$reason" "$rc"
+  hb_entry "$category" "$status" "$rel" "$reason" "$rc" null null true null null "${4:-}"
 }
 hb_command(){
   local category=$1 rel=$2;shift 2
@@ -354,6 +354,130 @@ hb_data(){
   else hb_entry "$category" EXECUTION_FAILED "$rel" snapshot_failed 1 false;fi
   unset HB_STARTED
 }
+hb_environment_launch(){
+  set -o pipefail
+  head -c 1048577 -- "$1" | LC_ALL=C awk '
+    BEGIN { RS=sprintf("%c",0) }
+    {
+      bytes+=length($0)+1
+      if(bytes>1048576) exit 3
+      pos=index($0,"=")
+      if(!pos) next
+      key=substr($0,1,pos-1)
+      val=substr($0,pos+1)
+      if(length(val)>256) next
+      if(key~/^(RANK|LOCAL_RANK|WORLD_SIZE|LOCAL_WORLD_SIZE|GROUP_RANK|RANK_ID|RANK_SIZE|DEVICE_ID|MKL_NUM_THREADS|OPENBLAS_NUM_THREADS|HCCL_BUFFSIZE|HCCL_CONNECT_TIMEOUT|HCCL_EXEC_TIMEOUT|TASK_QUEUE_ENABLE|ASCEND_LAUNCH_BLOCKING)$/ && val~/^[0-9]+$/ ||
+         key~/^(OMP_NUM_THREADS|ASCEND_RT_VISIBLE_DEVICES|ASCEND_VISIBLE_DEVICES|CUDA_VISIBLE_DEVICES)$/ && val~/^[0-9]+([,-][0-9]+)*$/ ||
+         key=="GOMP_CPU_AFFINITY" && val~/^[0-9]+([ ,:-][0-9]+)*$/ ||
+         key=="OMP_WAIT_POLICY" && tolower(val)~/^(active|passive)$/ ||
+         key=="OMP_PROC_BIND" && tolower(val)~/^(true|false|primary|master|close|spread)(,(primary|master|close|spread))*$/)
+        print key "=" val
+    }'
+}
+
+hb_environment_libraries(){
+  set -o pipefail
+  head -c 4194305 -- "$1" | LC_ALL=C awk '
+    {
+      bytes+=length($0)+1
+      if(bytes>4194304) exit 3
+      if(!sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +/,"")) next
+      if($0~/^\/.*\.so([.][^\/[:space:]]+)*( \(deleted\))?$/ && !seen[$0]++){
+        output+=length($0)+1
+        if(output>65536) exit 3
+        print
+      }
+    }'
+}
+
+hb_environment_field(){
+  local file=$1 value="" status=COLLECTED reason="" rc=0 stderr="$SNAP/hostbound/.environment_error"
+  shift
+  value=$("$@" "$file" 2>"$stderr") || rc=$?
+  if ((rc)); then
+    status=EXECUTION_FAILED; reason=read_failed
+    if ((rc==3)); then reason=size_limit_exceeded
+    elif LC_ALL=C grep -Eqi 'permission denied|operation not permitted' "$stderr"; then status=PERMISSION_DENIED
+    elif [[ ! -e "$file" && ! -L "$file" ]]; then status=UNSUPPORTED; reason=interface_missing
+    fi
+    value=""
+  fi
+  printf '{"status":"%s","source":%s,"reason":%s,"text":%s}' "$status" \
+    "$(printf '%s' "$file" | hb_quote)" "$(printf '%s' "$reason" | hb_quote)" \
+    "$(if ((rc)); then printf null; else printf '%s' "$value" | hb_quote; fi)"
+}
+
+hb_environment_pid(){
+  local pid=$1 dir="$HB_PROC/$1" rel="hostbound/environment/pid_$1.json" start end
+  local stat_start='sub(/^.*\) /,"") && $20~/^[0-9]+$/ {print $20; exit}'
+  local HB_STARTED
+  HB_STARTED=$(hb_now)
+  start=$(awk "$stat_start" "$dir/stat" 2>/dev/null)
+  if [[ -z "$start" || "$(awk '$1=="Tgid:"{print $2;exit}' "$dir/status" 2>/dev/null)" != "$pid" ]]; then
+    hb_entry environment_process EXECUTION_FAILED "$rel" target_identity_unavailable 1
+    return
+  fi
+  if {
+    printf '{"pid":%s,"starttime":"%s","environment":' "$pid" "$start"
+    hb_environment_field "$dir/environ" hb_environment_launch
+    printf ',"libraries":'; hb_environment_field "$dir/maps" hb_environment_libraries
+    printf ',"limits":'; hb_environment_field "$dir/limits" cat --
+    printf ',"exe":'; hb_environment_field "$dir/exe" readlink --
+    printf '}\n'
+  } > "$SNAP/$rel.tmp"; then
+    end=$(awk "$stat_start" "$dir/stat" 2>/dev/null)
+    if [[ "$start" == "$end" ]] && mv -f -- "$SNAP/$rel.tmp" "$SNAP/$rel"; then
+      hb_entry environment_process COLLECTED "$rel" "" 0
+      return
+    fi
+  fi
+  rm -f -- "$SNAP/$rel.tmp"
+  hb_entry environment_process EXECUTION_FAILED "$rel" target_identity_changed_or_write_failed 1
+}
+
+hb_environment(){
+  local etc=$1 ascend=$2 root=hostbound/environment id path candidate pid os_release
+  local -A seen=()
+  mkdir -p -- "$SNAP/$root/host" "$SNAP/$root/ascend" || return 1
+  os_release="$etc/os-release"
+  if [[ ! -e "$os_release" && "$etc" == /etc && -f /usr/lib/os-release ]]; then os_release=/usr/lib/os-release; fi
+  hb_file environment_host "$os_release" "$root/host/os_release.txt" "$os_release"
+  hb_command environment_host "$root/host/kernel.txt" uname -srmo
+  for path in "$HB_SYS/kernel/mm/transparent_hugepage/enabled" "$HB_PROC/sys/kernel/numa_balancing" \
+      "$HB_PROC/sys/vm/swappiness" "$HB_PROC/sys/vm/overcommit_memory" \
+      "$HB_SYS/devices/system/clocksource/clocksource0/current_clocksource"; do
+    id=${path##*/}
+    case "$id" in enabled) id=thp;; current_clocksource) id=clocksource;; esac
+    hb_file environment_host "$path" "$root/host/$id.txt" "$path"
+  done
+  for id in driver toolkit runtime compiler hccl opp atb mindie; do
+    case "$id" in
+      driver) path="$ascend/driver/version.info";;
+      atb) path="$ascend/nnal/atb/latest/version.info";;
+      mindie) path="$ascend/mindie/latest/version.info";;
+      *)
+        path="$ascend/cann/$id/version.info"
+        candidate="$ascend/ascend-toolkit/latest/$id/version.info"
+        if [[ ! -r "$path" && -f "$candidate" ]]; then path="$candidate"; fi;;
+    esac
+    if [[ -f "$path" || ! -e "$path" ]]; then
+      hb_file environment_ascend "$path" "$root/ascend/$id.txt" "$path"
+    else
+      hb_entry environment_ascend UNSUPPORTED "$root/ascend/$id.txt" version_source_not_regular 1 null null true null null "$path"
+    fi
+  done
+  if ((HOSTBOUND)) && [[ -n "$PID_LIST" ]]; then
+    for pid in ${PID_LIST//,/ }; do
+      [[ -n "${seen[$pid]+x}" ]] && continue
+      seen[$pid]=1
+      hb_environment_pid "$pid"
+    done
+  else
+    hb_entry environment_process NOT_REQUESTED "" explicit_host_pid_required null null null false
+  fi
+  rm -f -- "$SNAP/hostbound/.environment_error"
+}
+
 hb_phase(){
   local phase=$1 name rel suffix="" tool p node context=unknown detector pid f
   [[ "$phase" == end ]] && suffix=_at_end
@@ -383,6 +507,7 @@ hb_phase(){
     [[ -e /.dockerenv || -e /run/.containerenv ]] && context=container
     { printf 'execution_context=%s\nboot_id=%s\ncollector_pid=%s\npid_namespace=%s\ninit_pid_namespace=%s\n' "$context" "$(cat "$HB_PROC/sys/kernel/random/boot_id" 2>/dev/null)" "$$" "$(readlink "$HB_PROC/self/ns/pid" 2>/dev/null)" "$(readlink "$HB_PROC/1/ns/pid" 2>/dev/null)"; } > "$SNAP/hostbound/host_context.txt"
     hb_entry host_context COLLECTED hostbound/host_context.txt "" 0 true 1
+    hb_environment /etc /usr/local/Ascend
     for tool in gil_tracer function_monitor msprof host_analyzer;do hb_entry external_tools NOT_REQUESTED "" "external_tool:$tool" null null null false;done
   fi
   hb_data resources resources "hostbound/resource_$phase.json"

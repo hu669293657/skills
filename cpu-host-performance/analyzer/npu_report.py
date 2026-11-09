@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """NPU affinity summaries and concrete AI task binding plans for HTML."""
 from html import escape
+from .environment_analysis import ENV_CATEGORIES
 from .npu_affinity import STATE_CN
 from .report_explanation import collection_actions_html
 from .report_tables import DISPLAY_LIMIT
@@ -20,7 +21,9 @@ def affinity_html(data, integrity=None):
     total = len(data.get('rows', []))
     rows = data.get('rows', [])[:DISPLAY_LIMIT]
     if not rows:
-        return '<h3>2.3 NPU 任务与 NUMA 亲和性</h3><p class="note">当前无可确认的NPU任务映射；采集状态与处理路径见下方。</p>'+collection_actions_html(integrity)
+        actions = [item for item in integrity.get('actions', []) if item.get('category') not in ENV_CATEGORIES]
+        return ('<h3>2.3 NPU 任务与 NUMA 亲和性</h3><p class="note">当前无可确认的NPU任务映射；'
+                '采集状态与处理路径见下方。</p>' + collection_actions_html({'actions': actions}))
     parts = ['<h3>2.3 NPU 任务与 NUMA 亲和性</h3><p class="note">%s</p>' % escape(_EXPLANATION)]
     if total > DISPLAY_LIMIT:
         parts.append('<p>仅展示前100 / %d条进程亲和记录；完整记录见 report_data.json。</p>' % total)
