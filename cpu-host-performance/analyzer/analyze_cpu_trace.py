@@ -12,6 +12,7 @@
   - 裸 ftrace 文本（trace_pipe / per_cpu trace 文件）
   - trace-cmd report 文本
   - Chrome/Perfetto JSON (traceEvents)
+  - msprechecker 原生 Ascend Dump JSON（仅环境分析）
 
 输出：<输出目录>/hostbound_report.html、report_data.json 与 bind_cpu.sh。
 仅依赖 Python 标准库。
@@ -63,7 +64,7 @@ def run_analysis(input_path, out_dir=None, quiet=False):
             raise ValueError(
                 "未能从输入中解析出任何事件。当前识别格式：%s。"
                 "支持的格式：采集脚本 tar.gz/zip、解包目录、裸 ftrace 文本、"
-                "trace-cmd 文本、Chrome/Perfetto JSON；Perfetto protobuf 二进制请先用"
+                "trace-cmd 文本、Chrome/Perfetto JSON、Ascend Dump JSON；Perfetto protobuf 二进制请先用"
                 " trace_processor 导出 JSON 后重试。" % (td.format_name or "未知"))
         say("      格式：%s ｜ 事件 %s 条 ｜ 数据告警 %d 项" % (
             td.format_name, format(len(td.events), ","), len(td.warnings)))

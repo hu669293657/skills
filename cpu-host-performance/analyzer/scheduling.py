@@ -24,7 +24,8 @@ def analyze_scheduling(m, events):
     rows={}; intervals=[]; waits=[]; cur={}; pending={}; last_cpu={}; exits={}
     quality={'mismatched_switches':0,'unpaired_wakeups':0,'duplicate_wakeups':0,
              'exit_censored_waits':0,'boundary_censored_waits':0,'waking_ignored':0,
-             'identity_ambiguous_events':0,'wait_cpu_unknown':0,'exit_without_switch':0}
+             'identity_ambiguous_events':0,'wait_cpu_unknown':0,'exit_without_switch':0,
+             'preempt_switches':0,'preempt_switches_unresolved':0}
     def identity(tid,ts):
         if tid<=0:
             return None
@@ -80,6 +81,16 @@ def analyze_scheduling(m, events):
                     pending.setdefault(prevkey,{'start':ts,'kind':'runnable','cpu':cpu,'moves':[(ts,cpu)]})
             if nextkey:
                 row=rows[nextkey];row['_seen']=True;row['context_switches']+=1
+                if prev > 0 and str(f.get('prev_state', '')) == 'R+':
+                    quality['preempt_switches'] += 1
+                    outgoing = rows.get(prevkey, {})
+                    previous_tgid = outgoing.get('tgid')
+                    next_tgid = row.get('tgid')
+                    if not previous_tgid or not next_tgid or outgoing.get('end_ts', ts) < ts:
+                        quality['preempt_switches_unresolved'] += 1
+                    elif previous_tgid != next_tgid:
+                        row['cross_process_preemptions'] = row.get('cross_process_preemptions', 0) + 1
+                        row.setdefault('preempted_tgids', set()).add(previous_tgid)
                 if nextkey in pending:
                     w=pending.pop(nextkey);dt=ts-w['start']
                     if dt>=0:
@@ -209,6 +220,8 @@ def analyze_scheduling(m, events):
     lat=[];top_lat=[]
     for key,t in rows.items():
         t['cpus']=sorted(t['cpus'])
+        if 'preempted_tgids' in t:
+            t['preempted_tgids'] = sorted(t['preempted_tgids'])
         t['migrations']=t['explicit_migrations'] if t['explicit_migrations'] is not None and 'sched_migrate_task' in m['available'] else t['observed_migrations']
         t['migration_source']='sched_migrate_task' if 'sched_migrate_task' in m['available'] else 'observed CPU changes (lower bound)'
         t['cpu_utilization']=100*t['runtime_sec']/duration if t['runtime_sec'] is not None and duration else None

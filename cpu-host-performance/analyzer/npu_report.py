@@ -65,7 +65,55 @@ def _process_html(row):
     return ''.join(parts)
 
 
-def binding_html(data, integrity=None, plan=None):
+def _id_preview(values):
+    text = ', '.join(map(str, values[:8]))
+    return text + (' 等 %d 项' % len(values) if len(values) > 8 else '')
+
+
+def _ai_rankings_html(data, table):
+    parts = []
+    for metric, title in (('runtime_sec', 'CPU 运行时长 Top 10'),
+                          ('cross_process_preemptions', '跨进程抢占切入 Top 10')):
+        parts.append('<h4>%s</h4>' % title)
+        is_runtime = metric == 'runtime_sec'
+        if is_runtime:
+            note = '按同名实例累计运行时长排序。进程行汇总其已观测线程。采集窗口 %.3f 秒。' % data['duration_sec']
+        else:
+            note = ('统计 R+ 调度切换中切入且与切出线程 TGID 不同的次数。'
+                    '该指标记录调度切换及其两端，业务影响需结合等待和延迟。')
+            if data['preempt_switches_unresolved']:
+                note += '另有 %d 次切换缺少进程归属。' % data['preempt_switches_unresolved']
+        if not data['complete']:
+            note += '本次排名基于可归属的已观测样本。'
+        parts.append('<p>%s</p>' % escape(note))
+        for kind, label in (('processes', '按进程名称'), ('threads', '按线程名称')):
+            parts.append('<h5>%s</h5>' % label)
+            rows = sorted((row for row in data[kind] if row[metric] > 0),
+                          key=lambda row: (-row[metric], row['name']))[:10]
+            if not rows:
+                empty = '本次缺少可归属的 AI 运行时长。'
+                if not is_runtime:
+                    empty = ('本次未观测到 R+ 切换。' if not data['preempt_switches']
+                             else '本次未观测到可归属的 AI 跨进程抢占切入。')
+                parts.append('<p>%s</p>' % empty)
+                continue
+            headers = ['名称', '同名实例数', 'PID/TGID']
+            if kind == 'threads':
+                headers.append('TID')
+            headers.extend(['运行时长（CPU·秒）'] if is_runtime else ['切入次数', '切出方 PID/TGID'])
+            values = []
+            for row in rows:
+                item = [row['name'], row['instance_count'], _id_preview(row['tgids'])]
+                if kind == 'threads':
+                    item.append(_id_preview(row['tids']))
+                item.extend(['%.3f' % row[metric]] if is_runtime
+                            else [row[metric], _id_preview(row['preempted_tgids'])])
+                values.append(item)
+            parts.append(table(headers, values, True, title=label + ' ' + title))
+    return ''.join(parts)
+
+
+def binding_html(data, integrity=None, plan=None, rankings=None):
     from urllib.parse import quote
     from .report_sections import table
     if plan is None:
@@ -95,10 +143,12 @@ def binding_html(data, integrity=None, plan=None):
         parts.append('<p>未确认占卡主 PID。可查看 <a href="#sec-2">NPU 任务与 NUMA 亲和性</a>和'
                      '<a href="#core-problems">核心问题与数据说明</a>。</p>')
     parts += ['<h3>AI 进程与线程清单</h3>', '<p>%s</p>' % escape(plan.get('note', '根据已采集的NPU、进程和线程关系整理。'))]
+    if rankings:
+        parts.append(_ai_rankings_html(rankings, table))
     if tasks:
-        parts.append(table(['NPU','PID/TGID','TID','父PID','Rank / Local Rank（环境标签）','对象','名称','角色','当前CPU','绑定CPU','NUMA','状态 / 原因'], [
-            [row.get('npu_ids'),row['pid'],row['tid'],row.get('ppid'),'%s / %s'%(row.get('rank') or '未知',row.get('local_rank') or '未知'),row['object_type'],row['name'],row['role'],row['current_cpu'],row['target_cpu'] or '无法确定',row['numa'],row['status']+'；'+row['reason']]
-            for row in tasks], True, title='AI 进程与线程清单'))
+        parts.append(table(['名称','NPU','PID/TGID','TID','父PID','Rank / Local Rank（环境标签）','对象','角色','当前CPU','绑定CPU','NUMA','状态 / 原因'], [
+            [row['name'],row.get('npu_ids'),row['pid'],row['tid'],row.get('ppid'),'%s / %s'%(row.get('rank') or '未知',row.get('local_rank') or '未知'),row['object_type'],row['role'],row['current_cpu'],row['target_cpu'] or '无法确定',row['numa'],row['status']+'；'+row['reason']]
+            for row in sorted(tasks, key=lambda item: str(item.get('name') or ''))], True, title='AI 进程与线程身份明细'))
     else:
         parts.append('<p>未识别到可关联的 AI 对象；不能用任意 Python 进程或示例 PID 代替。</p>')
     return ''.join(parts)

@@ -8,7 +8,7 @@
 
 ## 采集
 
-现场只需把 `scripts/cpu_trace_collect.sh` 这一个文件复制到 Linux 宿主机。采集使用 Bash 4+、awk、核心 utils 和内核 tracefs，不需要 Python、jq 或旁边任何文件。NPU/拓扑等可选命令按能力探测，缺失情况记入 Manifest。采集后把包带回有 Python 3.7+ 的机器离线分析。
+默认采集只需把 `scripts/cpu_trace_collect.sh` 复制到 Linux 宿主机。采集使用 Bash 4+、awk、核心工具和内核 tracefs。NPU/拓扑等可选命令按能力探测，缺失情况记入 Manifest。采集后把包带回有 Python 3.7+ 的机器离线分析。
 
 ```bash
 # 默认3秒、完整安全ftrace、HostBound、NPU发现、全机/proc前后快照
@@ -30,6 +30,17 @@ sudo bash scripts/cpu_trace_collect.sh --minimal --frequency-interval 2 --durati
 sudo bash scripts/cpu_trace_collect.sh --duration 10 --cpu-list 128-159 --buffer-size 16384 --output /tmp/cpu-case-005
 ```
 
+### 输出两个 Skill 共用的原生环境 JSON
+
+将 `ascend-dump-analyzer` 自带的 `msprechecker_dump.py` 一并复制到宿主机。该模式需要 `python3`。
+
+```bash
+sudo bash scripts/cpu_trace_collect.sh --output /tmp/cpu-case --pid 12345 \
+  --ascend-dump-script /path/to/msprechecker_dump.py
+```
+
+成功后输出同一前缀的 `cpu_trace_*.tar.gz` 和 `cpu_trace_*_msprechecker_dumped.json`。JSON 由原脚本以 `--filter --no-probes` 生成，内外两份原样保存。CPU 分析器接受采集包或独立 JSON，Ascend 环境分析器直接接受独立 JSON。独立文件写出失败时，可以原样取出包内的 `hostbound/environment/msprechecker_dumped.json`。
+
 `--hostbound` 和 `--discover` 保留兼容，正常完整采集无需添加。`--minimal` 是主动选择的事件精简模式，并不关闭常规安全快照。每次在指定输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/` 及同名 tar.gz；可连续重复执行，不覆盖旧数据。默认 sysfs 轮询1秒，最小0.2秒；每个 policy 读取一次。默认 buffer 为 16384 KiB/CPU，256 个 CPU 约 4 GiB；请求值和内核读回值记录在采集元数据中。实际内核占用、文字导出大小和全机线程快照耗时需现场核验。30秒是 trace 业务窗口，完整命令还包括前后快照及打包时间。
 
 采集使用私有 `instances/cpu_host_<collector-pid>`，不清空全局 trace 或覆盖其他工具配置。tracefs/实例不支持或无权限时停止 tracing，保留已获取的只读快照、Manifest 和错误信息，可直接分析 `cpu_trace/` 降级报告。正常结束、失败和信号退出都会清理私有实例。SIGKILL/断电可能遗留实例，应由管理员核验后处理。
@@ -44,13 +55,15 @@ sudo bash scripts/cpu_trace_collect.sh --duration 10 --cpu-list 128-159 --buffer
 
 ```bash
 python3 -m analyzer analyze /path/cpu_trace_*.tar.gz --output-dir /path/report
+# 单独分析原生环境快照
+python3 -m analyzer analyze /path/msprechecker_dumped.json --output-dir /path/env-report
 # 任意目录也可使用脚本入口
 python3 /path/cpu-host-performance/analyzer/analyze_cpu_trace.py /path/capture -o /path/report
 ```
 
 Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer analyze ...`；不需要修改系统编码设置。
 
-支持 tar.gz、zip、目录、ftrace/trace-cmd文本、Chrome/Perfetto JSON。输出：
+支持 tar.gz、zip、目录、ftrace/trace-cmd 文本、Chrome/Perfetto JSON 和 msprechecker 原生 Ascend Dump JSON。直接分析原生 JSON 时，报告展示环境信息，并标明调度证据缺失。分析输出如下。
 
 - `hostbound_report.html`：固定入口，单文件离线打开，无CDN/外部JS。
 - `bind_cpu.sh`：默认 Bash/awk 身份与CPU预检/预览；显式执行委托 Python 3.8+ journal 执行器（完整 Skill 目录）。
@@ -67,6 +80,8 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 第5节：默认全部CPU利用率折线；可切柱状图、NUMA、CPU范围和指标显隐。百分比、次数/秒、MHz分成独立指标组。256核全部保留，静默/未采集核心显示N/A。悬停/键盘聚焦显示数值；标记热点、均值、极值。无JS和打印使用全核静态图及表格。
 
 第6节展示 ftrace 启动前采集的系统、内核参数和 Ascend 组件版本。用 `--pid 12345` 指定业务宿主机 PID，可同时查看该进程的启动变量、可执行文件、共享库和资源限额。来源和状态保存在 `metrics.environment`。旧包缺少此快照时显示 N/A。 [环境采集契约](references/collection_contract.md#环境快照)
+
+第三节的清单按名称汇总 CPU 运行时长和跨进程抢占切入，进程和线程各显示前十名。抢占次数来自 `sched_switch` 的 `R+` 标记及两端已知且不同的 TGID。用 PID/TID 核对同名实例，完整汇总见 `metrics.ai_rankings`。
 
 HTML每类明细最多展示100条，并保留总记录数；长表默认收缩，搜索/排序仅作用于当前展示记录，完整数据在report_data.json中。2.3只保留当前亲和摘要，删除“依据、来源、内存与线程证据”和“建议CPU / NUMA”区块。第三节先展示可复制的 taskset 命令与脚本下载，再列待核验主 PID 和 AI 进程线程清单。Idle 由进入/退出事件持续时间计算，`-1` 和无符号退出值不作为状态编号；未知区间显示 N/A。频率按策略域展示来源、接口失败和可靠性。查看 `frequency.status` 与 `event_status`：
 
@@ -95,7 +110,7 @@ CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affi
 - IRQ/SoftIRQ总占比：配对handler区间在有效CPU观测范围内的并集 / 全部有效CPU总观测秒数。另保留单核最高值。旧算法sum(time)/单窗口会在多核夸大（2核各1秒IRQ、10秒窗口，原20%，现全机10%）。
 - sched_switch字段是TID；/proc starttime隔离身份代次；跨代或无身份证据不配对等待。
 - 延迟使用成功wakeup→switch，不把waking当起点；重复唤醒去重；退出、边界、丢失及配对数量明确展示。
-- R/R+仅叫可运行态切出；等待另外统计，不能断言谁抢占谁。
+- R/R+ 都计入可运行态切出。跨进程抢占榜仅使用同一事件中切入和切出 TGID 均已知且不同的 R+ 切换，业务影响需结合等待和延迟判断。
 - 显式迁移与观测CPU变化选择一种来源，不相加重复计数。
 - 修复无cpu_idle时idle切换方向，缺失值保留null/N/A；不再把低均值当作排除CPU瓶颈的依据。
 

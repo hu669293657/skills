@@ -226,7 +226,8 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     A(affinity_html(m.get("npu_affinity", {}), m.get("collection_integrity", {})))
     # ---------- 3. 建议 ----------
     A("<h2>3. 优化建议</h2>")
-    A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {}), m.get("binding_plan", {})))
+    A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {}),
+                   m.get("binding_plan", {}), rankings=m.get("ai_rankings")))
     # ---------- 4. 总体状态 ----------
     A("<h2>4. 机器资源与 CPU 总体状态</h2>")
     A(resource_section(m, True))

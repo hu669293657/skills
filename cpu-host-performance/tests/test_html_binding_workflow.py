@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-def fixture(narrow=False):
+def fixture(narrow=False, events=None, extra_threads=()):
     from analyzer.parser import TraceData, Event
     from analyzer.metrics import compute_metrics
     procs=[];threads=[]
@@ -19,7 +19,8 @@ def fixture(narrow=False):
                             allowed_cpus=list(range(64)),cpuset_cpus_effective=list(range(64))))
     threads.append(dict(tid=4002,tgid=4001,name='acl_thread',starttime=40020,namespace_pids=[4002],
                         allowed_cpus=[32] if narrow else list(range(64)),cpuset_cpus_effective=list(range(64))))
-    td=TraceData();td.events=[Event(0,32,'sched_switch',fields={'prev_pid':0,'next_pid':4001}),
+    threads.extend(extra_threads)
+    td=TraceData();td.events=events if events is not None else [Event(0,32,'sched_switch',fields={'prev_pid':0,'next_pid':4001}),
                              Event(3,32,'sched_switch',fields={'prev_pid':4001,'next_pid':0})]
     batch=json.dumps(dict(processes=procs,threads=threads))
     td.snapshot={'hostbound/process_start.json':batch,'hostbound/process_end.json':batch,
@@ -32,6 +33,44 @@ def fixture(narrow=False):
 
 
 class HtmlBindingWorkflowTests(unittest.TestCase):
+    def test_ai_rankings_group_names_and_count_cross_process_preempt_switch_ins(self):
+        from analyzer.diagnosis import diagnose
+        from analyzer.parser import Event
+        from analyzer.report import generate_reports
+
+        def switch(ts, prev, nxt, state='S'):
+            return Event(ts, 32, 'sched_switch', fields={
+                'prev_pid': prev, 'next_pid': nxt, 'prev_state': state})
+
+        events = [switch(0, 0, 9001), switch(1, 9001, 4002, 'R+'),
+                  switch(2, 4002, 4003, 'R+'), switch(3, 4003, 9001),
+                  switch(4, 9001, 4002, 'R'), switch(5, 4002, 9001, 'R+'),
+                  switch(6, 9001, 4002, 'R+'), switch(7, 4002, 0)]
+        threads = []
+        for index, tid in enumerate(range(4003, 4015)):
+            threads.append(dict(tid=tid, tgid=4001, name='acl_thread' if not index else 'worker-%02d' % index,
+                                starttime=tid*10, namespace_pids=[tid], allowed_cpus=[32]))
+            if index:
+                events.extend((switch(8 + index*2, 0, tid), switch(9 + index*2, tid, 0)))
+        m = fixture(events=events, extra_threads=threads)
+        ranks = m['ai_rankings']
+        threads = {row['name']: row for row in ranks['threads']}
+        self.assertEqual(len(threads), 12)
+        self.assertEqual(threads['acl_thread']['runtime_sec'], 4)
+        self.assertEqual(threads['acl_thread']['cross_process_preemptions'], 2)
+        self.assertEqual(threads['acl_thread']['preempted_tgids'], [9001])
+        self.assertEqual(threads['acl_thread']['tids'], [4002, 4003])
+        self.assertEqual(ranks['processes'][0]['name'], 'python3')
+        self.assertEqual(ranks['processes'][0]['runtime_sec'], 15)
+        self.assertEqual(ranks['processes'][0]['cross_process_preemptions'], 2)
+        with tempfile.TemporaryDirectory() as d:
+            html = Path(generate_reports(m, diagnose(m), d)).read_text(encoding='utf-8')
+        runtime = html.split('CPU 运行时长 Top 10', 1)[1].split('跨进程抢占切入 Top 10', 1)[0]
+        thread_table = runtime.split('按线程名称', 1)[1].split('</table>', 1)[0]
+        self.assertEqual(thread_table.count('<td>acl_thread</td>'), 1)
+        self.assertIn('<td>worker-09</td>', thread_table)
+        self.assertNotIn('<td>worker-10</td>', thread_table)
+
     def test_different_cpusets_use_the_common_cpu_mask_in_report_and_script(self):
         from analyzer.binding_plan import build_binding_plan
         from analyzer.npu_affinity import analyze_npu_affinity

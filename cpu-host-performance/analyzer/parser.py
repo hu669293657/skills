@@ -152,7 +152,7 @@ def parse_ftrace_text(text, td):
 # ---------------------------------------------------------------
 # Chrome Tracing / Perfetto JSON
 # ---------------------------------------------------------------
-def parse_chrome_json_text(text, td):
+def parse_chrome_json_text(text, td, allow_ascend_dump=False):
     """解析 traceEvents JSON。缺 cpu 字段时置 None (仅做全机聚合)。"""
     data = None
     try:
@@ -168,6 +168,12 @@ def parse_chrome_json_text(text, td):
                 data.append(json.loads(line))
             except Exception:
                 pass
+    if allow_ascend_dump:
+        from .environment_analysis import NATIVE_DUMP_PATH, is_native_dump
+        if is_native_dump(data):
+            td.format_name = 'Ascend Dump JSON'
+            td.snapshot[NATIVE_DUMP_PATH] = text
+            return 0
     if isinstance(data, dict):
         data = data.get("traceEvents", data.get("systemTraceEvents", []))
     if not isinstance(data, list):
@@ -430,7 +436,7 @@ def load_input(path):
     if _looks_like_json(head) and not _looks_like_ftrace(head):
         td.format_name = "Chrome/Perfetto JSON"
         with io.open(path, "r", encoding="utf-8", errors="replace") as f:
-            parse_chrome_json_text(f.read(), td)
+            parse_chrome_json_text(f.read(), td, allow_ascend_dump=True)
     elif head.startswith("\xd0\x63") or low.endswith(".perfetto"):  # protobuf 魔数
         td.warnings.append("检测到 Perfetto protobuf 二进制格式 (.perfetto/.pb), 本分析器仅支持 JSON 导出; "
                            "请在 https://ui.perfetto.dev 中导出 JSON 或使用 trace-cmd report 转文本后重试")
@@ -439,7 +445,7 @@ def load_input(path):
         with io.open(path, "r", encoding="utf-8", errors="replace") as f:
             parse_ftrace_text(f.read(), td)
 
-    if not td.events and not td.warnings:
+    if not td.events and not td.warnings and td.format_name != 'Ascend Dump JSON':
         td.warnings.append("文件中未识别出任何支持的事件, 请确认是 ftrace/trace-cmd/JSON trace")
     return _finalize_events(td)
 

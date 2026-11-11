@@ -9,7 +9,8 @@ from collections import Counter
 
 from .npu_affinity import _topology
 from .npu_parser import parse_npu_info, parse_npu_mapping, parse_npu_topology
-from .environment_analysis import ENV_CATEGORIES, PREFIX, parse_environment_value
+from .environment_analysis import (ENV_CATEGORIES, NATIVE_DUMP_CATEGORY, NATIVE_DUMP_PATH,
+                                   PREFIX, parse_environment_value, read_native_dump)
 
 
 SUCCESS = {'COLLECTED', 'NO_ACTIVE_PROCESS'}
@@ -45,6 +46,12 @@ def _manifest(snapshot):
 
 def _validate(category, path, raw, m):
     """Return (success or unknown, count or unknown, reason, status override)."""
+    if category == NATIVE_DUMP_CATEGORY:
+        try:
+            data = read_native_dump(raw)
+            return True, len(data) - 1, '', None
+        except (ValueError, TypeError) as exc:
+            return False, 0, 'Ascend Dump 解析失败：' + str(exc), None
     if category in ENV_CATEGORIES:
         try:
             parse_environment_value(category, path, raw)
@@ -188,6 +195,9 @@ def analyze_collection_integrity(m, source_files=None):
     snapshot = m.get('snapshot', {})
     manifest, manifest_status = _manifest(snapshot)
     inputs = manifest.get('entries', []) if manifest_status == 'COLLECTED' else _legacy_entries(snapshot)
+    if NATIVE_DUMP_PATH in snapshot and not any(row.get('category') == NATIVE_DUMP_CATEGORY for row in inputs):
+        inputs = inputs + [{'category': NATIVE_DUMP_CATEGORY, 'status': 'COLLECTED',
+                            'raw_path': NATIVE_DUMP_PATH, 'requested': None, 'inferred': True}]
     entries = []
     for claim in inputs:
         row = dict(claim)

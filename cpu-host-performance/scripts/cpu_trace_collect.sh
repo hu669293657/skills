@@ -136,6 +136,8 @@ CPU Host 性能采集工具 (统一入口: 默认全量 ftrace + HostBound + 进
   -p, --pid <PID[,PID]>   追加目标进程的 NUMA、affinity、启动变量白名单、已加载库与进程限额
       --hostbound        自动发现全部 NPU 占卡宿主机 PID 并采集亲和性快照
       --no-hostbound     显式关闭 NPU/目标进程/全进程发现；仍采集系统能力与频率
+      --ascend-dump-script <路径>
+                         可选，调用 msprechecker_dump.py 导出两种 Skill 共用的原生 JSON
       --discover         只读 /proc 全进程/全线程前后快照与生命周期事件
       --frequency-interval <秒>  sysfs 轮询，默认1，最小0.2
       --full             显式全量模式（默认）
@@ -478,6 +480,53 @@ hb_environment(){
   rm -f -- "$SNAP/hostbound/.environment_error"
 }
 
+hb_ascend_dump(){
+  local script=$1 rel=hostbound/environment/msprechecker_dumped.json
+  local pid rc=0 export_tmp="" HB_STARTED
+  local -a args=(--filter --no-probes)
+  local -A seen=()
+  HB_STARTED=$(hb_now)
+  if [[ ! -f "$script" || ! -r "$script" ]]; then
+    hb_entry environment_dump EXECUTION_FAILED "$rel" collector_script_missing_or_unreadable 1 null null true null null "$script"
+    warn "无法读取 Ascend Dump 采集脚本: $script"
+    return
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    hb_entry environment_dump COMMAND_NOT_FOUND "$rel" python3_not_found null null null true '["python3"]' false "$script"
+    warn "找不到 python3，本次仅采集 CPU Host 证据"
+    return
+  fi
+  if ((HOSTBOUND)); then
+    for pid in ${PID_LIST//,/ }; do
+      [[ -n "${seen[$pid]+x}" ]] && continue
+      seen[$pid]=1
+      args+=(--target "pid-$pid=$pid")
+    done
+  fi
+  if ! mkdir -p -- "$SNAP/hostbound/environment"; then
+    hb_entry environment_dump EXECUTION_FAILED "$rel" dump_directory_failed 1
+    return
+  fi
+  (umask 077; python3 -- "$script" "${args[@]}" --output-path "$SNAP/$rel.tmp") \
+    > "$SNAP/hostbound/environment/ascend_dump_log.txt" 2>&1 || rc=$?
+  if ((rc)) || [[ ! -s "$SNAP/$rel.tmp" ]] || ! mv -f -- "$SNAP/$rel.tmp" "$SNAP/$rel"; then
+    rm -f -- "$SNAP/$rel.tmp"
+    ((rc)) || rc=1
+    hb_entry environment_dump EXECUTION_FAILED "$rel" native_dump_failed_check_ascend_dump_log "$rc" null null true null null "$script"
+    warn "Ascend Dump 采集失败，见 $SNAP/hostbound/environment/ascend_dump_log.txt"
+    return
+  fi
+  hb_entry environment_dump COLLECTED "$rel" "" 0 null null true null null "$script"
+  local output="$OUTDIR/${CAPTURE_NAME}_msprechecker_dumped.json"
+  if export_tmp=$(mktemp "$OUTDIR/.${CAPTURE_NAME}_dump_XXXXXX") &&
+      cp -- "$SNAP/$rel" "$export_tmp" && mv -f -- "$export_tmp" "$output"; then
+    ok "Ascend Dump JSON: $output"
+  else
+    [[ -n "$export_tmp" ]] && rm -f -- "$export_tmp"
+    warn "无法写出独立 JSON，原生快照已保留: $SNAP/$rel"
+  fi
+}
+
 hb_phase(){
   local phase=$1 name rel suffix="" tool p node context=unknown detector pid f
   [[ "$phase" == end ]] && suffix=_at_end
@@ -574,10 +623,10 @@ hb_poll(){
 # END standalone evidence
 
 # ---------- 参数解析 ----------
-DURATION=3; OUTDIR="."; BUFFER_SIZE=16384; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=1; DISCOVER=1; FREQ_INTERVAL=1
+DURATION=3; OUTDIR="."; BUFFER_SIZE=16384; CPU_LIST=""; MINIMAL=0; PID_LIST=""; HOSTBOUND=1; DISCOVER=1; FREQ_INTERVAL=1; ASCEND_DUMP_SCRIPT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -t|--duration|-o|--output|-b|--buffer-size|-c|--cpu-list|-p|--pid|--frequency-interval)
+    -t|--duration|-o|--output|-b|--buffer-size|-c|--cpu-list|-p|--pid|--frequency-interval|--ascend-dump-script)
       [[ $# -ge 2 && "$2" != --* ]] || { err "missing option value (缺少参数): $1"; exit 1; };;
   esac
   case "$1" in
@@ -588,6 +637,7 @@ while [[ $# -gt 0 ]]; do
     --full) MINIMAL=0; shift;;
     --discover) DISCOVER=1; HOSTBOUND=1; shift;;
     --frequency-interval) FREQ_INTERVAL="$2"; shift 2;;
+    --ascend-dump-script) ASCEND_DUMP_SCRIPT="$2"; shift 2;;
     -m|--minimal)     MINIMAL=1; shift;;
     -p|--pid)         PID_LIST="$2"; HOSTBOUND=1; shift 2;;
     --hostbound)      HOSTBOUND=1; shift;;
@@ -616,6 +666,7 @@ CAPTURE_NAME=${SNAP##*/}
 mkdir -p -- "$SNAP/hostbound" || exit 1
 HB_TICKS=$(getconf CLK_TCK 2>/dev/null || echo 100)
 : > "$SNAP/hostbound/collection_entries.jsonl"
+if [[ -n "$ASCEND_DUMP_SCRIPT" ]]; then hb_ascend_dump "$ASCEND_DUMP_SCRIPT"; fi
 hb_phase start
 phase_end "前置证据状态已保存: $SNAP/hostbound/collection_manifest.json"
 if [[ "$EUID" -ne 0 ]]; then
@@ -874,7 +925,7 @@ printf '%s\n' "${CPU_LIST:-$(cat "$HB_SYS/devices/system/cpu/online")}" > "$SNAP
 
 cleanup
 
-# 所有证据由本文件内嵌 Bash/awk 生成。
+# 默认证据由内嵌 Bash/awk 生成。可选原生 Dump 随同归档。
 record_trace_status COLLECTED
 
 # ---------- 元数据与打包 ----------

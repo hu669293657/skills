@@ -133,6 +133,7 @@ def compute_metrics(td):
     from .interrupt_analysis import analyze_interrupts
     from .frequency_analysis import analyze_frequency, legacy_frequency
     from .contention_analysis import analyze_contention
+    from .ai_rankings import summarize_ai_rankings
     from .timeline import build_timeseries, task_compatibility
     from .collection_integrity import analyze_collection_integrity
     from .environment_analysis import analyze_environment
@@ -170,6 +171,7 @@ def compute_metrics(td):
     m['freq']=legacy_frequency(m['frequency'])
     if not m['governor']: m['governor']=','.join(sorted({p['governor'] for p in m['frequency']['domains'] if p.get('governor')})) or None
     m['contention']=analyze_contention(m)
+    m['ai_rankings']=summarize_ai_rankings(m)
     m['tasks']=task_compatibility(m)
     m['tasks']['observed_cpus_by_identity']={}
     for ev in events:

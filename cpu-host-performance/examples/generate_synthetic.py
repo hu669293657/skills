@@ -56,7 +56,7 @@ def generate(output, include_environment=True):
             sw(at,cpu,0 if sec==0 or n!=4 else 9000+n,9000+n)
             ev(at+.02,cpu,'sched_waking',pid=t,target_cpu=cpu,comm='acl_thread')
             ev(at+.021,cpu,'sched_wakeup',pid=t,target_cpu=cpu,comm='acl_thread')
-            sw(at+.06,cpu,9000+n,t)
+            sw(at+.06,cpu,9000+n,t,'R+' if sec==0 else 'S')
             sw(at+.11,cpu,t,9000+n,'R+')
             sw(at+.14,cpu,9000+n,t)
             sw(at+.2,cpu,t,9000+n if n==4 else 0)

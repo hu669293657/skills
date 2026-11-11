@@ -46,25 +46,41 @@ def environment_section(data):
 
     out = [paragraph('以下为采集时读取的环境信息，供同负载对照与排查。'
                      '组件版本来自宿主机安装目录，目标进程以其已加载库为依据。', True)]
+    native = data.get('native_dump')
+    if native:
+        if native['capture_status'] == 'COLLECTED':
+            out.append(paragraph('原生 Ascend Dump · Schema %s · %s' % (
+                native.get('schema_version') or '未知', native.get('status') or '采集状态未知'), True))
+            coverage = native.get('collection', {})
+            if coverage:
+                out.append(table(['原生采集范围', '状态', '说明'],
+                                 [(name, info.get('status'), info.get('reason') or '—')
+                                  for name, info in sorted(coverage.items())],
+                                 True, 'Ascend Dump 采集覆盖', force=True))
+        else:
+            out.append(paragraph('原生 Ascend Dump · %s · %s' % (
+                native['capture_status'], native.get('reason') or '—'), True))
     for key, title in (('host', '宿主机系统与内核'), ('ascend', 'Ascend 组件版本')):
         out.append(heading(title, True))
         rows = data.get(key, [])
         if not rows:
             out.append(paragraph('此采集包缺少这类证据。', True))
             continue
-        out.append(table(['项目', '采集值', '来源', '状态', '采集时间（UTC）', '缺失原因'],
+        out.append(table(['项目', '采集值', '来源', '状态', '采集时间', '缺失原因'],
                          [(_ENV_LABELS.get(row['id'], row['id']), row['value'], row['source'],
                            row['status'], row.get('collected_at'), row.get('reason') or '—') for row in rows], True))
 
     out.append(heading('业务进程启动环境与已加载库', True))
     if not data.get('targets'):
-        reason = ('本次未通过 --pid 请求业务进程详情。' if data.get('target_scope') == 'NOT_REQUESTED'
+        reason = ('本次未请求业务进程详情。' if data.get('target_scope') == 'NOT_REQUESTED'
                   else '此采集包缺少业务进程环境记录。')
         out.append(paragraph(reason, True))
     targets = data.get('targets', [])
     for target in targets[:100]:
         pid, starttime = target['pid'], target.get('starttime')
         identity = 'PID %s' % pid
+        if target.get('role'):
+            identity = '%s · %s' % (target['role'], identity)
         if starttime is not None:
             identity += ' · starttime %s' % starttime
         out.append(heading(identity, True))

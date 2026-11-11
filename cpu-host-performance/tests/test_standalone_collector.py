@@ -47,6 +47,52 @@ def fixture(base):
 
 
 class StandaloneTests(unittest.TestCase):
+    def test_native_dump_is_exported_and_packaged_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            proc, sys, out = fixture(base)
+            collector = base / 'Ascend tool' / 'msprechecker_dump.py'
+            put(base, 'Ascend tool/msprechecker_dump.py', 'synthetic collector path')
+            native = b'{\n  "_meta": {"tool": "msprechecker_dump.py", "schema_version": "1.2"}\n}\n'
+            (base / 'native.json').write_bytes(native)
+            self.run_library(base, proc, sys, out, """
+DURATION=3; MINIMAL=0; HOSTBOUND=1; DISCOVER=1; PID_LIST=4001,4001
+OUTDIR="$SNAP/exports"; CAPTURE_NAME=cpu_trace_fixture
+mkdir -p "$OUTDIR"
+python3(){
+  [[ "$#" -eq 8 && "$1" == -- && "$2" == '%s' &&
+     "$3 $4 $5 $6 $7" == '--filter --no-probes --target pid-4001=4001 --output-path' ]] || return 41
+  cp -- '%s' "$8"
+}
+hb_ascend_dump '%s'
+hb_manifest
+""" % (collector.as_posix(), (base / 'native.json').as_posix(), collector.as_posix()))
+            packaged = out / 'hostbound/environment/msprechecker_dumped.json'
+            standalone = out / 'exports/cpu_trace_fixture_msprechecker_dumped.json'
+            self.assertEqual(packaged.read_bytes(), native)
+            self.assertEqual(standalone.read_bytes(), native)
+            rows = json.loads((out / 'collection_manifest.json').read_text(encoding='utf-8'))['entries']
+            self.assertEqual(rows[0]['category'], 'environment_dump')
+            self.assertEqual(rows[0]['status'], 'COLLECTED')
+
+    def test_native_dump_failed_write_is_not_published(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            proc, sys, out = fixture(base)
+            put(base, 'collector.py', 'synthetic collector path')
+            self.run_library(base, proc, sys, out, """
+DURATION=3; MINIMAL=0; HOSTBOUND=1; DISCOVER=1; PID_LIST=
+OUTDIR="$SNAP/exports"; CAPTURE_NAME=cpu_trace_fixture
+mkdir -p "$OUTDIR"
+python3(){ printf '{' > "$6"; return 17; }
+hb_ascend_dump '%s'
+hb_manifest
+""" % ((base / 'collector.py').as_posix(),))
+            self.assertFalse(list(out.rglob('msprechecker_dumped.json*')))
+            self.assertFalse(list((out / 'exports').iterdir()))
+            row = json.loads((out / 'collection_manifest.json').read_text(encoding='utf-8'))['entries'][0]
+            self.assertEqual((row['status'], row['returncode']), ('EXECUTION_FAILED', 17))
+
     def test_environment_snapshot_collects_versions_and_explicit_process(self):
         from analyzer.analyze_cpu_trace import run_analysis
 
