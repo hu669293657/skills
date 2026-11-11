@@ -6,7 +6,7 @@
 import re
 from .diagnosis import THRESHOLDS
 from .npu_report import affinity_html, binding_html
-from .report_explanation import explanations_html, fmt
+from .report_explanation import collection_integrity_html, explanations_html, fmt
 from .report_tables import enhance_long_tables, table_script
 from .report_findings import diagnosis_overview
 from .report_sections import core_table, environment_section, resource_section
@@ -204,6 +204,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     resource_types.update(r['type'] for r in m.get('resources', {}).get('risks', []))
     primary_resource = bool(p and p['type'] in resource_types)
     A(diagnosis_overview(m, diag, sev_cn, primary_resource))
+    A(collection_integrity_html(m.get("collection_integrity", {})))
     if m.get("warnings"):
         A("<div class='warn-box'>⚠ <b>数据告警</b>：%s</div>" % esc("；".join(m["warnings"])))
     # ---------- 2. 证据总表 ----------

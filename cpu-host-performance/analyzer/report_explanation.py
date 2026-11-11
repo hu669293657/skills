@@ -94,17 +94,14 @@ def collection_actions_html(integrity):
 def collection_integrity_html(integrity):
     from .report_sections import table
     data = integrity or {}
-    ftrace, hostbound = data.get('ftrace', {}), data.get('hostbound', {})
-    out = ['<h3>采集完整性与证据清单</h3><p>ftrace：%s；事件解析：%s；丢失统计：%s。HostBound：%s；状态分布：%s。</p>' % (
-        escape(str(ftrace.get('status', 'UNKNOWN'))), escape(str(ftrace.get('parse_success', 'UNKNOWN'))),
-        escape(str(ftrace.get('loss_status', 'UNKNOWN'))), escape(str(hostbound.get('complete', 'UNKNOWN'))),
-        escape(str(hostbound.get('status_counts', {}))))]
-    out.append('<p class="note">%s</p>' % escape(str(hostbound.get('note', '未记录的采集行为不视作成功。'))))
-    out.append(table(['类别','状态','原始文件','存在/空文件','解析成功/记录数','返回码','失败原因'], [
-        [r.get('category'), r.get('status'), r.get('raw_path'), '%s / %s' % (r.get('raw_exists'), r.get('empty')),
-         '%s / %s' % (r.get('parse_success'), r.get('parsed_count')), r.get('returncode'), r.get('failure_reason')]
-        for r in data.get('entries', [])], True, title='全部采集执行记录', force=True))
-    return ''.join(out)
+    gaps = data.get('gaps', [])
+    if not gaps:
+        return ''
+    return ('<h3>采集缺项与原因</h3>'
+            '<p>共 %d 项缺失、不完整或状态未知。完整状态见 report_data.json。</p>' % len(gaps)
+            + table(['类别', '项目或原始路径', '状态', '原因'], [
+                [row['category'], row.get('item') or '—', row['status'], row.get('reason') or '未记录']
+                for row in gaps], True, title='查看采集缺项'))
 
 
 def collection_actions_md(integrity):

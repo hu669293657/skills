@@ -65,6 +65,8 @@ sudo bash scripts/cpu_trace_collect.sh --pid 12345 \
 
 采集或完整性判断时读取 [采集契约与缺失状态](references/collection_contract.md)。先核对 `metrics.collection_integrity`：ftrace 的解析/丢失与 HostBound/NPU/NUMA 的文件/语义完整性独立呈现。`collector_status` 保留采集端声明，`status` 是 Analyzer 对实际包内文件的对账结果。仅 `actions[].recollect=true` 才提供相应复采命令；解析失败先修复解析器，未打包先取回已有文件，工具缺失/权限不足先说明条件，无活动进程不要求重复采集。
 
+采集端打印能直接识别的缺项、状态和原因，结束时汇总。第1节的「采集缺项与原因」展示包内对账、ftrace 探测和资源快照子项发现的问题，包含项目或原始路径。主动跳过和无活动进程按各自状态记录。原生 Ascend Dump 子项的采集状态和原因见第6节。
+
 需要补充官方工具时，在离线分析机器根据现象生成只读工具计划（现场采集无需运行）：
 
 ```bash

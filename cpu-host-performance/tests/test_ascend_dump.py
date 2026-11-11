@@ -13,7 +13,8 @@ class AscendDumpTests(unittest.TestCase):
     def test_standalone_and_packaged_dump_have_the_same_environment_evidence(self):
         dump = {
             '_meta': {'tool': 'msprechecker_dump.py', 'schema_version': '1.2',
-                      'status': 'partial', 'collection': {'npu': {'status': 'failed'}}},
+                      'status': 'partial', 'collection': {'npu': {
+                          'status': 'failed', 'errors': ['fixture NPU read failed']}}},
             'system': {'os_release': {'PRETTY_NAME': '"Fixture Linux"'}},
             'ascend': {'runtime': {'version': '8.0.fixture', 'collection_status': 'success'},
                        'driver': {'collection_status': 'unavailable', 'reason': 'fixture missing file'}},
@@ -53,6 +54,7 @@ class AscendDumpTests(unittest.TestCase):
                     html = (output / 'hostbound_report.html').read_text(encoding='utf-8')
                     self.assertIn('/opt/ascend/libhccl.so', html)
                     self.assertIn('worker-0', html)
+                    self.assertIn('fixture NPU read failed', html)
                     self.assertEqual(metrics['parse_stats']['parsed'], 0 if source == standalone else 1)
                     self.assertFalse(metrics['binding_plan']['commands'])
             self.assertEqual(standalone.read_bytes(), raw)

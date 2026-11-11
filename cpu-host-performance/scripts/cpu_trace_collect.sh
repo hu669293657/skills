@@ -306,6 +306,15 @@ hb_manifest(){
   } > "$tmp" && mv -f -- "$tmp" "$SNAP/hostbound/collection_manifest.json"
   cp -- "$SNAP/hostbound/collection_manifest.json" "$SNAP/collection_manifest.json"
 }
+HB_COLLECTION_GAPS=0
+hb_note_gap(){
+  local status=$1 item=$2 reason=$3
+  reason=${reason//[[:cntrl:]]/ }
+  item=${item//[[:cntrl:]]/ }
+  printf '[Warn] 采集缺项 [%s] %s · %s\n' "$status" "$item" "${reason:0:240}" >&2
+  HB_COLLECTION_GAPS=$((HB_COLLECTION_GAPS+1))
+}
+
 hb_entry(){
   local category=$1 status=$2 rel=$3 reason=${4:-} rc=${5:-null} parsed=${6:-null} count=${7:-null} requested=${8:-true} command=${9:-null} command_exists=${10:-null}
   local present=false empty=null size=null source_field=""
@@ -315,6 +324,18 @@ hb_entry(){
   fi
   printf '{"category":"%s","requested":%s,"status":"%s","command":%s,"command_exists":%s,"returncode":%s,"raw_path":%s,"raw_exists":%s,"empty":%s,"size_bytes":%s,"parse_success":%s,"parsed_count":%s,"started_at":"%s","ended_at":"%s","failure_reason":%s%s}\n' \
     "$category" "$requested" "$status" "$command" "$command_exists" "$rc" "$(if [[ -n "$rel" ]]; then printf '%s' "$rel" | hb_quote; else printf null; fi)" "$present" "$empty" "$size" "$parsed" "$count" "${HB_STARTED:-$(hb_now)}" "$(hb_now)" "$(if [[ -n "$reason" ]]; then printf '%s' "$reason" | hb_quote; else printf null; fi)" "$source_field" >> "$SNAP/hostbound/collection_entries.jsonl"
+  if [[ "$requested" == true ]]; then
+    case "$status" in
+      NO_ACTIVE_PROCESS|NOT_REQUESTED) ;;
+      COLLECTED)
+        if [[ "$empty" == true ]]; then
+          hb_note_gap EMPTY_OUTPUT "$rel" 输出为空
+        elif [[ "$reason" == partial_process_snapshot:* ]]; then
+          hb_note_gap PARTIAL "$rel" "$reason"
+        fi ;;
+      *) hb_note_gap "$status" "${rel:-$category}" "${reason:-原因未记录}" ;;
+    esac
+  fi
 }
 hb_file(){
   local category=$1 source=$2 rel=$3 status=COLLECTED reason="" rc=0
@@ -333,7 +354,10 @@ hb_command(){
   HB_STARTED=$(hb_now)
   if ! command -v "$1" >/dev/null 2>&1; then hb_entry "$category" COMMAND_NOT_FOUND "$rel" "executable_not_found:$1" null null null true "$argv" false;unset HB_STARTED;return 0;fi
   if command -v timeout >/dev/null 2>&1; then timeout -k 2 15 "$@" > "$SNAP/$rel" 2>&1;else "$@" > "$SNAP/$rel" 2>&1;fi;rc=$?
-  if ((rc));then
+  # Exit 1 with "none" is a successful negative result for this query.
+  if ((rc==1)) && [[ "$1" == systemd-detect-virt && "$2" == --container && "$(< "$SNAP/$rel")" == none ]]; then
+    :
+  elif ((rc));then
     reason=$(tail -c 2000 "$SNAP/$rel");status=EXECUTION_FAILED
     [[ "$reason" == *[Pp]ermission* || "$reason" == *'not permitted'* || "$reason" == *'Access denied'* ]] && status=PERMISSION_DENIED
     [[ "$reason" == *[Uu]nsupported* || "$reason" == *'not supported'* || "$reason" == *'invalid option'* || "$reason" == *'Invalid argument'* ]] && status=UNSUPPORTED
@@ -601,15 +625,30 @@ hb_phase(){
   hb_manifest
 }
 record_trace_status(){
-  local status=$1 reason=${2:-} rel category
-  printf '%s: %s\n' "$status" "$reason" > "$SNAP/hostbound/trace_error.txt"
+  local status=$1 reason=${2:-} rel category lost=""
   if [[ "$status" == COLLECTED && ! -s "$SNAP/trace.txt" ]];then status=PARSE_FAILED;reason=empty_trace_export;fi
+  if [[ "$status" == COLLECTED && -s "$SNAP/hostbound/export_errors.txt" ]];then
+    status=EXECUTION_FAILED;reason=trace_export_incomplete_check_export_errors
+  fi
+  printf '%s: %s\n' "$status" "$reason" > "$SNAP/hostbound/trace_error.txt"
   hb_entry trace "$status" trace.txt "$reason"
   for rel in hostbound/frequency_samples.jsonl hostbound/resource_samples.jsonl hostbound/capabilities.tsv;do
     category=frequency;[[ "$rel" == *resource_samples* ]] && category=resources;[[ "$rel" == *capabilities* ]] && category=trace_capabilities
     if [[ -f "$SNAP/$rel" ]];then hb_entry "$category" COLLECTED "$rel";else hb_entry "$category" "$([[ "$status" == COLLECTED ]] && echo EXECUTION_FAILED || echo "$status")" "$rel" not_generated;fi
   done
+  if [[ -f "$SNAP/trace_overrun.txt" ]]; then
+    lost=$(< "$SNAP/trace_overrun.txt")
+    if [[ "$lost" =~ ^[0-9]+$ && "$lost" != 0 ]]; then
+      hb_note_gap LOST_EVENTS trace_overrun.txt "记录丢失或溢出 $lost 条事件"
+    elif [[ ! "$lost" =~ ^[0-9]+$ ]]; then
+      hb_entry trace_stats UNSUPPORTED trace_overrun.txt trace_loss_stats_unavailable
+    fi
+  fi
   hb_manifest
+  if ((HB_COLLECTION_GAPS)); then
+    printf '[Warn] 采集缺项摘要，共 %d 项。记录见 %s/collection_manifest.json\n' \
+      "$HB_COLLECTION_GAPS" "$SNAP" >&2
+  fi
 }
 hb_poll(){
   while [[ ! -e "$SNAP/hostbound/poll.stop" ]];do
@@ -778,7 +817,13 @@ for ev in $EVENT_LIST; do
     fi
   fi
   printf '%s\t%s\t%s\t1\t%s\t%s\n' "$ev" "$exists" "$writable" "$enabled" "$reason" >> "$CAPS"
-  (( enabled )) || warn "事件不可用: $ev ($reason)"
+  if (( ! enabled )); then
+    state=EXECUTION_FAILED
+    if (( ! exists )); then state=UNSUPPORTED
+    elif (( ! writable )); then state=PERMISSION_DENIED
+    fi
+    hb_note_gap "$state" "$ev" "$reason"
+  fi
 done
 if (( MINIMAL )); then
   exists=0; writable=0
@@ -920,7 +965,8 @@ for f in "$TRACE_DIR"/per_cpu/cpu*/stats; do
   c="${f%/stats}"; c="${c##*/}"
   cp "$f" "$SNAP/hostbound/trace_stats/$c.txt"
 done
-awk -F': *' '$1 ~ /^(overrun|commit overrun|dropped events)$/ {s+=$2} END {print s+0}' "$SNAP"/hostbound/trace_stats/cpu*.txt > "$SNAP/trace_overrun.txt"
+awk -F': *' '$1 ~ /^(overrun|commit overrun|dropped events)$/ && $2 ~ /^[0-9]+$/ {s+=$2;found=1} END {if(found)printf "%.0f\n",s}' \
+  "$SNAP"/hostbound/trace_stats/cpu*.txt > "$SNAP/trace_overrun.txt" 2>/dev/null
 printf '%s\n' "${CPU_LIST:-$(cat "$HB_SYS/devices/system/cpu/online")}" > "$SNAP/hostbound/collection_cpus.txt"
 
 cleanup

@@ -29,6 +29,35 @@ def entry(category='npu_info', status='COLLECTED', **extra):
 
 
 class IntegrityTests(unittest.TestCase):
+    def test_report_lists_missing_sources_even_when_npu_process_is_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            capture = base / 'capture'
+            hb = capture / 'hostbound'
+            hb.mkdir(parents=True)
+            (hb / 'npu_smi_info.txt').write_text('| 0 0 | 4001 | worker | 10 |\n', encoding='utf-8')
+            (hb / 'capabilities.tsv').write_text(
+                'event\texists\twritable\trequested\tenabled\treason\n'
+                'irq/irq_handler_entry\t0\t0\t1\t0\tunsupported\n'
+                'sched/sched_stat_wait\t1\t1\t0\t0\tnot_requested\n', encoding='utf-8')
+            (hb / 'resource_start.json').write_text(json.dumps({'files': {
+                '/proc/pressure/io': {'status': 'UNAVAILABLE', 'text': None}}}), encoding='utf-8')
+            (capture / 'collection_manifest.json').write_text(json.dumps({'entries': [
+                entry(),
+                entry('environment_host', 'PERMISSION_DENIED', raw_path='hostbound/environment/host/thp.txt',
+                      failure_reason='fixture_permission'),
+                entry('npu_topology', raw_path='hostbound/npu_smi_topology.txt'),
+            ]}), encoding='utf-8')
+            output = base / 'report'
+            run_analysis(str(capture), str(output), quiet=True)
+            summary = (output / 'hostbound_report.html').read_text(encoding='utf-8').split(
+                "<h2 id='sec-2'>", 1)[0]
+            self.assertIn('采集缺项', summary)
+            for expected in ('hostbound/environment/host/thp.txt', 'fixture_permission', 'NOT_INCLUDED',
+                             'irq/irq_handler_entry', '/proc/pressure/io'):
+                self.assertIn(expected, summary)
+            self.assertNotIn('sched/sched_stat_wait', summary)
+
     def test_buffer_overrun_recollection_uses_larger_per_cpu_buffer(self):
         from analyzer.collection_integrity import analyze_collection_integrity
         result = analyze_collection_integrity({'buffer_overrun': 3990000, 'buffer_overrun_known': True}, {})

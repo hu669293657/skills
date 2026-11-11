@@ -153,6 +153,12 @@ def generate(output, include_environment=True):
              ('idle','trace.txt'),('trace','trace.txt'),('resources','hostbound/resource_start.json'),('resources','hostbound/resource_end.json'),('resources','hostbound/resources/df_blocks.txt'),('resources','hostbound/resources/df_inodes.txt'),('resources','hostbound/resources/lsblk.txt')]
     environment_sources = {}
     if include_environment:
+        manifest['entries'].append({
+            'category': 'environment_host', 'requested': True,
+            'raw_path': 'hostbound/environment/host/thp.txt', 'raw_exists': False,
+            'status': 'UNSUPPORTED', 'failure_reason': '合成示例中的 THP 接口不可用',
+            'source': '/sys/kernel/mm/transparent_hugepage/enabled',
+        })
         for name, category, source, text in (
                 ('host/os_release.txt', 'environment_host', '/etc/os-release', 'PRETTY_NAME="Synthetic Linux"\n'),
                 ('host/numa_balancing.txt', 'environment_host', '/proc/sys/kernel/numa_balancing', '1\n'),

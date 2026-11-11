@@ -16,6 +16,8 @@
 
 Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、`command`（argv数组或null）、`command_exists`、`returncode`、`raw_path`（相对 cpu_trace）、`raw_exists`、`empty`、`parse_success`、`parsed_count`、`started_at`、`ended_at`、`failure_reason`、`status`。允许附加 size_bytes、PID/starttime、item_errors 等。opaque 原文没有语义解析时 parse_success/count 为null；不能将非空文件本身视为已正确解析。
 
+采集脚本向 stderr 逐项打印可检测的缺项和原因，并在结束时汇总。离线分析把缺失、解析失败、丢失统计和快照子项问题整理到 `metrics.collection_integrity.gaps`，在报告第1节显示。按选项跳过和无活动进程可在采集记录中核对。
+
 ## 环境快照
 
 | Manifest 类别 | 证据 | 范围 |

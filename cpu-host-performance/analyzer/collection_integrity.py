@@ -6,6 +6,7 @@ actually received; a parser or packaging bug never becomes a blind recapture.
 import json
 import re
 from collections import Counter
+from .evidence import capabilities, read_json
 
 from .npu_affinity import _topology
 from .npu_parser import parse_npu_info, parse_npu_mapping, parse_npu_topology
@@ -191,6 +192,42 @@ def _action(row):
             'requirements': row.get('command') or '参见该项原始命令和错误信息'}
 
 
+def _collection_gaps(snapshot, entries, actions):
+    gaps = []
+    for row in entries:
+        if row['status'] not in SUCCESS | {'NOT_REQUESTED'} and row.get('requested') is not False:
+            gaps.append({'category': row['category'], 'item': row['raw_path'],
+                         'status': row['status'], 'reason': row.get('failure_reason')})
+    for action in actions:
+        if action['category'] == 'manifest' or action['status'] == 'LOST_EVENTS':
+            gaps.append({'category': action['category'], 'item': None,
+                         'status': action['status'], 'reason': action['reason']})
+    for event, capability in capabilities(snapshot)['events'].items():
+        if capability.get('requested') is True and capability.get('enabled') is False:
+            if capability.get('exists') is False:
+                status = 'UNSUPPORTED'
+            elif capability.get('writable') is False:
+                status = 'PERMISSION_DENIED'
+            else:
+                status = 'EXECUTION_FAILED'
+            gaps.append({'category': 'ftrace 事件', 'item': event, 'status': status,
+                         'reason': capability.get('error') or '未能启用已请求的事件。'})
+    for phase in ('start', 'end'):
+        name = 'resource_%s.json' % phase
+        files = read_json(snapshot, name, {}).get('files')
+        if isinstance(files, dict):
+            for path, row in files.items():
+                if isinstance(row, dict) and row.get('status') == 'UNAVAILABLE':
+                    gaps.append({'category': name, 'item': path, 'status': 'UNAVAILABLE',
+                                 'reason': '接口缺失或不可读。'})
+        process_name = 'process_%s.json' % phase
+        errors = read_json(snapshot, process_name, {}).get('errors')
+        if isinstance(errors, list) and errors:
+            gaps.append({'category': '进程/线程快照', 'item': process_name, 'status': 'PARTIAL',
+                         'reason': '记录了 %d 条任务读取错误。明细见原始快照。' % len(errors)})
+    return gaps
+
+
 def analyze_collection_integrity(m, source_files=None):
     snapshot = m.get('snapshot', {})
     manifest, manifest_status = _manifest(snapshot)
@@ -268,5 +305,5 @@ def analyze_collection_integrity(m, source_files=None):
                           'status_counts': dict(Counter(r['status'] for r in hb)),
                           'missing_categories': sorted(set(CORE)-categories),
                           'note': 'HostBound/NPU/NUMA 完整性与 ftrace 调度完整性分别核验。COLLECTED 的 parse_success=null 表示仅保留原始数据，尚未做语义解析。'},
-            'actions': actions,
+            'actions': actions, 'gaps': _collection_gaps(snapshot, entries, actions),
             'note': 'collector_status 保留现场声明；status 为包内证据对账结果。未知值为 null，缺失工具、无活动进程、解析失败和未打包分别呈现。'}

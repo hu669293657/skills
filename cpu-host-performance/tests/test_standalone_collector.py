@@ -130,7 +130,8 @@ hb_manifest
             self.assertEqual(targets[4999]['status'], 'EXECUTION_FAILED')
             html = (report/'hostbound_report.html').read_text(encoding='utf-8')
             self.assertIn("<h2 id='sec-6'>6. 采集环境与软件栈</h2>", html)
-            self.assertNotIn('environment_ascend', html.split("<h2 id='sec-6'>", 1)[0])
+            npu_section = html.split("<h2 id='sec-2'>", 1)[1].split("<h2 id='sec-3'>", 1)[0]
+            self.assertNotIn('environment_ascend', npu_section)
             self.assertIn('Fixture &lt;Linux&gt;', html)
             self.assertIn('/opt/site lib/libhccl.so.1', html)
 
@@ -174,8 +175,9 @@ hb_manifest
         library=code.split('# BEGIN standalone evidence')[1].split('# END standalone evidence')[0]
         script=base/'library.sh'
         script.write_text(library+'\nHB_PROC="%s"; HB_SYS="%s"; SNAP="%s"\nmkdir -p "$SNAP/hostbound"\n' % (proc.as_posix(),sys.as_posix(),out.as_posix())+commands,encoding='utf-8',newline='\n')
-        result=subprocess.run([BASH,str(script)],capture_output=True,text=True,timeout=30)
+        result=subprocess.run([BASH,str(script)],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=30)
         self.assertEqual(result.returncode,0,result.stderr)
+        return result
 
     def test_v1_empty_leaf_inherits_but_missing_leaf_is_unknown(self):
         with tempfile.TemporaryDirectory() as d:
@@ -254,9 +256,12 @@ hb_command npu_info hostbound/denied.txt bash -c 'echo "Permission denied"; exit
 hb_command npu_topology hostbound/unsupported.txt bash -c 'echo "not supported"; exit 2'
 hb_manifest
 '''
-            self.run_library(base,proc,sys,out,commands)
+            result = self.run_library(base,proc,sys,out,commands)
             rows=json.loads((out/'collection_manifest.json').read_text())['entries']
             self.assertEqual([r['status'] for r in rows],['COMMAND_NOT_FOUND','PERMISSION_DENIED','UNSUPPORTED'])
+            self.assertIn('hostbound/missing.txt', result.stderr)
+            self.assertIn('COMMAND_NOT_FOUND', result.stderr)
+            self.assertIn('executable_not_found:cpu_fixture_tool_not_installed', result.stderr)
             self.assertFalse(rows[0]['raw_exists'])
             self.assertEqual(rows[1]['returncode'],13)
             self.assertIn('Permission denied',(out/'hostbound/denied.txt').read_text())

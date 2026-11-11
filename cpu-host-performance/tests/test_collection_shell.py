@@ -95,6 +95,9 @@ hb_command(){
                 if minimal:args.extend(['--minimal','--buffer-size','8192'])
                 r=self.run_bash(script,*args)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+                self.assertIn('采集缺项摘要', r.stderr)
+                self.assertIn('[LOST_EVENTS] trace_overrun.txt', r.stderr)
+                self.assertNotIn('not_requested_minimal', r.stderr)
                 snap=next(p for p in (base/'out').glob('cpu_trace_*') if p.is_dir())
                 self.assertEqual((snap/'trace_overrun.txt').read_text().strip(),'4')
                 requested = 8192 if minimal else 16384

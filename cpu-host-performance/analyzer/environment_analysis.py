@@ -185,8 +185,21 @@ def _native_environment(data):
                                            for field in TARGET_FIELDS) else 'PARTIAL'
         targets.append(row)
 
-    coverage = {name: {key: info[key] for key in ('status', 'reason') if isinstance(info.get(key), str)}
-                for name, info in _object(meta.get('collection')).items() if isinstance(info, dict)}
+    coverage = {}
+    for name, info in _object(meta.get('collection')).items():
+        if not isinstance(info, dict):
+            continue
+        reason = _text(info.get('reason'))
+        errors = info.get('errors')
+        failures = info.get('command_failures')
+        if not reason and isinstance(errors, list):
+            reason = next((error for error in errors if isinstance(error, str) and error), None)
+        if not reason and isinstance(failures, list):
+            failure = next((item for item in failures if isinstance(item, dict)), {})
+            command = failure.get('command')
+            if isinstance(command, list) and command and isinstance(command[0], str):
+                reason = '%s 执行失败，返回码 %s' % (command[0], failure.get('returncode'))
+        coverage[name] = {'status': _text(info.get('status')), 'reason': reason}
     scope = ('REQUESTED' if targets else 'NOT_REQUESTED'
              if coverage.get('workload', {}).get('status') == 'skipped' else 'UNKNOWN')
     return {'host': host, 'ascend': ascend, 'targets': targets, 'target_scope': scope}, coverage

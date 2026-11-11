@@ -45,6 +45,8 @@ sudo bash scripts/cpu_trace_collect.sh --output /tmp/cpu-case --pid 12345 \
 
 采集使用私有 `instances/cpu_host_<collector-pid>`，不清空全局 trace 或覆盖其他工具配置。tracefs/实例不支持或无权限时停止 tracing，保留已获取的只读快照、Manifest 和错误信息，可直接分析 `cpu_trace/` 降级报告。正常结束、失败和信号退出都会清理私有实例。SIGKILL/断电可能遗留实例，应由管理员核验后处理。
 
+终端的「采集缺项」会显示项目、状态和原因，采集结束时汇总。HTML 报告第1节也可查看缺项及包内对账结果，第6节保留原生 Ascend Dump 子项的状态和原因。
+
 `collection_manifest.json` 同时保存在采集根目录和 `hostbound/`。逐命令记录请求、命令存在性、返回码、原始路径/大小/空文件、解析状态/数量、起止时间和失败原因。`COLLECTED`、`NO_ACTIVE_PROCESS`、`COMMAND_NOT_FOUND`、`PERMISSION_DENIED`、`UNSUPPORTED`、`PARSE_FAILED`、`NOT_REQUESTED`、`NOT_INCLUDED` 分别呈现，额外区分执行失败。Analyzer 核对包内文件，保留 `collector_status` 并生成 `collection_integrity`。ftrace 和 HostBound 完整性分开判断，复采建议按实际原因生成；原始数据已存在时优先离线修复解析/打包。[完整契约](references/collection_contract.md)
 
 全量启用：switch、成功wakeup/wakeup_new、waking（仅作背景）、migrate、task_newtask、process_fork/exec/exit、IRQ/SoftIRQ、cpu_idle、cpu_frequency。每项探测存在、可写、请求与开启读回结果；缺失事件不致命。sched_stat_wait只探测，避免默认增加高频事件；导入已有该事件时可提供补充累计值。
