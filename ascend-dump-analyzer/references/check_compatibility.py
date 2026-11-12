@@ -111,6 +111,51 @@ def assess(actual, expected, component):
     return {'status': status, 'observed': actual, 'expected': expected}
 
 
+def best_plans(versions, matrix, scene, keep=None, required=()):
+    """Rank complete rows within one scene, optionally keeping one observed version."""
+    anchor = SCENES[scene]
+    candidates = [
+        (rule, {anchor: [rule['release']], **rule['checks'], **rule.get('host_baseline', {})})
+        for rule in matrix['rules'][scene]
+    ]
+    scoped = set().union(*(requirements for _, requirements in candidates))
+    required = set(required)
+    ranked = []
+    for rule, requirements in candidates:
+        if not requirements.keys() >= required:
+            continue
+        checks = {key: assess(versions.get(key), expected, key)
+                  for key, expected in requirements.items()}
+        if keep and checks.get(keep, {}).get('status') != 'matched':
+            continue
+        changes = {key: check for key, check in checks.items() if check['status'] == 'deviation'}
+        unknown = sum(check['status'] == 'unknown' for key, check in checks.items() if key in versions)
+        uncovered = sorted((versions.keys() & scoped) - requirements.keys())
+        rank = (len(changes), unknown + len(uncovered), anchor in changes)
+        plan = {'rule': rule['id'], 'release': rule['release'], 'checks': checks,
+                'changes': changes, 'optional': rule.get('optional', []), 'uncovered': uncovered}
+        if 'product' in rule:
+            plan['product'] = rule['product']
+        if 'package_baseline' in rule:
+            plan['package_baseline'] = rule['package_baseline']
+        ranked.append((rank, plan))
+    if not ranked:
+        return []
+    best_rank = min(rank for rank, _ in ranked)
+    return [plan for rank, plan in ranked if rank == best_rank]
+
+
+def remediation(versions, matrix, scene):
+    """Return the current release's closest rows and actionable alternatives."""
+    if not scene or SCENES[scene] not in versions:
+        return [], []
+    current = best_plans(versions, matrix, scene, keep=SCENES[scene])
+    if not current or not current[0]['changes']:
+        return current, []
+    confirmed_deviations = set.intersection(*(set(plan['changes']) for plan in current))
+    return current, best_plans(versions, matrix, scene, required=confirmed_deviations)
+
+
 def check_software(observed, matrix, scene):
     if not scene:
         return {'status': 'unknown', 'reason': '检测到多个业务栈，请指定场景。', 'checks': {}}
@@ -210,9 +255,11 @@ def main(argv=None):
                 component_support[key] = dict(
                     assess(actual, matrix['mindspeed_component_support'][key], key),
                     source=matrix['sources']['mindspeed'])
+        versions = {key: item['version'] for key, item in observed.items() if item['version']}
+        _, recommendations = remediation(versions, matrix, scene)
         result = {'scene': scene, 'scene_source': '推断' if args.scene == 'auto' else '指定',
                   'observed': observed, 'software': software, 'host': host,
-                  'component_support': component_support,
+                  'component_support': component_support, 'recommendations': recommendations,
                   'boards': check_boards(data, matrix['sources']['board'])}
         output = json.dumps(result, ensure_ascii=False, indent=2) + '\n'
         if args.output:

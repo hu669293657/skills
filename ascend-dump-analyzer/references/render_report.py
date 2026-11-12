@@ -11,19 +11,20 @@ import re
 import sys
 from urllib.parse import urlsplit
 
+from render_compatibility import render_environments
+
 
 TEMPLATES = {
     'single': 'template_single_dump.html',
     'comparison': 'template_comparison.html',
 }
 SLOT = re.compile(r'[{][{][{]([A-Z][A-Z0-9_]*)[}][}][}]|[{][{]([A-Z][A-Z0-9_]*)[}][}]')
-DERIVED = {'SCORE_OFFSET', 'SIMILARITY_WIDTH'}
+DERIVED = {'SCORE_OFFSET', 'SIMILARITY_WIDTH', 'COMPATIBILITY_LOOKUP'}
+OPTIONAL_DEFAULTS = {'VERSION_MISMATCH_BANNER': '', 'COMPATIBILITY_ENVIRONMENTS': []}
 COLORS = {'var(--' + name + ')' for name in ('ok', 'warn', 'fail', 'info', 'accent', 'ink-muted')}
 REQUIRED_BLOCKS = {
-    'single': ('NAV_ITEMS', 'ASSESSMENT_BANNER', 'META_DATA_ROWS', 'ISSUE_ITEMS',
-               'MISSING_ITEMS', 'COMPATIBILITY_ROWS'),
-    'comparison': ('NAV_ITEMS', 'ASSESSMENT_BANNER', 'SCOPE_COMPARISON_ROWS',
-                   'FINDING_BANNERS', 'COMPATIBILITY_ROWS'),
+    'single': ('NAV_ITEMS', 'ASSESSMENT_BANNER', 'MISSING_ITEMS'),
+    'comparison': ('NAV_ITEMS', 'ASSESSMENT_BANNER'),
 }
 FRAGMENT_TAGS = set('a b blockquote br code dd details div dl dt em h2 h3 h4 hr li ol p pre section small span strong summary table tbody td th thead tr ul'.split())
 VOID_TAGS = {'br', 'hr'}
@@ -60,6 +61,9 @@ class Fragment(HTMLParser):
                     or (key in ('colspan', 'rowspan') and tag in ('td', 'th')
                         and re.fullmatch(r'[1-9][0-9]{0,2}', value or ''))):
                 raise ValueError(f'{self.name}: unsupported HTML attribute {key}')
+            if (key == 'href' and not value.startswith('#')
+                    and self.name in ('COMPATIBILITY_ROWS', 'VERSION_MISMATCH_BANNER')):
+                continue
             rendered.append(f' {key}="{escape(value or "", quote=True)}"')
         self.parts.append('<' + tag + ''.join(rendered) + '>')
         if tag not in VOID_TAGS:
@@ -80,14 +84,18 @@ class Fragment(HTMLParser):
 
 
 def template_slots(template):
-    return {markup or plain: 'html' if markup else 'text'
-            for markup, plain in SLOT.findall(template) if (markup or plain) not in DERIVED}
+    slots = {markup or plain: 'html' if markup else 'text' for markup, plain in SLOT.findall(template)}
+    inputs = {name: kind for name, kind in slots.items() if name not in DERIVED}
+    if 'COMPATIBILITY_LOOKUP' in slots:
+        inputs['COMPATIBILITY_ENVIRONMENTS'] = 'json'
+    return inputs
 
 
 def render(template, mode, values):
     if not isinstance(values, dict):
         raise ValueError('slot data must be a JSON object')
     slots = template_slots(template)
+    values = {**{key: value for key, value in OPTIONAL_DEFAULTS.items() if key in slots}, **values}
     missing = slots.keys() - values.keys()
     extra = values.keys() - slots.keys()
     if missing or extra:
@@ -116,11 +124,13 @@ def render(template, mode, values):
             if fragment.stack:
                 raise ValueError(f'{name}: unclosed HTML tag <{fragment.stack[-1]}>')
             rendered[name] = ''.join(fragment.parts)
-        else:
+        elif kind == 'text':
             if value is not None and type(value) not in (str, int, float):
                 raise ValueError(f'{name}: expected a string, number or null')
-            text = '—' if value is None else str(value)
+            text = '' if value is None else str(value)
             rendered[name] = escape(text + ('%' if name == 'SIMILARITY' and value is not None else ''))
+        elif name == 'COMPATIBILITY_ENVIRONMENTS':
+            rendered['COMPATIBILITY_LOOKUP'] = render_environments(value, mode)
     return SLOT.sub(lambda match: rendered[match[1] or match[2]], template)
 
 
@@ -141,7 +151,8 @@ def main(argv=None):
         if args.list_slots:
             print(json.dumps(template_slots(template), indent=2))
             return 0
-        inputs = {path.with_name(name).resolve() for name in TEMPLATES.values()}
+        inputs = {path.with_name(name).resolve() for name in
+                  (*TEMPLATES.values(), 'compatibility_lookup.html')}
         inputs.add(args.slots.resolve())
         if args.output.suffix.lower() != '.html' or args.output.resolve() in inputs:
             raise ValueError('output must be a separate .html file')

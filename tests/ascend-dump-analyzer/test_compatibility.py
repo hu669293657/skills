@@ -11,10 +11,12 @@ SCRIPT = Path(__file__).resolve().parents[2] / 'ascend-dump-analyzer/references/
 
 
 class CompatibilityTests(unittest.TestCase):
-    def check(self, packages, cann, python='3.12.1', scene='auto', npu=None):
+    def check(self, packages, cann, python='3.12.1', scene='auto', npu=None, hdk=None):
         data = {'runtime': {'packages': {'watched': packages}, 'python_version': python},
                 'ascend': {'toolkit': cann if isinstance(cann, dict) else {'version': cann}},
                 'npu': npu or {}}
+        if hdk:
+            data['ascend']['hdk'] = {'version': hdk}
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'dump.json'
             source.write_text(json.dumps(data), encoding='utf-8')
@@ -53,6 +55,32 @@ class CompatibilityTests(unittest.TestCase):
                             [{'version': '9.2.0'}, {'version': '9.2.1'}]})
         self.assertEqual(result['software']['status'], 'unknown')
         self.assertEqual(result['software']['checks']['cann']['status'], 'unknown')
+        self.assertEqual(result['recommendations'], [])
+
+    def test_recommendation_can_change_release_to_keep_more_components(self):
+        packages = {'vllm': '0.30.0', 'vllm_ascend': '0.30.0', 'torch': '2.10.0',
+                    'torch_npu': '2.10.0.post7', 'triton_ascend': '3.2.2'}
+        result = self.check(packages, '9.2.0')
+        self.assertEqual(result['software']['checks']['cann']['status'], 'deviation')
+        self.assertEqual(result['software']['checks']['triton_ascend']['status'], 'deviation')
+        self.assertEqual(len(result['recommendations']), 1)
+        self.assertEqual(result['recommendations'][0]['changes'], {
+            'vllm_ascend': {'status': 'deviation', 'observed': '0.30.0', 'expected': ['0.30.0rc2']},
+        })
+
+    def test_recommendation_does_not_count_an_uncollected_version(self):
+        packages = {'vllm_ascend': '0.30.0', 'vllm': '0.30.0',
+                    'torch': '2.10.0', 'torch_npu': '2.10.0.post7'}
+        result = self.check(packages, '9.2.0')
+        self.assertEqual(set(result['recommendations'][0]['changes']), {'cann'})
+
+    def test_recommendation_cannot_skip_a_confirmed_hdk_mismatch(self):
+        packages = {'vllm_ascend': '0.30.0', 'vllm': '0.30.0',
+                    'torch': '2.10.0', 'torch_npu': '2.10.0.post7'}
+        result = self.check(packages, '9.2.0', hdk='26.0.0')
+        self.assertEqual(result['host']['hdk']['status'], 'deviation')
+        self.assertEqual(result['recommendations'][0]['release'], '0.30.0')
+        self.assertEqual(set(result['recommendations'][0]['changes']), {'cann', 'hdk'})
 
     def test_generic_torch_cann_range_preserves_exact_package_baseline(self):
         result = self.check({'torch': '2.14.0', 'torch_npu': '2.14.0'}, '9.2.1', '3.14')

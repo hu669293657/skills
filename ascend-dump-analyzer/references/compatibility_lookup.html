@@ -1,0 +1,108 @@
+<style>
+.compatibility-environment + .compatibility-environment { margin-top: 1.25rem; }
+.compatibility-environment .comp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  gap: 0.65rem;
+  margin-bottom: 1rem;
+}
+.compatibility-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  font: inherit;
+  text-align: left;
+  color: var(--ink-bright);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 0.9rem;
+  cursor: pointer;
+}
+.compatibility-card .comp-name { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.2rem; }
+.compatibility-card .comp-version { color: var(--accent); font: 0.85rem var(--font-mono); }
+.compatibility-card:hover { background: var(--accent-glow); }
+.compatibility-card:focus-visible, #compatibility-lookup :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.compatibility-changes { padding-inline-start: 1.25rem; }
+.compatibility-changes code { font-family: var(--font-mono); }
+.compatibility-note { color: var(--ink-muted); margin-bottom: 0.6rem; }
+.compatibility-result {
+  padding: 0.75rem 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+.compatibility-result + .compatibility-result { margin-top: 0.5rem; }
+.compatibility-result h4 {
+  color: var(--ink-bright);
+  font-size: 1rem;
+  margin-bottom: 0.4rem;
+}
+.compatibility-result p { margin-top: 0.5rem; font-size: 0.85rem; }
+.compatibility-plan { padding: 0; overflow: hidden; }
+.compatibility-plan p { padding: 0 0.75rem 0.5rem; }
+.compatibility-table { min-width: 0; table-layout: fixed; }
+.compatibility-table th, .compatibility-table td {
+  padding: 0.45rem clamp(0.4rem, 1.6vw, 0.75rem);
+  white-space: normal;
+  position: static;
+}
+.compatibility-table thead th { color: var(--ink-muted); }
+.compatibility-table thead th:first-child { width: 33%; }
+.compatibility-table thead th:nth-child(2) { width: 31%; }
+.compatibility-table tbody th { color: var(--ink); font-size: inherit; text-transform: none; }
+.compatibility-table td { font-family: var(--font-mono); }
+.compatibility-table .val-add { font-family: var(--font-body); white-space: nowrap; }
+#compatibility-lookup {
+  color-scheme: dark;
+  width: min(44rem, calc(100% - 2rem));
+  max-height: 88vh;
+  margin: auto;
+  padding: clamp(0.85rem, 3vw, 1.5rem);
+  color: var(--ink);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius);
+}
+#compatibility-lookup::backdrop { background: rgba(3, 6, 14, 0.76); }
+.compatibility-heading { display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; margin-bottom: 0.9rem; }
+.compatibility-heading h2 { font-size: 1.2rem; overflow-wrap: anywhere; }
+#compatibility-lookup button {
+  font: inherit;
+  color: var(--ink-bright);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.75rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+</style>
+<!-- COMPATIBILITY_ENVIRONMENTS -->
+<dialog id="compatibility-lookup" aria-labelledby="compatibility-title">
+  <div class="compatibility-heading">
+    <h2 id="compatibility-title"></h2>
+    <form method="dialog"><button type="submit" autofocus>关闭</button></form>
+  </div>
+  <div id="compatibility-results"></div>
+</dialog>
+<script>
+(function () {
+  const dialog = document.getElementById('compatibility-lookup');
+  const title = document.getElementById('compatibility-title');
+  const results = document.getElementById('compatibility-results');
+  dialog.closest('section').querySelectorAll('button[data-compatibility-template]').forEach(card => {
+    card.addEventListener('click', () => {
+      const content = document.getElementById(card.dataset.compatibilityTemplate).content;
+      title.textContent = card.dataset.compatibilityTitle + ' 的配套版本';
+      results.replaceChildren(content.cloneNode(true));
+      dialog.showModal();
+      dialog.scrollTop = 0;
+    });
+  });
+})();
+</script>

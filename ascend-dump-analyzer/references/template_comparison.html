@@ -40,6 +40,11 @@
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+[data-collected=""] { display: none !important; }
+.table-wrap:has(tbody):not(:has(tbody tr)),
+.sub-head:has(+ .table-wrap tbody):not(:has(+ .table-wrap tbody tr)),
+details:has(tbody):not(:has(tbody tr)) { display: none; }
+.hero .subtitle { display: flex; flex-wrap: wrap; column-gap: 1rem; }
 html { scroll-behavior: smooth; scroll-padding-top: 2rem; }
 body {
   font-family: var(--font-body);
@@ -270,9 +275,13 @@ details > .details-body { padding: 0.5rem 0; }
   <div class="hero-top">
     <div>
       <h1>Ascend 环境对比分析报告</h1>
-      <div class="subtitle">{{FILE_COUNT}} 个文件比对 · {{DIFF_COUNT}} 项差异 · 相似度 {{SIMILARITY}}</div>
+      <div class="subtitle">
+        <span data-collected="{{FILE_COUNT}}">{{FILE_COUNT}} 个文件比对</span>
+        <span data-collected="{{DIFF_COUNT}}">{{DIFF_COUNT}} 项差异</span>
+        <span data-collected="{{SIMILARITY}}">相似度 {{SIMILARITY}}</span>
+      </div>
     </div>
-    <div class="score-ring">
+    <div class="score-ring" data-collected="{{SIMILARITY}}">
       <svg width="80" height="80" viewBox="0 0 80 80" aria-hidden="true">
         <circle cx="40" cy="40" r="34" fill="none" stroke="var(--border)" stroke-width="5"/>
         <circle cx="40" cy="40" r="34" fill="none" stroke="{{SCORE_COLOR}}" stroke-width="5"
@@ -288,7 +297,7 @@ details > .details-body { padding: 0.5rem 0; }
   <!-- File pair cards: repeat for each file with VS between them -->
   {{{FILE_PAIR_CARDS}}}
 
-  <div class="sim-bar">
+  <div class="sim-bar" data-collected="{{SIMILARITY}}">
     <div class="sim-bar-head">
       <span class="label">环境相似度</span>
       <span class="value">{{SIMILARITY}} · {{DIFF_COUNT}} 项差异 · {{IDENTICAL_COUNT}} 项一致</span>
@@ -311,7 +320,7 @@ details > .details-body { padding: 0.5rem 0; }
 <!-- ===== LEGEND ===== -->
 <div class="legend">
   <div class="legend-item"><div class="legend-dot add"></div> 新增 / 升级</div>
-  <div class="legend-item"><div class="legend-dot rem"></div> 删除 / 降级 / 缺失</div>
+  <div class="legend-item"><div class="legend-dot rem"></div> 删除 / 降级</div>
   <div class="legend-item"><div class="legend-dot mod"></div> 修改</div>
 </div>
 
@@ -327,10 +336,13 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 </section>
 
-<section class="section" id="compatibility">
+<section class="section" id="ascend">
   <div class="section-head">
-    <div class="sh-title"><span class="sh-icon">⚡</span> 版本配套检查</div>
+    <div class="sh-title"><span class="sh-icon">⚡</span> Ascend 组件</div>
   </div>
+  {{{VERSION_MISMATCH_BANNER}}}
+  {{{COMPATIBILITY_LOOKUP}}}
+  <div class="sub-head" id="compatibility">版本配套检查</div>
   <div class="table-wrap">
     <table>
       <thead><tr><th>环境</th><th>检查项</th><th>实测</th><th>配套要求</th><th>结论</th><th>依据</th></tr></thead>
@@ -364,7 +376,7 @@ details > .details-body { padding: 0.5rem 0; }
 {{{SENSITIVE_SECTION}}}
 
 <!-- ===== MISSING SECTIONS (conditional) ===== -->
-<!-- Only include if some sections were not collected in either file. -->
+<!-- Use a single section with id="missing" for collection gaps across all inputs. -->
 {{{MISSING_SECTION}}}
 
 <!-- ===== DRIFT ASSESSMENT ===== -->

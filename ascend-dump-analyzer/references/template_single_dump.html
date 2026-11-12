@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ascend 环境分析报告 — {{HOSTNAME}}</title>
+<title>Ascend 环境分析报告</title>
 <style>
 :root {
   --bg-base: #0a0e1a;
@@ -40,6 +40,10 @@
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+[data-collected=""] { display: none !important; }
+.table-wrap:has(tbody):not(:has(tbody tr)),
+.sub-head:has(+ .table-wrap tbody):not(:has(+ .table-wrap tbody tr)),
+details:has(tbody):not(:has(tbody tr)) { display: none; }
 html { scroll-behavior: smooth; scroll-padding-top: 2rem; }
 body {
   font-family: var(--font-body);
@@ -260,16 +264,16 @@ details > .details-body { padding: 0.5rem 0; }
 <section class="hero" id="hero">
   <div class="hero-top">
     <div>
-      <h1>{{HOSTNAME}}</h1>
-      <div class="subtitle">Ascend 环境分析报告</div>
+      <h1>Ascend 环境分析报告</h1>
+      <div class="subtitle" data-collected="{{HOSTNAME}}">{{HOSTNAME}}</div>
       <div class="hero-meta">
-        <span>{{TIMESTAMP}}</span>
-        <span>{{DURATION}}s</span>
-        <span>Python {{PYTHON_VERSION}}</span>
-        <span>{{COLLECTION_SCOPE}}</span>
+        <span data-collected="{{TIMESTAMP}}">{{TIMESTAMP}}</span>
+        <span data-collected="{{DURATION}}">{{DURATION}}s</span>
+        <span data-collected="{{PYTHON_VERSION}}">Python {{PYTHON_VERSION}}</span>
+        <span data-collected="{{COLLECTION_SCOPE}}">{{COLLECTION_SCOPE}}</span>
       </div>
     </div>
-    <div class="score-ring">
+    <div class="score-ring" data-collected="{{HEALTH_SCORE}}">
       <svg width="80" height="80" viewBox="0 0 80 80" aria-hidden="true">
         <circle cx="40" cy="40" r="34" fill="none" stroke="var(--border)" stroke-width="5"/>
         <circle cx="40" cy="40" r="34" fill="none" stroke="{{SCORE_COLOR}}" stroke-width="5"
@@ -298,7 +302,7 @@ details > .details-body { padding: 0.5rem 0; }
 <section class="section" id="system">
   <div class="section-head">
     <div class="sh-title"><span class="sh-icon">🖥</span> 系统健康检查</div>
-    <span class="sh-count">{{SYSTEM_OK_COUNT}}/{{SYSTEM_TOTAL_COUNT}} 项正常</span>
+    <span class="sh-count" data-collected="{{SYSTEM_TOTAL_COUNT}}">{{SYSTEM_OK_COUNT}}/{{SYSTEM_TOTAL_COUNT}} 项正常</span>
   </div>
   <div class="table-wrap">
     <table>
@@ -310,11 +314,11 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 </section>
 
-<!-- ===== HARDWARE RESOURCES (conditional: 缺失时保留区块并标明状态) ===== -->
+<!-- ===== HARDWARE RESOURCES ===== -->
 <section class="section" id="hardware">
   <div class="section-head">
     <div class="sh-title"><span class="sh-icon">🧮</span> 硬件资源</div>
-    <span class="sh-count">{{HARDWARE_OK_COUNT}}/{{HARDWARE_TOTAL_COUNT}} 项</span>
+    <span class="sh-count" data-collected="{{HARDWARE_TOTAL_COUNT}}">{{HARDWARE_OK_COUNT}}/{{HARDWARE_TOTAL_COUNT}} 项</span>
   </div>
 
   <div class="sub-head">CPU / 内存概览</div>
@@ -355,11 +359,12 @@ details > .details-body { padding: 0.5rem 0; }
 <!-- ===== ASCEND COMPONENTS ===== -->
 <section class="section" id="ascend">
   <div class="section-head">
-    <div class="sh-title"><span class="sh-icon">⚡</span> Ascend 组件版本</div>
-    <span class="sh-count">{{COMPONENTS_WITH_VERSION}}/{{COMPONENTS_TOTAL}} 有版本证据</span>
+    <div class="sh-title"><span class="sh-icon">⚡</span> Ascend 组件</div>
+    <span class="sh-count" data-collected="{{COMPONENTS_TOTAL}}">{{COMPONENTS_WITH_VERSION}}/{{COMPONENTS_TOTAL}} 有版本证据</span>
   </div>
 
   {{{VERSION_MISMATCH_BANNER}}}
+  {{{COMPATIBILITY_LOOKUP}}}
 
   <div class="comp-grid">
     {{{COMPONENT_CARDS}}}
@@ -376,11 +381,11 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 </section>
 
-<!-- ===== NPU RUNTIME (conditional: 缺失时保留区块并标明状态) ===== -->
+<!-- ===== NPU RUNTIME ===== -->
 <section class="section" id="npu">
   <div class="section-head">
     <div class="sh-title"><span class="sh-icon">🧊</span> NPU 运行态</div>
-    <span class="sh-count">{{NPU_DEVICE_COUNT}} 卡</span>
+    <span class="sh-count" data-collected="{{NPU_DEVICE_COUNT}}">{{NPU_DEVICE_COUNT}} 卡</span>
   </div>
 
   {{{NPU_HEALTH_BANNER}}}
@@ -395,7 +400,7 @@ details > .details-body { padding: 0.5rem 0; }
   </div>
 
   <details>
-    <summary>设备节点权限 / 固件与驱动 / 日志目录 ({{NPU_EXTRA_COUNT}} 项)</summary>
+    <summary>设备节点权限 / 日志目录 ({{NPU_EXTRA_COUNT}} 项)</summary>
     <div class="details-body">
       <div class="table-wrap" style="margin-top:0.4rem;">
         <table>
@@ -413,7 +418,7 @@ details > .details-body { padding: 0.5rem 0; }
 <section class="section" id="env">
   <div class="section-head">
     <div class="sh-title"><span class="sh-icon">🔑</span> 环境变量分析</div>
-    <span class="sh-count">{{ENV_CRITICAL_SET}}/{{ENV_CRITICAL_TOTAL}} 关键变量</span>
+    <span class="sh-count" data-collected="{{ENV_CRITICAL_TOTAL}}">{{ENV_CRITICAL_SET}}/{{ENV_CRITICAL_TOTAL}} 关键变量</span>
   </div>
 
   {{{SENSITIVE_VAR_BANNER}}}
@@ -443,11 +448,11 @@ details > .details-body { padding: 0.5rem 0; }
   </details>
 </section>
 
-<!-- ===== SOFTWARE RUNTIME (缺失时保留章节并标注证据状态) ===== -->
+<!-- ===== SOFTWARE RUNTIME ===== -->
 <section class="section" id="runtime">
   <div class="section-head">
     <div class="sh-title"><span class="sh-icon">🧩</span> 软件运行时</div>
-    <span class="sh-count">{{RUNTIME_PKG_COUNT}} 个关键包</span>
+    <span class="sh-count" data-collected="{{RUNTIME_PKG_COUNT}}">{{RUNTIME_PKG_COUNT}} 个关键包</span>
   </div>
 
   <div class="sub-head">采集器 Python 环境与关键包</div>
