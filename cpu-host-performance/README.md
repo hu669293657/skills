@@ -2,7 +2,7 @@
 
 新增统一绑核闭环：`python3 scripts/ascend_bind.py --help`。流程为 Trace 诊断 → 现场 NPU/Rank 标签/子进程线程识别 → NUMA 计划 → journal 执行与读回 → 同负载业务 A/B + Trace 验证 → 回滚。默认只读；实际执行需显式 `--execute`。完整命令、指标 JSON 格式、状态和限制见 [绑核闭环操作说明](references/binding_workflow.md)。
 
-`bind_cpu.sh` 现在默认仅预检/预览；其 `--apply` / `--rollback` 委托同一个 Python 执行器，需要完整 Skill 目录和 Python 3.8+。原采集器仍为独立 Bash，无 Python/jq 依赖。新进程/线程或 affinity 漂移会要求重新规划，不自动追随重启 Rank；不默认改变 IRQ 或迁移内存页。
+`bind_cpu.sh` 现在默认仅预检/预览；其 `--apply` / `--rollback` 委托同一个 Python 执行器，需要完整 Skill 目录和 Python 3.8+。新进程/线程或 affinity 漂移会要求重新规划，不自动追随重启 Rank；不默认改变 IRQ 或迁移内存页。
 
 面向 openEuler / Kunpeng / Ascend 训练与推理的只读采集、离线分析与证据报告。升级保留原有入口、离线报告、NPU/NUMA亲和性与安全绑核建议，增加频率多源降级、进程线程发现、竞争候选与全核交互图。
 
@@ -32,14 +32,15 @@ sudo bash scripts/cpu_trace_collect.sh --duration 10 --cpu-list 128-159 --buffer
 
 ### 输出两个 Skill 共用的原生环境 JSON
 
-将 `ascend-dump-analyzer` 自带的 `msprechecker_dump.py` 一并复制到宿主机。该模式需要 `python3`。
+新版 `cpu_trace_collect.sh` 内置原版 `msprechecker_dump.py`。宿主机有 Python 3.7+（`python3`）时，默认采集并打包原生 JSON。基于 `importlib.metadata` 的 Python 包安装位置采集需要 Python 3.8+。
 
 ```bash
-sudo bash scripts/cpu_trace_collect.sh --output /tmp/cpu-case --pid 12345 \
-  --ascend-dump-script /path/to/msprechecker_dump.py
+sudo bash scripts/cpu_trace_collect.sh --output /tmp/cpu-case
 ```
 
-成功后输出同一前缀的 `cpu_trace_*.tar.gz` 和 `cpu_trace_*_msprechecker_dumped.json`。JSON 由原脚本以 `--filter --no-probes` 生成，内外两份原样保存。CPU 分析器接受采集包或独立 JSON，Ascend 环境分析器直接接受独立 JSON。独立文件写出失败时，可以原样取出包内的 `hostbound/environment/msprechecker_dumped.json`。
+原生采集成功后，压缩包内的路径为 `<采集目录名>/hostbound/environment/msprechecker_dumped.json`。同目录的独立 JSON 命名为 `cpu_trace_*_msprechecker_dumped.json`，内容与包内一致。原版脚本使用 `--filter --no-probes`，可通过 `--pid 12345` 补充业务进程环境。CPU 分析器接受采集包或独立 JSON，Ascend 环境分析器接受独立 JSON 或从包中解出的原始 JSON。
+
+终端打印包内路径。独立副本写出失败时可从包内提取原始 JSON。原生采集失败时，可在终端和 Manifest 的 `environment_dump` 记录中查看原因。`--no-ascend-dump` 跳过原生采集，`--ascend-dump-script PATH` 指定替代的原版采集器。`--no-hostbound` 模式通过显式指定原版脚本路径开启原生采集。
 
 `--hostbound` 和 `--discover` 保留兼容，正常完整采集无需添加。`--minimal` 是主动选择的事件精简模式，并不关闭常规安全快照。每次在指定输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/` 及同名 tar.gz；可连续重复执行，不覆盖旧数据。默认 sysfs 轮询1秒，最小0.2秒；每个 policy 读取一次。默认 buffer 为 16384 KiB/CPU，256 个 CPU 约 4 GiB；请求值和内核读回值记录在采集元数据中。实际内核占用、文字导出大小和全机线程快照耗时需现场核验。30秒是 trace 业务窗口，完整命令还包括前后快照及打包时间。
 

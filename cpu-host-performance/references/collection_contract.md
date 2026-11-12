@@ -5,7 +5,7 @@
 ## 数据链
 
 1. `cpu_trace_collect.sh` 每次原子创建带时间及随机后缀的独立采集目录，再保留只读快照、创建私有 trace instance；tar.gz与目录同名。
-2. 默认采集由同一个 sh 内的 Bash/awk 函数逐命令和接口记录状态，标准化 sysfs、proc、cgroup 和身份。可选原生 Dump 由独立 Python 采集器生成。
+2. Bash/awk 函数逐命令和接口记录状态，标准化 sysfs、proc、cgroup 和身份。默认原生 Dump 由同一 sh 内置的原版 Python 采集器生成。
 3. NPU 三个原始命令保存在 `hostbound/npu_smi_info{_start,}.txt`、`npu_smi_map.txt`、`npu_smi_topology.txt`，离线分析时由 `analyzer/npu_parser.py` 解析，采集端保留原文与返回码，不依赖 Python 生成 NPU 规范化副本。显式保留解析错误，不能把格式变化解释成没有任务。
 4. `hostbound/numa_topology.json` 与 `hostbound/sysfs/node/nodeN/{cpulist,distance,meminfo}` 保存 NUMA 降级证据；lscpu、lscpu 扩展/可解析输出、numactl、numastat 保留原文。
 5. `process_start/end.json` 保留所有可读进程与线程；所有进程保留 NUMA 页汇总，指定目标另保存 NUMA 原始文件与 numastat -p。`frequency_start/end.json`、`frequency_samples.jsonl` 和 `idle_start/end.json` 是各自的 sysfs 来源。
@@ -25,7 +25,7 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 | `environment_host` | `host/*.txt` | `os-release`、`uname`、THP、NUMA balancing、swappiness、overcommit_memory、内核时钟源 |
 | `environment_ascend` | `ascend/*.txt` | `/usr/local/Ascend` 常见安装位置的驱动、CANN Toolkit/Runtime/Compiler、HCCL、OPP、ATB、MindIE 版本文件 |
 | `environment_process` | `pid_<TGID>.json` | 显式 `--pid` 指定的目标。记录 PID、starttime、可执行文件、启动变量、已映射的共享库和进程资源限额 |
-| `environment_dump` | `msprechecker_dumped.json` | 显式 `--ascend-dump-script` 调用原生采集器。独立文件位于输出目录，命名为 `<采集目录名>_msprechecker_dumped.json` |
+| `environment_dump` | `msprechecker_dumped.json` | 默认调用内置原版采集器。包内位于 `hostbound/environment/`，独立文件位于输出目录，命名为 `<采集目录名>_msprechecker_dumped.json` |
 
 宿主机文件路径记录在 Manifest 的 `source` 中，命令来源记录在 `command` 中。组件路径缺失时只记录该候选路径的状态。自定义安装路径或容器内安装版本需用对应环境的独立证据核对。宿主机安装版本与进程实际映射的库路径含义不同。
 
@@ -36,6 +36,8 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 原生 Dump 的包内副本与独立 JSON 逐字节一致，使用原版采集器的 `_meta.tool`、`_meta.schema_version`、`_meta.collection` 及证据字段。CPU 分析器按内容识别独立文件，按 `hostbound/environment/msprechecker_dumped.json` 读取包内文件。第6节展示原生采集状态及用于 CPU 诊断的环境字段，原生全量证据保留在原始 JSON 中。默认 Bash 快照及其来源保留在包中。原生文件缺失、解析失败或未生成时，继续使用 Bash 快照。
 
 原生采集在 ftrace 前以 `--filter --no-probes` 执行。缺少 Python 时，`environment_dump` 记录 `COMMAND_NOT_FOUND`。脚本不可读或执行失败时记录 `EXECUTION_FAILED`。已有 Bash 或 trace 证据仍可分析。独立 JSON 采用与 CPU 包相同的唯一前缀，便于在两个 Skill 间对应同一批取证。
+
+原版采集器更新后，在完整仓库中的 CPU Skill 根目录运行 `python3 scripts/update_ascend_dump_bundle.py` 同步内置版本。同步脚本用于维护发行文件。现场分发新版 `cpu_trace_collect.sh` 即可。
 
 ## 状态及行动
 

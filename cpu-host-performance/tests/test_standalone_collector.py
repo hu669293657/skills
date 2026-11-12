@@ -47,6 +47,37 @@ def fixture(base):
 
 
 class StandaloneTests(unittest.TestCase):
+    def test_bundled_collector_matches_the_native_source(self):
+        import base64
+        import gzip
+
+        source = REPO.parent / 'ascend-dump-analyzer/references/msprechecker_dump.py'
+        if not source.is_file():
+            self.skipTest('Ascend Dump source is only present in the full repository')
+        shell = (REPO / 'scripts/cpu_trace_collect.sh').read_text(encoding='utf-8')
+        payload = shell.split("<<'MSPRECHECKER_PAYLOAD'\n", 1)[1].split('\nMSPRECHECKER_PAYLOAD\n', 1)[0]
+        self.assertEqual(gzip.decompress(base64.b64decode(payload)),
+                         source.read_bytes().replace(b'\r\n', b'\n'))
+
+    def test_missing_python_is_reported_when_using_bundled_collector(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            proc, sys, out = fixture(base)
+            result = self.run_library(base, proc, sys, out, """
+DURATION=3; MINIMAL=0; HOSTBOUND=1; DISCOVER=1; PID_LIST=
+warn(){ printf '%s\n' "$*"; }
+command(){
+  if [[ "$1 $2" == '-v python3' ]]; then return 1; fi
+  builtin command "$@"
+}
+hb_ascend_dump ''
+hb_manifest
+""")
+            row = json.loads((out / 'collection_manifest.json').read_text(encoding='utf-8'))['entries'][0]
+            self.assertEqual((row['status'], row['failure_reason']), ('COMMAND_NOT_FOUND', 'python3_not_found'))
+            self.assertIn('msprechecker_dumped.json', result.stderr)
+            self.assertFalse(list(out.rglob('msprechecker_dumped.json')))
+
     def test_native_dump_is_exported_and_packaged_without_rewriting(self):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
@@ -286,8 +317,9 @@ hb_manifest
             self.assertEqual(json.loads((out/'hostbound/frequency_start.json').read_text())['policies'][0]['scaling_cur_freq'],2400000)
             self.assertEqual(json.loads((out/'hostbound/idle_start.json').read_text())['states'][0]['time'],2000)
 
-    def test_only_sh_file_full_capture_and_offline_report(self):
+    def test_only_sh_file_full_capture_packs_native_dump_and_analyzes_offline(self):
         import tarfile
+        from sys import executable
         from analyzer.analyze_cpu_trace import run_analysis
         with tempfile.TemporaryDirectory() as d:
             base=Path(d);proc,sys,out=fixture(base)
@@ -300,8 +332,9 @@ hb_manifest
             put(template,'per_cpu/cpu32/stats','entries: 2\noverrun: 0\ndropped events: 0\n')
             put(proc,'sys/kernel/random/boot_id','fixture-boot')
             tools=base/'bin'
-            for name in ('python','python3','jq'):
+            for name in ('python','jq'):
                 put(tools,name,'#!/bin/bash\ntouch "%s"\nexit 99\n' % (base/'forbidden-runtime').as_posix())
+            put(tools, 'python3', '#!/bin/bash\nexec "%s" -X utf8 -B "$@"\n' % Path(executable).as_posix())
             put(tools,'npu-smi','''#!/bin/bash
 if [[ "$*" == 'info -t topo' ]]; then printf 'NPU CPU Affinity\nNPU0 X 32-63\n'
 elif [[ "$*" == 'info -m' ]]; then printf 'NPU ID Physical ID\n0 0\n'
@@ -332,6 +365,8 @@ rmdir(){ :; }
             capture=next(p for p in out.glob('cpu_trace_*') if p.is_dir())
             manifest=json.loads((capture/'collection_manifest.json').read_text())
             self.assertEqual([r for r in manifest['entries'] if r['category']=='trace'][-1]['status'],'COLLECTED')
+            dump_entry = next(row for row in manifest['entries'] if row['category'] == 'environment_dump')
+            self.assertEqual(dump_entry['status'], 'COLLECTED')
             self.assertTrue((capture/'hostbound/process_end.json').exists())
             self.assertTrue((capture/'hostbound/resource_end.json').exists())
             self.assertTrue((capture/'hostbound/resource_samples.jsonl').exists())
@@ -341,9 +376,23 @@ rmdir(){ :; }
             with tarfile.open(archive) as package:
                 self.assertIn(capture.name+'/hostbound/frequency_samples.jsonl',package.getnames())
                 self.assertIn(capture.name+'/hostbound/environment/host/kernel.txt',package.getnames())
+                with package.extractfile(capture.name+'/hostbound/environment/msprechecker_dumped.json') as dump:
+                    packed = dump.read()
+                self.assertNotIn(capture.name+'/hostbound/environment/.msprechecker_dump.py', package.getnames())
+            self.assertEqual(json.loads(packed)['_meta']['tool'], 'msprechecker_dump.py')
+            self.assertEqual(packed, (out/(capture.name+'_msprechecker_dumped.json')).read_bytes())
+            check = REPO.parent / 'ascend-dump-analyzer/references/check_compatibility.py'
+            if check.is_file():
+                extracted = base / 'msprechecker_dumped.json'
+                extracted.write_bytes(packed)
+                compatibility = subprocess.run(
+                    [executable, '-X', 'utf8', '-B', str(check), str(extracted),
+                     '--output', str(base / 'compatibility.json')],
+                    capture_output=True, text=True, encoding='utf-8', timeout=30)
+                self.assertEqual(compatibility.returncode, 0, compatibility.stderr)
             run_analysis(str(archive),str(base/'report'),quiet=True)
             metrics=json.loads((base/'report/report_data.json').read_text(encoding='utf-8'))['metrics']
-            self.assertEqual(metrics['environment']['target_scope'], 'NOT_REQUESTED')
+            self.assertEqual(metrics['environment']['native_dump']['capture_status'], 'COLLECTED')
             self.assertIn('taskset -apc 32-63 4001',metrics['npu_affinity']['commands'],str(metrics['npu_affinity']))
             self.assertNotIn(' 4002',metrics['npu_affinity']['commands'])
             self.assertEqual(metrics['binding_plan']['commands'],'taskset -apc 32-63 4001')

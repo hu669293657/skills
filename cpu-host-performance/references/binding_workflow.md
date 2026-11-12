@@ -2,7 +2,7 @@
 
 ## 入口与环境
 
-现场采集仍只需 `cpu_trace_collect.sh`，无 Python/jq。闭环执行需要把完整 Skill 目录复制到 Linux 宿主机，使用 Python 3.8+ 标准库；入口为 `python3 scripts/ascend_bind.py --help`。离线分析和业务 A/B 文件比较可在 Windows 执行；现场 discovery、apply、audit、rollback 仅支持 Linux。
+现场采集分发 `cpu_trace_collect.sh`，原生 Ascend Dump 使用宿主机的 `python3`。闭环执行需要把完整 Skill 目录复制到 Linux 宿主机，使用 Python 3.8+ 标准库。入口为 `python3 scripts/ascend_bind.py --help`。离线分析和业务 A/B 文件比较可在 Windows 执行。现场 discovery、apply、audit、rollback 支持 Linux。
 
 此流程继承在用“通用绑核脚本”的显式拓扑与 ACL/release 识别思路，采用 v2 包的默认预览、全局设备池、journal 与读回思路；没有照搬固定 Main/ACL/Release 核数、按显存只选一个 PID、自动内存迁移或仅 TID 出生时间回滚。训练设计中的 Rank 和 DataLoader 进程树已经接入现场发现；启动训练的 rank wrapper 与模型业务指标采集仍由业务负责，本工具不启动训练或猜测业务日志格式。
 

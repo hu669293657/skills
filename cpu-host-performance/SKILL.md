@@ -13,7 +13,7 @@ description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，�
 
 ## 绑核闭环入口
 
-涉及绑核优化、Rank、执行、性能验证或恢复时，先读 [闭环操作与数据契约](references/binding_workflow.md)。统一入口为 `python3 scripts/ascend_bind.py`，执行器要求 Linux 宿主机、完整 Skill 目录、Python 3.8+；现场采集的单 Bash 无 Python 契约保持。
+涉及绑核优化、Rank、执行、性能验证或恢复时，先读 [闭环操作与数据契约](references/binding_workflow.md)。统一入口为 `python3 scripts/ascend_bind.py`，执行器要求 Linux 宿主机、完整 Skill 目录和 Python 3.8+。
 
 1. **Trace 诊断**：用原入口采集/分析稳定业务窗口，保留原包与 report_data.json；按下文证据规则区分 Host 风险与已确认 HostBound。诊断允许数据不足，执行计划不允许填补未知身份/拓扑。
 2. **识别与计划**：`plan --report-data ... --pid ROOT_PID --output plan.json` 只读发现占卡主 PID、白名单 Rank 标签及主进程的全部线程，逐 TID 核对 cpuset。预览脚本用 `--main-pid` 指定确切的占卡主 PID。LOCAL_RANK/visible devices 仅作标签，不推断全局 NPU；同进程多卡且池不同则阻断。名称仅作角色线索。输出 plan 后查看所有 workers/actions/pools/warnings。
@@ -48,20 +48,19 @@ description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，�
 sudo bash scripts/cpu_trace_collect.sh
 ```
 
-采集必须在物理机/宿主机运行。默认采集只需复制 `scripts/cpu_trace_collect.sh` 一个文件，使用 Linux、Bash 4+、awk 和常见核心工具。`npu-smi`、lscpu、numactl、numastat、pstree 等按能力探测，缺失或权限不足分别记入 Manifest。可选原生 Ascend Dump 需要 Python 3 和原版采集脚本。离线分析需要 Python，现场闭环执行需要完整 Skill 与 Python 3.8+。
+采集必须在物理机/宿主机运行。现场只需复制新版 `scripts/cpu_trace_collect.sh` 一个文件。CPU 采集使用 Linux、Bash 4+、awk 和常见核心工具。原生 Ascend Dump 使用宿主机的 Python 3.7+ 运行内置原版采集器。`npu-smi`、lscpu、numactl、numastat、pstree 等按能力探测，缺失或权限不足分别记入 Manifest。
 
 默认 3 秒、全量安全 ftrace、HostBound、全部进程/线程前后快照、NPU 原始表、CPU/NUMA/IRQ/频率/Idle/cgroup/NUMA 页分布，并记录机器资源原始快照。资源快照覆盖 CPU、内存/换页/OOM、磁盘容量/inode/I/O 和 PSI，任务 cgroup 快照补充 CPU/内存/PID 限额。默认 `--buffer-size 16384` KiB/CPU，实测丢失时按该配置重采并对比丢失计数。进程快照记录 PPID、TGID、TID、starttime、namespace、逐线程有效 cpuset 与 NUMA 页汇总，便于离线发现 AI 主进程、子进程和线程。`--duration` 调整时长，`--pid` 增加明确宿主机根 TGID 并保存其 NUMA 原始文件；`--hostbound`/`--discover` 为兼容参数。`--no-hostbound` 关闭进程/NPU采集；`--minimal` 仅精简 ftrace 事件，保留安全快照和低频轮询。每次在输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/`，压缩包同名；重复执行不会覆盖旧数据，也不要求用户换目录。
 
 环境快照在 ftrace 开始前采集。默认读取操作系统、内核参数和 Ascend 常见安装目录的组件版本。沿用 `--pid PID[,PID]` 追加明确的宿主机进程环境，读取前后核对 starttime，只保留经过键名和值格式筛选的启动变量。目标进程以其自身的 `/proc/<PID>` 证据为准，采集器环境不可替代。环境采集范围见 [采集契约](references/collection_contract.md#环境快照)。
 
-需要与 `ascend-dump-analyzer` 共用环境数据时，将其原版 `references/msprechecker_dump.py` 复制到宿主机并显式启用双产物采集。
+默认命令会生成两个 Skill 共用的原生环境快照。用 `--pid` 补充指定业务进程的环境。
 
 ```bash
-sudo bash scripts/cpu_trace_collect.sh --pid 12345 \
-  --ascend-dump-script /path/to/msprechecker_dump.py --output /tmp/cpu-case
+sudo bash scripts/cpu_trace_collect.sh --pid 12345 --output /tmp/cpu-case
 ```
 
-成功后交付同目录下的 `cpu_trace_*.tar.gz` 和独立 `cpu_trace_*_msprechecker_dumped.json`。后者由原版脚本生成，与包内副本逐字节相同，保留原生 schema、字段和采集状态。原生脚本按 `--filter --no-probes` 在 ftrace 前运行，启用 HostBound 时把明确指定的 PID 转成 `--target pid-<PID>=<PID>`。两种 Skill 共用原生 JSON，CPU 报告中的 `report_data.json` 继续作为分析结果。独立文件写出失败时，从采集包或目录原样取出 `hostbound/environment/msprechecker_dumped.json`。原生采集失败时保留 Manifest 状态及 CPU 侧证据。
+原生采集和打包成功时，`cpu_trace_*.tar.gz` 包含 `<采集目录名>/hostbound/environment/msprechecker_dumped.json`。输出目录中的独立副本为 `cpu_trace_*_msprechecker_dumped.json`，与包内内容逐字节一致。独立副本写出失败时，从包内提取原始 JSON 交给 `ascend-dump-analyzer`。原版采集器在 ftrace 前使用 `--filter --no-probes`，并将启用 HostBound 时显式指定的 PID 转成 `--target pid-<PID>=<PID>`。缺少 `python3` 或原生采集失败时，终端和 Manifest 记录 `environment_dump` 的失败原因，CPU 采集仍可完成。`--no-ascend-dump` 跳过原生采集，`--ascend-dump-script PATH` 可指定原版脚本路径。`--no-hostbound` 模式需要显式指定该路径才会采原生 Dump。
 
 采集或完整性判断时读取 [采集契约与缺失状态](references/collection_contract.md)。先核对 `metrics.collection_integrity`：ftrace 的解析/丢失与 HostBound/NPU/NUMA 的文件/语义完整性独立呈现。`collector_status` 保留采集端声明，`status` 是 Analyzer 对实际包内文件的对账结果。仅 `actions[].recollect=true` 才提供相应复采命令；解析失败先修复解析器，未打包先取回已有文件，工具缺失/权限不足先说明条件，无活动进程不要求重复采集。
 
