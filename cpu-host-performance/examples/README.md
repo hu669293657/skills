@@ -1,5 +1,7 @@
 # 示例报告
 
+`custom_binding_assessment.json` 是离线定制规划器的**合成格式示例**，不代表真实服务器。运行 `python3 scripts/plan_custom_binding.py --input examples/custom_binding_assessment.json --output /tmp/binding_proposal.json`（从Skill根目录）仅输出建议；现场使用前替换全部拓扑、身份、负载和来源字段，按 [规划契约](../references/custom_binding.md) 核验。
+
 `sample_report.html` 是分析器端到端生成的 6 节离线报告。`sample_bind_cpu.sh` 是同份合成数据生成的绑核脚本。示例中的 PID 仅用于阅读和验证。
 
 演示构造 8 张 NPU、PID 4000–4007 和 8 组 CPU Affinity；NUMA、SMT、线程 allowed CPU、PSR、boot_id 与 trace 均为显式构造的演示数据，不代表客户当前运行状态，示例命令不能直接用于真实业务。

@@ -77,3 +77,6 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 展示契约：HTML每类明细最多100条，完整指标和原始证据保留于report_data.json。截断只发生在渲染层；2.3不生成逐PID全部线程亲和证据表。第4节用一张图展示最可能影响任务的资源占用与压力。资源速率依赖同钟不同时间点与非回退计数，缺失显示N/A；MemAvailable不能用MemFree替代，磁盘分区与整盘不累加，短窗口及磁盘busy%本身不证明资源瓶颈。
 
 HTML与JSON/绑核脚本直接生成，不再生成MD报告。2.3不展示逐卡原始证据展开区或建议CPU/NUMA占位。第三节metrics.binding_plan包含完整AI对象清单、命令、待核验原因和Bash脚本；展示最多100条，完整脚本/JSON不截断。
+## 定制绑核的补充网络证据
+
+涉及NIC/IRQ隔离时读取 [custom_binding.md](custom_binding.md)。`python3 scripts/collect_network_evidence.py --interval 5 --output network-window.json` 为完整skill目录下的只读补充采集，不改变原单文件采集器和旧包Manifest契约。保留NIC前后拓扑、PCI/NUMA/队列/MSI IRQ、requested/effective affinity、RPS/XPS、两次中断/softirq/softnet/netdev计数及读取时间、ethtool和irqbalance状态。缺失项写入该JSON的errors/status；该补充JSON需单独随原包交付，不声称已经自动进入原tar.gz或HTML。多窗口与归因/物理核校准要求见参考页。

@@ -17,7 +17,10 @@ def digest(value):
 def role(name, tid, pid):
     for pattern, label in [('acl_thread','acl'),('release_thread','release'),
                            ('hccl|nccl','collective'),('pt_data_worker|dataloader|data_loader','dataloader'),
-                           ('tokeniz','tokenizer'),('pin_memory','pin_memory')]:
+                           ('tokeniz','tokenizer'),('pin_memory','pin_memory'),
+                           ('zmqbg|hccn|hccp','communication'),('rt_recycle','release'),
+                           ('caffetaskthread','dispatch'),('monitor|plog|adx_data_dump_t|traceclientrecv|report_ras','observability'),
+                           ('^dev_|npu','device'),('vllm|python3','main' if tid==pid else 'runtime')]:
         if re.search(pattern,name,re.I):return label
     return 'main' if tid==pid else 'unknown'
 

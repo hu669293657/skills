@@ -6,7 +6,7 @@ import subprocess
 from .planner import BindError
 from .transaction import load_json
 from analyzer.npu_affinity import cpu_list
-from analyzer.npu_parser import parse_npu_info, parse_npu_topology
+from analyzer.npu_parser import parse_npu_info, parse_npu_mapping, parse_npu_topology
 
 ENV_KEYS=('RANK','LOCAL_RANK','WORLD_SIZE','LOCAL_WORLD_SIZE','GROUP_RANK',
           'ASCEND_RT_VISIBLE_DEVICES','ASCEND_VISIBLE_DEVICES','CUDA_VISIBLE_DEVICES')
@@ -180,16 +180,27 @@ class LinuxHost:
             ownership={int(k):sorted(v) for k,v in selection['workers'].items()}
             return pools,ownership
         raw_map=command(['npu-smi','info','-m'])
+        return self.decode_npu(raw_map, command(['npu-smi','info','-t','topo']),
+                               command(['npu-smi','info']), selection.get('workers',{}))
+
+    @staticmethod
+    def decode_npu(raw_map, raw_topology, raw_info, expected=None):
         if not re.search(r'Chip\s+Logic\s+ID',raw_map,re.I):raise BindError('Unrecognized npu-smi logic map header')
         ids={}
-        for line in raw_map.splitlines():
-            cells=line.replace('|',' ').split()
-            if len(cells)>=3 and all(c.isdigit() for c in cells[:3]):
-                n,c,logic=map(int,cells[:3]);key=(n,c)
-                if key in ids and ids[key]!=logic:raise BindError('Conflicting NPU logic map')
-                ids[key]=logic
+        mapping=parse_npu_mapping(raw_map)
+        if not mapping['devices']:
+            lines=raw_map.splitlines()
+            header=next((line for line in lines if re.match(r'^\s*NPU\s+ID\s+Chip\s+ID\s+Chip\s+Logic\s+ID(?:\s|$)',line,re.I)),None)
+            if header:
+                mapping['devices']=[dict(npu=int(match[1]),chip=int(match[2]),device_id=int(match[3])) for line in lines
+                                    for match in [re.match(r'^\s*(\d+)\s+(\d+)\s+(\d+)(?:\s|$)',line)] if match]
+        for row in mapping['devices']:
+            key=(row['npu'],row['chip']);logic=row['device_id']
+            if None in key or logic is None:raise BindError('Missing physical chip or labelled logic ID')
+            if key in ids and ids[key]!=logic:raise BindError('Conflicting NPU logic map')
+            ids[key]=logic
         if not ids or len(set(ids.values()))!=len(ids):raise BindError('NPU logic IDs are not unique')
-        parsed=parse_npu_topology(command(['npu-smi','info','-t','topo']))
+        parsed=parse_npu_topology(raw_topology)
         pools={}
         for row in parsed['devices']:
             key=str(row['npu'])
@@ -199,7 +210,7 @@ class LinuxHost:
             pools[key]=values
         if parsed['errors'] or set(map(int,pools))!=set(ids.values()):
             raise BindError('Incomplete/unsupported NPU topology ID dialect; use verified --topology-json')
-        info=parse_npu_info(command(['npu-smi','info']))
+        info=parse_npu_info(raw_info)
         if info['errors']:raise BindError('Unrecognized/partial NPU process table: '+str(info['errors']))
         ownership={}
         for row in info['processes']:
@@ -210,7 +221,7 @@ class LinuxHost:
             if key not in ids:raise BindError('NPU process card/chip cannot be mapped to global logic ID')
             ownership.setdefault(row['pid'],set()).add(ids[key])
         ownership={k:sorted(v) for k,v in ownership.items()}
-        for pid,npus in selection.get('workers',{}).items():
+        for pid,npus in (expected or {}).items():
             if ownership.get(int(pid))!=npus:raise BindError('Explicit worker contradicts current NPU process table')
         return pools,ownership
 

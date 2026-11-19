@@ -1,17 +1,27 @@
 ---
 name: "cpu-host-performance"
-description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，需要采集或分析 ftrace、Host 快照、系统与 Ascend 运行环境、GIL/PMU/msprof，或需要 Rank/线程识别、NUMA 感知绑核、同负载性能验证与回滚时。适用 acl_thread、release_thread、DataLoader、HCCL、IRQ、CPU affinity、调度等待、Python GIL 和 Host/Device overlap；不用于仅 NPU 算子分析、通用 Prof 比对或故障日志排错。"
+description: "Use when 需要检查 Linux 服务器 CPU 高性能模式或是否跑到最高频率（Intel、AMD、ARM、华为 A+K），或 Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，需要采集或分析 ftrace、Host 快照、系统与 Ascend 运行环境、GIL/PMU/msprof，或需要 Rank/线程识别、NUMA 感知绑核、同负载性能验证与回滚时。适用 acl_thread、release_thread、DataLoader、HCCL、IRQ、CPU affinity、调度等待、Python GIL 和 Host/Device overlap；不用于仅 NPU 算子分析、通用 Prof 比对或故障日志排错。"
 ---
 
 # HostBound 性能诊断
 
 面向 Ascend 训练/推理的 Host 侧定位与优化闭环。保留原有 ftrace 采集和离线分析能力；官方 `msProf`、`function_monitor`、`gil_tracer`、`host_analyzer` 始终作为独立外部工具管理，绝不修改或复制其源码。
 
+## 高性能模式与最高频率快查
+
+仅问「高性能开了吗 / CPU 有没有跑满频」时，按[服务器 CPU 只读核查](references/cpu_power_audit.md)走轻量分支，无需 NPU、ftrace、绑核或生成完整报告。在目标 Linux 宿主机的代表性负载下运行 `python3 scripts/cpu_power_audit.py`（可单独复制）；已有采集包先复用其中的 governor、上下限和带来源的频率样本。分别报告 OS 策略、固件策略、窗口实测及覆盖范围；不得把请求频率或单点快照当作持续满频。没有目标主机或现场数据时只给核查步骤，不在工作站代测。
+
 ## 固定交付
 
 诊断交付物为 `<output-dir>/hostbound_report.html`、`report_data.json` 和 `bind_cpu.sh`。HTML直接从指标生成，单文件、离线可打开、中文；不生成Markdown报告。默认仅诊断/规划；`bind_cpu.sh` 默认只读预检/预览，显式执行委托同一 journal 执行器。闭环实验另保存 `plan.json`、`state.json`、前后业务指标及 `verification.json`。实际绑核与自动回滚须在用户已授权的范围内，不能把本地优化 skill 的请求当作对生产主机的执行授权。
 
 ## 绑核闭环入口
+
+**定制方案优先分支**：用户要求根据服务器实际负载分核、区分推理/训练、给网卡预留CPU或处理客户其他服务时，先读 [定制CPU/NPU/NIC规划](references/custom_binding.md)。在既有采集上补齐网卡/队列/IRQ证据，按完整物理核组建立客户、系统、网络、各NPU与余量预算；核数依据实测活跃并行需求，不按总线程数或固定百分比分配。用 `scripts/plan_custom_binding.py` 输出审阅用 `binding_proposal.json`。缺数据给缺项，超额给容量冲突，不生成重叠且声称隔离的方案。推理/训练共用此skill，按业务分支选择容量与验收指标。
+
+**用户要现场专用绑核脚本时**，不要止于提案，也不要手写 `taskset -a`：读[从采集生成客户脚本](references/customer_script.md)，先用 `scripts/generate_customer_binding.py --hostbound <解包后的hostbound目录> --inspect` 盘点真实占卡 PID、全线程和非目标热点。按模板和实测预算生成 `bind_customer.sh` 和配套 `.pyz`；每 TID 默认 1 个逻辑 CPU，同一业务 PID 的全部目标合计最多 2 个，同卡多 PID 共享卡池。客户线程及设备 IRQ 只移动已核实、列入清单的对象。无真实采集只给采集方法和待填模板，不交付带假 PID/IRQ 的生产脚本。
+
+定制建议与下面现有 `plan.json` 的执行契约不同：`locality/partition` 不会自动消费定制CPU池，现有执行器也不包含IRQ/RPS/客户服务迁移。先核对最终执行目标是否与建议一致；不能以旧 `bind_cpu.sh --apply` 重新规划的结果声称已执行定制方案。名称线索与身份分开，用户列出的vllm、ZMQbg、HCCL/HCCN/HCCP、监控/日志、python3、dev_*等按参考页识别角色，仍枚举已核验主进程的全部线程。
 
 涉及绑核优化、Rank、执行、性能验证或恢复时，先读 [闭环操作与数据契约](references/binding_workflow.md)。统一入口为 `python3 scripts/ascend_bind.py`，执行器要求 Linux 宿主机、完整 Skill 目录和 Python 3.8+。
 
@@ -22,7 +32,7 @@ description: "Use when Linux/Ascend 训练或推理疑似被 Host/CPU 拖慢，�
 5. **性能验证**：同负载复采并由业务提供 before/after 指标（默认各至少3轮、每轮去热身后30样本），用 verify 比较主指标中位数和坏尾、核验 after Trace 的目标身份/affinity 及 plan_id。绑核读回只证明配置生效；无业务数据/样本不足/缺配置证据为 INCONCLUSIVE。保存实际调度、竞争和 NUMA 辅证。
 6. **恢复/保留**：收益达标且坏尾合格才建议保留；无收益/退化建议 rollback。`verify --rollback-on-fail --execute` 才授权任何非 PASS 自动恢复；`rollback --state ... --execute` 可单独恢复。记录每项恢复/退出/复用/冲突/失败；新任务继承状态无法精确还原时明确 UNTRACKED / RESTORE_INCOMPLETE。PID 重启或拓扑变化重新诊断/规划，不沿用旧身份。
 
-不默认执行 IRQ/dev 绑核、停 irqbalance、migratepages、强制内存绑定、训练启动或全局调优。有限 watch 仅审计，发现漂移/新任务即停止并恢复已跟踪项，不持续抢写框架策略。`taskset` 按 PID 枚举线程，执行器在调用前后核验身份和线程集合。
+网卡IRQ/软中断纳入定制规划，实际写入属于独立的设备变更范围；不默认执行 IRQ/dev 绑核、停 irqbalance、migratepages、强制内存绑定、训练启动或全局调优。有限 watch 仅审计，发现漂移/新任务即停止并恢复已跟踪项，不持续抢写框架策略。`taskset` 按 PID 枚举线程，执行器在调用前后核验身份和线程集合。
 
 报告采用 6 节。1 结论摘要，2 问题证据总表与根因判断，3 优化建议，4 机器资源与 CPU 总体状态，5 各核心负载，6 采集环境与软件栈。
 
@@ -126,7 +136,7 @@ CPU 分析器自动读取采集包内的原生 Dump，也接受任意文件名�
 
 采集与数据契约需要核对时读取 [v2分析说明](references/analysis_v2.md)。全量显式使用`--full`，默认低开销sysfs轮询1秒，可用`--frequency-interval 2`调整（最小0.2秒）；`--minimal`仅sched_switch，仍保留sysfs频率，不支持完整wakeup延迟。重复采集自动生成独立时间目录，不覆盖旧数据。私有trace instance不受支持时安全停止全局采集，可由客户提供已有trace或已保留的只读快照。
 
-分析后查看`hostbound_report.html`，并保留`report_data.json`（包含`metrics.binding_plan.tasks/actions/commands/script`，schema_version=2，时间秒/延迟ms/频率MHz/比例百分比；新增字段向后兼容）。HTML 每类明细最多展示100条，标明总数；长表默认收缩，搜索/排序作用于展示的前100条。全部指标、进程/线程和证据仍保留在 JSON，不因展示限制截断分析。2.3不展示逐PID全线程原始证据表，只保留判断摘要与来源。第5节展示全 CPU 图和收缩表。频率/空闲时序、线程排名和所有候选竞争重叠窗口见 JSON。
+分析后查看`hostbound_report.html`，并保留`report_data.json`（包含`metrics.binding_plan.tasks/actions/commands/script`，schema_version=2，时间秒/延迟ms/频率MHz/比例百分比；新增字段向后兼容）。HTML 每类明细最多展示100条，标明总数；长表默认收缩，搜索/排序作用于展示的前100条。全部指标、进程/线程和证据仍保留在 JSON，不因展示限制截断分析。2.3不展示逐PID全线程原始证据表，只保留判断摘要与来源。第5节直接展示 CPU 时间占比、调度活动和 CPU Frequency 三组全核图，各组默认显示全部指标，缺失项标为 N/A，核心明细表默认收起。频率/空闲时序、线程排名和所有候选竞争重叠窗口见 JSON。
 
 - 缺少cpu_frequency事件时先查看主状态与事件子状态：区分TRACE_AVAILABLE、SYSFS_AVAILABLE、STATIC_ONLY、NO_TRANSITION、UNSUPPORTED、COLLECTION_FAILED，以及NOT_REQUESTED/UNKNOWN。有效sysfs数据不能因为trace没有转换而被否定。NO_TRANSITION不表示降频，缺失不显示0MHz。
 - 频率按related_cpus策略域去重；标准接口kHz显式转MHz；时间加权平均只覆盖已知样本持续区间。低频比例仅使用cpuinfo_max_freq参考；驱动请求频率不是已经验证的实际频率。PMU未获平台语义/权限验证时保持NOT_VALIDATED，不运行或输出估算频率。

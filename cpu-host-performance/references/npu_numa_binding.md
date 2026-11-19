@@ -1,5 +1,7 @@
 # NPU、NUMA 与宿主机绑核规则
 
+按实测需求定制、网卡预留、训练/推理区别与其他客户服务预算见 [custom_binding.md](custom_binding.md)。下述既有Analyzer建议可能使用全部available核；定制方案先扣除客户/系统/网络预算并检查容量守恒，不能直接把旧建议称为完整隔离方案。
+
 实际执行、业务性能判定与恢复统一使用 [绑核闭环操作说明](binding_workflow.md) 的 `scripts/ascend_bind.py`。本页下述 taskset 为可审阅建议；报告 `bind_cpu.sh` 默认只读预览，显式执行委托 journal 入口，不再直接依次 taskset。执行器保存当前原掩码和稳定身份，失败尽力恢复；恢复不完整会明确报出。
 
 实现：`analyzer/npu_parser.py`、`npu_affinity.py`、`topology.py`；展示：`npu_report.py`。采集/Manifest 缺失处理统一见 [采集契约](collection_contract.md)。

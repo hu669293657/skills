@@ -1,5 +1,7 @@
 # Trace → Rank/线程 → NUMA → 执行 → 验证 → 回滚
 
+需要按负载、客户服务与网卡联合分配时，先走 [定制规划分支](custom_binding.md)。需要实际客户脚本时走[独立生成与执行入口](customer_script.md)。下面的实时 `plan/apply` 仍只支持 locality/partition 与主进程事务；三种格式（容量提案、冻结的客户计划、旧执行计划）不能互换。
+
 ## 入口与环境
 
 现场采集分发 `cpu_trace_collect.sh`，原生 Ascend Dump 使用宿主机的 `python3`。闭环执行需要把完整 Skill 目录复制到 Linux 宿主机，使用 Python 3.8+ 标准库。入口为 `python3 scripts/ascend_bind.py --help`。离线分析和业务 A/B 文件比较可在 Windows 执行。现场 discovery、apply、audit、rollback 支持 Linux。

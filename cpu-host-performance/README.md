@@ -1,5 +1,7 @@
 # CPU Host 性能分析 Skill
 
+按服务器负载定制CPU/NPU/网卡方案时，使用 [定制规划分支](references/custom_binding.md)：区分推理/训练，保护客户服务，按完整物理核与实测网络处理需求分配。新增 `collect_network_evidence.py` 补充只读NIC/IRQ快照，`plan_custom_binding.py` 生成审阅建议。建议JSON与下述执行计划不同，现有执行器不会自动应用定制池或IRQ/RPS设置。
+
 新增统一绑核闭环：`python3 scripts/ascend_bind.py --help`。流程为 Trace 诊断 → 现场 NPU/Rank 标签/子进程线程识别 → NUMA 计划 → journal 执行与读回 → 同负载业务 A/B + Trace 验证 → 回滚。默认只读；实际执行需显式 `--execute`。完整命令、指标 JSON 格式、状态和限制见 [绑核闭环操作说明](references/binding_workflow.md)。
 
 `bind_cpu.sh` 现在默认仅预检/预览；其 `--apply` / `--rollback` 委托同一个 Python 执行器，需要完整 Skill 目录和 Python 3.8+。新进程/线程或 affinity 漂移会要求重新规划，不自动追随重启 Rank；不默认改变 IRQ 或迁移内存页。
@@ -80,7 +82,7 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 
 第二节直接解释CPU平均利用率、单核最高利用率、上下文切换率、调度延迟P99、硬中断总占比、软中断总占比。每项有当前值、公式、关注原因、动态解读、诊断限制和可信度。阈值为可审查的经验筛选值，不是官方性能标准。
 
-第5节：默认全部CPU利用率折线；可切柱状图、NUMA、CPU范围和指标显隐。百分比、次数/秒、MHz分成独立指标组。256核全部保留，静默/未采集核心显示N/A。悬停/键盘聚焦显示数值；标记热点、均值、极值。无JS和打印使用全核静态图及表格。
+第5节默认展开 CPU 时间占比、调度活动、CPU Frequency 三张全核折线图，各组使用独立单位并默认显示全部指标。图形、NUMA 和 CPU 范围筛选同时作用于三张图，每组可独立调整指标显隐。缺失指标显示 N/A，悬停或键盘聚焦可查看各核心数值。无 JavaScript 和打印时展示三组全核静态图。
 
 第6节展示 ftrace 启动前采集的系统、内核参数和 Ascend 组件版本。用 `--pid 12345` 指定业务宿主机 PID，可同时查看该进程的启动变量、可执行文件、共享库和资源限额。来源和状态保存在 `metrics.environment`。旧包缺少此快照时显示 N/A。 [环境采集契约](references/collection_contract.md#环境快照)
 
@@ -130,6 +132,8 @@ python3 examples/generate_synthetic.py --output /tmp/cpu-synthetic-demo
 当前本地验证基于Windows/Python3.14、Git Bash和模拟/proc/sysfs/tracefs；目标openEuler22.03SP4/Kunpeng920/Ascend910B4未连接。真实事件支持、npu-smi版本、时钟对齐、驱动频率语义和采集开销仍需现场验证。
 
 ## 安全与兼容性
+
+要交付一台具体服务器的脚本（而非通用 locality 建议），使用[客户脚本生成指南](references/customer_script.md)。生成器读取采集包、容量评估和审核清单，输出可独立分发的 `bind_customer.sh` + `bind_customer.pyz`、逐线程计划与参考 JSON；不需要客户另装 Skill。旧 `bind_cpu.sh` 的行为不变。
 
 默认只读 /proc、sysfs、cgroup 和 npu-smi，诊断/plan/preview 不改 affinity。显式授权 --execute 才执行逐 TID CPU 亲和变更，并保存 journal、读回和恢复结果；IRQ、Governor、内存策略不随 CPU 实验修改，不启动训练/推理/PMU。
 

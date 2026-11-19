@@ -87,6 +87,8 @@ CPU Host HTML 报告内容提纲（本文件不是MD交付物）
 
 ## 5. CPU Core Balance（各核心负载）
 
+依次直接展示 CPU 时间占比（%）、调度活动（次/秒）和 CPU Frequency（MHz）。每组默认显示全部指标，缺失项标为 N/A。
+
 <!-- 最大核 vs 最小核对比、不均衡度；结论写明是否 IRQ affinity/绑核导致 -->
 {分析段落 + 判定}
 

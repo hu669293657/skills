@@ -23,6 +23,10 @@ class OfflineBrowserTests(unittest.TestCase):
         if not node or not Path(module).exists() or not engines:
             self.skipTest('Existing local Node/playwright Chromium unavailable (no download attempted)')
         m = sample(256)
+        m['frequency']['domains'] = [{
+            'cpus': list(range(32)), 'current_mhz': 1200,
+            'average_mhz': 1600, 'maximum_mhz': 2000,
+        }]
         with tempfile.TemporaryDirectory(prefix='cpu-report-browser-') as directory:
             report = Path(directory)/'report.html'
             report.write_text(html(m), encoding='utf-8')

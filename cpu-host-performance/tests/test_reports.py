@@ -63,8 +63,11 @@ class ReportTests(unittest.TestCase):
                 self.assertIn('core-data',h)
                 self.assertIn('core-style',h)
                 self.assertIn('core-numa',h)
-                self.assertIn('core-metrics',h)
-                self.assertIn('core-static',h)
+                self.assertNotIn('id="core-group"', h)
+                self.assertEqual(re.findall(r'data-core-group="([^"]+)"', h),
+                                 ['time', 'activity', 'frequency'])
+                self.assertEqual(h.count('class="core-static"'), 3)
+                self.assertIn('该组缺少可用数据（N/A）', h)
                 self.assertNotIn('cdn',h.lower())
                 if n==256: self.assertEqual(len(d['nodes']),8)
 
