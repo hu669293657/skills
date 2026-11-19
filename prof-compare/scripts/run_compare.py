@@ -27,6 +27,7 @@ PyPI（pip install msprof-analyze），常规在线环境无需任何额外准�
   python run_compare.py -d ./ascend_pt -bp ./gpu_trace.json --compare_only
 """
 import argparse
+import csv
 import glob
 import gzip
 import json
@@ -195,10 +196,59 @@ def run_compare(mode: str, base: str, comp: str,
 # 主流程
 # ---------------------------------------------------------------------------
 
-def msprof_input(path, stack):
+def write_op_statistic(folder, target, step):
+    from cross_trace import duration, kernel_rows
+    stats = {}
+    for row in kernel_rows(folder):
+        if step is not None and row.get("Step Id") != step:
+            continue
+        key = row["Type"], row["Accelerator Core"]
+        if (key[0] in ("", "N/A") or key[1] == "COMMUNICATION"
+                or row["Duration(us)"].strip() in ("", "N/A")):
+            continue
+        us = duration(row["Duration(us)"])
+        count, total, low, high = stats.get(key, (0, 0, us, us))
+        stats[key] = count+1, total+us, min(low, us), max(high, us)
+    with target.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["OP Type", "Core Type", "Count", "Total Time(us)", "Avg Time(us)", "Min Time(us)", "Max Time(us)"])
+        for (op, core), (count, total, low, high) in stats.items():
+            writer.writerow([op, core, count, total, total/count, low, high])
+
+
+def msprof_input(path, stack, kernel_type=False, step=None):
+    from cross_trace import gpu_file
+    from npu_source import is_main_db, npu_source
     path = Path(path)
-    if path.name == "ASCEND_PROFILER_OUTPUT" and path.is_dir():
-        return str(path.parent)
+    source = npu_source(path)
+    if source is not None:
+        # Older text exports can include an empty profiler DB. msprof picks it
+        # by filename, so give it a temporary view of just the text export.
+        need_stats = (kernel_type and source.is_dir() and (source / "kernel_details.csv").is_file()
+                      and (step is not None or not (source / "op_statistic.csv").is_file()))
+        if source.is_dir() and (need_stats or any(is_main_db(p) for p in source.glob("*.db"))):
+            root = Path(stack.enter_context(TemporaryDirectory(prefix="prof-compare-")))
+            export = root / "ASCEND_PROFILER_OUTPUT"
+            export.mkdir()
+            files = [(p, export / p.name) for p in source.iterdir() if p.suffix in (".csv", ".json")
+                     and not (need_stats and p.name == "op_statistic.csv")]
+            parent = source.parent if source.name == "ASCEND_PROFILER_OUTPUT" else source
+            files.extend((p, root / p.name) for p in parent.glob("profiler*.json"))
+            for original, dest in files:
+                try:
+                    os.link(original, dest)
+                except OSError:
+                    shutil.copyfile(original, dest)
+            if need_stats:
+                write_op_statistic(source, export / "op_statistic.csv", step)
+            return str(root)
+        if source.is_file() and path.is_dir() and any(
+                is_main_db(p) and p != source for p in source.parent.glob("*.db")):
+            return str(source)
+        if path.name == "ASCEND_PROFILER_OUTPUT" and path.is_dir():
+            return str(path.parent)
+        return str(path)
+    path = gpu_file(path) or path
     if path.is_file() and path.name.endswith(".json.gz"):
         folder = stack.enter_context(TemporaryDirectory(prefix="prof-compare-"))
         plain = Path(folder) / path.stem
@@ -209,11 +259,9 @@ def msprof_input(path, stack):
 
 
 def input_pair(comp, base):
-    from cross_trace import ascend_dir, gpu_file
-    def is_npu(path):
-        folder = ascend_dir(path)
-        return all((folder / file).is_file() for file in ("kernel_details.csv", "operator_details.csv"))
-    current, baseline = is_npu(comp), is_npu(base)
+    from cross_trace import gpu_file
+    from npu_source import npu_source
+    current, baseline = npu_source(comp), npu_source(base)
     if current and baseline:
         return "npu_npu", comp, base
     if current or baseline:
@@ -259,6 +307,10 @@ def main() -> None:
     log(f"输出目录：{output}")
 
     extra = validate_extra_args(args.compare_args)
+    step_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    step_parser.add_argument("--base_step")
+    step_parser.add_argument("--comparison_step")
+    step_args, _ = step_parser.parse_known_args(extra)
 
     required = args.host_kernel or args.npu_top_csv or args.host_aliases
     if required and args.compare_only:
@@ -281,15 +333,35 @@ def main() -> None:
             if any(t.split("=")[0] in ("--base_step", "--comparison_step") for t in extra):
                 detail["msprof_step_filter"] = True
         elif required:
-            die("需要两份单卡 NPU 文本导出，或一份 NPU 文本导出和 GPU trace")
+            die("需要两份单卡 NPU 采集，或一份 NPU 采集和 GPU JSON trace。NPU 支持 profiler 主库和文本导出。")
     except (OSError, ValueError) as exc:
         if required:
             die(str(exc))
         log(f"原始 host/kernel 明细无法生成：{exc}。继续生成原有综合报告。")
 
-    mode = ensure_msprof(allow_install=not args.skip_install)
-    with ExitStack() as stack:
-        xlsx = run_compare(mode, msprof_input(base, stack), msprof_input(comp, stack), output, extra)
+    from npu_source import npu_source
+    try:
+        sources = [npu_source(path) for path in (base, comp)]
+    except ValueError as exc:
+        die(str(exc))
+    csv_only = [src for src in sources if src and src.is_dir() and not (src / "trace_view.json").is_file()]
+    if csv_only:
+        note = "文本导出缺少 trace_view.json，msprof 综合工作表无法生成：" + "，".join(map(str, csv_only))
+        if not detail or args.compare_only:
+            die(note)
+        detail["notes"].append(note)
+        log(note + "。生成可用的 Host、Kernel 和单次执行报告。")
+        xlsx = None
+    else:
+        mode = ensure_msprof(allow_install=not args.skip_install)
+        with ExitStack() as stack:
+            try:
+                use_type = "--use_kernel_type" in extra
+                base_input = msprof_input(base, stack, use_type, step_args.base_step)
+                comp_input = msprof_input(comp, stack, use_type, step_args.comparison_step)
+            except (ValueError, OSError) as exc:
+                die(str(exc))
+            xlsx = run_compare(mode, base_input, comp_input, output, extra)
     if args.compare_only:
         log(f"--compare_only 已设置，跳过分析。结果文件：{xlsx}")
         return
@@ -298,7 +370,8 @@ def main() -> None:
     if SCRIPTS_DIR not in sys.path:
         sys.path.insert(0, SCRIPTS_DIR)
     from main_analyzer import analyze
-    analyze(xlsx, output, detail)
+    analyze(xlsx, output, detail, tuple(zip(("基准侧 NPU", "比对侧 NPU"), sources)),
+            (step_args.base_step, step_args.comparison_step))
     if detail:
         # Older bookmarks and consumers used these names for the raw comparison.
         report = Path(output) / "compare_analysis_report.html"

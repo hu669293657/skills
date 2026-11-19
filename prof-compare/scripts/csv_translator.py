@@ -133,7 +133,7 @@ def _is_header_row(row_data: list) -> bool:
     return any(h in row_str for h in KNOWN_HEADERS)
 
 
-def translate_to_chinese(wb_src, output_dir: str, host_kernel=None):
+def translate_to_chinese(wb_src, output_dir: str, host_kernel=None, kernel_wb=None):
     """将已加载的 Workbook 翻译为中文 xlsx + CSV
 
     优化：直接接收 wb_src 对象，不再重复加载 xlsx 文件。
@@ -151,7 +151,7 @@ def translate_to_chinese(wb_src, output_dir: str, host_kernel=None):
     total_rows = 0
 
     for sheet_name in wb_src.sheetnames:
-        ws_src = wb_src[sheet_name]
+        ws_src = kernel_wb[sheet_name] if kernel_wb and sheet_name in kernel_wb.sheetnames else wb_src[sheet_name]
         chinese_name = _get_chinese_sheet_name(sheet_name)
 
         ws_out = wb_out.create_sheet(title=chinese_name[:31])

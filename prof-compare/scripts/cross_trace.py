@@ -1,4 +1,4 @@
-"""Read single-rank Ascend text exports and Kineto traces. All internal times are µs."""
+"""Read single-rank Ascend and Kineto profiles. Aggregate durations are in µs."""
 import csv
 import gzip
 import json
@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
+from npu_source import db_host_spans, db_kernels, is_main_db
 
 
 @dataclass
@@ -53,11 +54,6 @@ def trace_events(path):
     return events
 
 
-def ascend_dir(path):
-    path = Path(path)
-    return path if path.name == "ASCEND_PROFILER_OUTPUT" else path / "ASCEND_PROFILER_OUTPUT"
-
-
 def gpu_file(path):
     path = Path(path)
     if path.is_file() and path.name.endswith((".json", ".json.gz")):
@@ -77,41 +73,65 @@ def gpu_file(path):
     return files[0] if files else None
 
 
-def npu_paths(path):
-    """Follow torch_to_npu start/end anchors. Never align cross-device clocks."""
-    host_paths = defaultdict(lambda: defaultdict(Metric))
-    if not path.is_file():
-        return {}, host_paths
-    events = trace_events(path)
-    lanes = defaultdict(list)
+def trace_host_spans(path):
+    """Attach each torch_to_npu device endpoint to its source span."""
+    events = trace_events(path) if path.is_file() else []
     sources, ends = {}, {}
+    flows = defaultdict(set)
     for e in events:
-        cat = e.get("cat")
-        if cat == "cpu_op" and e["ph"] == "X":
-            lanes[e["pid"], e["tid"]].append(e)
-        elif cat == "async_npu" and e.get("name") == "torch_to_npu":
+        if e.get("cat") == "async_npu" and e.get("name") == "torch_to_npu":
             key = (e["pid"], e["tid"], Decimal(str(e["ts"])))
             if e["ph"] == "s":
                 sources[e["id"]] = key
             elif e["ph"] == "f":
                 ends[e["id"]] = key
-    anchors = {}
-    for lane, ops in lanes.items():
+    for flow, (_, stream, ts) in ends.items():
+        if flow in sources:
+            flows[sources[flow]].add((str(stream), ts))
+    for e in events:
+        if e.get("cat") == "cpu_op" and e.get("ph") == "X":
+            ts = Decimal(str(e["ts"]))
+            start = int(ts * 1000)
+            yield ((e["pid"], e["tid"]), start, start + int(Decimal(str(e["dur"])) * 1000),
+                   e["name"], e.get("args", {}).get("Input Dims"), flows.get((e["pid"], e["tid"], ts), ()))
+
+
+def framework_metrics(spans, *, db, use_csv):
+    hosts, shapes = defaultdict(Metric), defaultdict(lambda: defaultdict(Metric))
+    host_paths = defaultdict(lambda: defaultdict(Metric))
+    paths = defaultdict(set)
+    lanes, intervals = defaultdict(list), defaultdict(list)
+    for idx, (lane, start, end, name, shape, links) in enumerate(spans):
+        us = duration((end - start) / 1000)
+        if not use_csv:
+            hosts[name].add(us)
+            if isinstance(shape, str) and shape:
+                shapes[name][tuple(s.strip().replace(",", "x") for s in shape.strip('"').split(";"))].add(us)
+            # Ascend operator_details subtracts nested framework work in the same
+            # process, including autograd workers. Flow anchors remain thread-local.
+            pid = int(lane) >> 32 if db else lane[0]
+            intervals[pid].append((start, end, name, idx))
+        lanes[lane].append((start, end, name, links))
+    for ops in lanes.values():
         stack = []
-        for e in sorted(ops, key=lambda e: (Decimal(str(e["ts"])), -float(e["dur"]))):
-            start = Decimal(str(e["ts"]))
-            stop = start + Decimal(str(e["dur"]))
+        for start, stop, name, links in sorted(ops, key=lambda op: (op[0], -op[1])):
             while stack and (stack[-1][0] <= start or stack[-1][0] < stop):
                 stack.pop()
-            stack.append((stop, e["name"]))
+            stack.append((stop, name))
             chain = tuple(name for _, name in stack)
-            anchors[(*lane, start)] = chain
-            host_paths[e["name"]][chain].add(float(e["dur"]))
-    result = defaultdict(set)
-    for flow, (_, stream, ts) in ends.items():
-        if sources.get(flow) in anchors:
-            result[str(stream), ts].add(anchors[sources[flow]])
-    return {k: next(iter(v)) for k, v in result.items() if len(v) == 1}, host_paths
+            host_paths[name][chain].add((stop-start)/1000)
+            for link in links:
+                paths[link].add(chain)
+    self_ns, _ = host_self_ns(intervals)
+    return (hosts, Counter({n: v / 1000 for n, v in self_ns.items()}), shapes, host_paths,
+            {k: next(iter(v)) for k, v in paths.items() if len(v) == 1})
+
+
+def kernel_rows(source):
+    if is_main_db(source):
+        yield from db_kernels(source)
+    elif (source / "kernel_details.csv").is_file():
+        yield from rows(source / "kernel_details.csv", ["Type", "Accelerator Core", "Duration(us)", "Name"])
 
 
 @dataclass
@@ -127,11 +147,13 @@ class NpuGroup:
 
 
 def read_npu(folder):
-    paths, host_paths = npu_paths(folder / "trace_view.json")
-    groups, hosts, self_us = defaultdict(NpuGroup), defaultdict(Metric), Counter()
-    host_shapes = defaultdict(lambda: defaultdict(Metric))
+    db = is_main_db(folder)
+    spans = db_host_spans(folder) if db else trace_host_spans(folder / "trace_view.json")
+    use_csv = not db and (folder / "operator_details.csv").is_file()
+    hosts, self_us, host_shapes, host_paths, paths = framework_metrics(spans, db=db, use_csv=use_csv)
+    groups = defaultdict(NpuGroup)
     steps, devices = set(), set()
-    for r in rows(folder / "kernel_details.csv", ["Type", "Accelerator Core", "Duration(us)", "Name"]):
+    for r in kernel_rows(folder):
         if r["Duration(us)"].strip() in ("", "N/A") or r["Type"] in ("", "N/A"):
             continue
         group = groups[r["Type"], r["Accelerator Core"]]
@@ -139,7 +161,10 @@ def read_npu(folder):
         group.time.add(us)
         group.symbols[r["Name"]] += 1
         ts = r.get("Start Time(us)", "").strip()
-        path = paths.get((r.get("Stream ID"), Decimal(ts))) if paths and ts not in ("", "N/A") else None
+        anchor = r.get("connection")
+        if not db and ts not in ("", "N/A"):
+            anchor = (r.get("Stream ID"), Decimal(ts))
+        path = paths.get(anchor)
         group.paths[" > ".join(path) if path else "未关联"] += 1
         inp = r.get("Input Shapes", "").strip('"').split(";")
         out = r.get("Output Shapes", "").strip('"')
@@ -157,21 +182,22 @@ def read_npu(folder):
         devices.add(r.get("Device_id", "未知"))
     if len(devices - {"未知", "N/A", ""}) > 1:
         raise ValueError("NPU 数据包含多卡，请指定单卡导出")
-    for r in rows(folder / "operator_details.csv", ["Name", "Host Self Duration(us)", "Host Total Duration(us)"]):
-        total = duration(r["Host Total Duration(us)"])
-        hosts[r["Name"]].add(total)
-        if r.get("Input Shapes"):
-            shape = tuple(s.strip().replace(",", "x") for s in r["Input Shapes"].split(";"))
-            host_shapes[r["Name"]][shape].add(total)
-        self_us[r["Name"]] += duration(r["Host Self Duration(us)"])
-    if not groups or not hosts:
-        raise ValueError("NPU kernel 或 host 数据为空")
+    if use_csv:
+        for r in rows(folder / "operator_details.csv", ["Name", "Host Self Duration(us)", "Host Total Duration(us)"]):
+            total = duration(r["Host Total Duration(us)"])
+            hosts[r["Name"]].add(total)
+            if r.get("Input Shapes"):
+                shape = tuple(s.strip().replace(",", "x") for s in r["Input Shapes"].split(";"))
+                host_shapes[r["Name"]][shape].add(total)
+            self_us[r["Name"]] += duration(r["Host Self Duration(us)"])
+    if not groups and not hosts:
+        raise ValueError(f"{folder} 中没有可读取的框架算子或 kernel 明细")
     return groups, hosts, self_us, sorted(steps), host_shapes, host_paths
 
 
 def ranked_keys(folder, groups, reference, limit=15):
     source = folder / "op_statistic.csv"
-    if source.is_file():
+    if not is_main_db(folder) and source.is_file() and groups:
         ranks = {}
         for r in rows(source, ["OP Type", "Core Type", "Count", "Total Time(us)"]):
             k = r["OP Type"], r["Core Type"]
@@ -179,12 +205,14 @@ def ranked_keys(folder, groups, reference, limit=15):
                 raise ValueError(f"op_statistic 重复分组 {k}")
             ranks[k] = Metric(int(r["Count"]), duration(r["Total Time(us)"]))
     else:
-        ranks = {k: g.time for k, g in groups.items()}
+        # op_statistic ranks device tasks; a logical communication op spans its
+        # transport/scheduling tasks and is available in execution detail only.
+        ranks = {k: g.time for k, g in groups.items() if k[1] != "COMMUNICATION"}
     ordered = sorted(ranks, key=lambda k: (-ranks[k].us, k))[:limit]
     def check(k, count, us, tolerance):
         if (k not in groups or groups[k].time.calls != count or
                 abs(groups[k].time.us - us) > tolerance):
-            raise ValueError(f"分组 {k} 的次数或总耗时与当前 rank 的 kernel_details 不符")
+            raise ValueError(f"分组 {k} 的次数或总耗时与当前 rank 的 kernel 明细不符")
     for k in ordered:
         check(k, ranks[k].calls, ranks[k].us, 0.011)
     if reference:

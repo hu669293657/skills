@@ -1,5 +1,4 @@
 """Per-implementation execution sequences for the offline report."""
-import csv
 import json
 import math
 import re
@@ -9,6 +8,8 @@ from contextlib import closing
 from decimal import Decimal
 from html import escape
 from pathlib import Path
+from cross_trace import kernel_rows
+from npu_source import is_main_db
 
 BASE_FIELDS = [
     ("名称", ""), ("类型", ""), ("加速器核", ""), ("开始时间", "ms"), ("时长", "μs"),
@@ -43,50 +44,48 @@ def ns(value):
     return int(Decimal(str(value).strip()) * 1000)
 
 
-def database(folder):
-    files = list(folder.glob("ascend_pytorch_profiler_*.db"))
-    return files[0] if len(files) == 1 else None
-
-
 def session_start(path):
-    if path is not None:
+    if path is not None and is_main_db(path):
         try:
             with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
-                return db.execute("SELECT MIN(startTimeNs) FROM SESSION_TIME_INFO").fetchone()[0]
+                return db.execute("SELECT MIN(CAST(startTimeNs AS INTEGER)) FROM SESSION_TIME_INFO").fetchone()[0]
         except sqlite3.Error:
             pass
     return None
 
 
-def clock_origin(folder, first_ns):
-    start = session_start(database(folder))
+def clock_origin(source, first_ns):
+    start = session_start(source)
     if start is None:
         return first_ns, "本侧首个 kernel"
-    rank_folder = folder.parent.parent
+    folder = source.parent
+    rank_folder = folder.parent.parent if folder.name == "ASCEND_PROFILER_OUTPUT" else folder.parent
     if re.fullmatch(r"rank_\d+", rank_folder.name):
         starts = [start]
         for peer in rank_folder.parent.glob("rank_*"):
             exports = list(peer.glob("*_ascend_pt/ASCEND_PROFILER_OUTPUT"))
             if peer != rank_folder and len(exports) == 1:
-                other = session_start(database(exports[0]))
+                candidates = [p for p in exports[0].glob("*.db") if is_main_db(p)]
+                other = session_start(candidates[0]) if len(candidates) == 1 else None
                 if other is not None:
                     starts.append(other)
         return min(starts), "同一采集目录的最早会话起点"
     return start, "本侧会话起点"
 
 
-def pmu_by_task(folder):
-    path = database(folder)
-    if path is None:
+def pmu_by_task(path):
+    if not is_main_db(path):
         return {}
-    query = """SELECT t.deviceId,t.streamId,t.taskId,t.startNs,s.value,p.value
-               FROM TASK_PMU_INFO p JOIN TASK t ON t.globalTaskId=p.globalTaskId
+    query = """SELECT p.globalTaskId,s.value,p.value
+               FROM TASK_PMU_INFO p
                JOIN STRING_IDS s ON s.id=p.name"""
     out = defaultdict(dict)
     try:
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
-            for device, stream, task, start, name, value in db.execute(query):
-                out[str(device), str(stream), str(task), start][name] = value
+            for task, name, value in db.execute(query):
+                value = number(value)
+                if value is not None:
+                    out[task][name] = value
     except sqlite3.Error:
         return {}
     return out
@@ -104,28 +103,45 @@ def csv_counters(row):
     return out
 
 
-def npu_sequences(folder):
-    with (folder / "kernel_details.csv").open(encoding="utf-8-sig", newline="") as f:
-        timed, incomplete = [], set()
-        for order, row in enumerate(csv.DictReader(f)):
-            if not clean(row.get("Name")) or not clean(row.get("Type")):
-                continue
-            if number(row.get("Start Time(us)")) is None:
-                incomplete.add((row["Type"], row["Name"]))
-                continue
-            timed.append((ns(row["Start Time(us)"]), order, row))
+def companion_counters(source):
+    """Supplement missing counters only for uniquely identified tasks of this rank."""
+    if not is_main_db(source) or not (source.parent / "kernel_details.csv").is_file():
+        return {}
+    if sum(is_main_db(p) for p in source.parent.glob("*.db")) != 1:
+        return {}
+    counters = {}
+    for row in kernel_rows(source.parent):
+        start = clean(row.get("Start Time(us)"))
+        if start and clean(row.get("Task ID")):
+            key = (row.get("Device_id"), row.get("Stream ID"), row["Task ID"], ns(start),
+                   row["Name"], row["Type"])
+            counters[key] = csv_counters(row) if key not in counters else None
+    return counters
+
+
+def npu_sequences(folder, supplement=False):
+    timed, incomplete = [], set()
+    for order, row in enumerate(kernel_rows(folder)):
+        if not clean(row.get("Name")) or not clean(row.get("Type")):
+            continue
+        if number(row.get("Start Time(us)")) is None:
+            incomplete.add((row["Type"], row["Name"]))
+            continue
+        timed.append((ns(row["Start Time(us)"]), order, row))
     series = defaultdict(list)
     origin, clock = clock_origin(folder, min((x[0] for x in timed), default=0))
     counters = pmu_by_task(folder)
+    csv_pmu = companion_counters(folder) if supplement else {}
     for start, _, r in sorted(timed, key=lambda x: (x[0], x[1])):
         key = r["Type"], r["Name"]
         if key in incomplete:
             continue  # A missing timestamp would renumber all subsequent occurrences.
         stream, task = r.get("Stream ID"), r.get("Task ID")
-        raw = counters.get((r.get("Device_id"), stream, task, start), {})
-        pmu = [raw.get(k, v) for k, v in zip(COUNTERS, csv_counters(r))]
+        raw = counters.get(r.get("globalTaskId"), {})
+        fallback = csv_pmu.get((r.get("Device_id"), stream, task, start, r["Name"], r["Type"]))
+        pmu = [raw.get(k, v) for k, v in zip(COUNTERS, fallback or csv_counters(r))]
         record = [r["Name"], r["Type"], clean(r.get("Accelerator Core")), (start-origin)/1e6,
-                  number(r.get("Duration(us)")), number(r.get("Wait Time(us)")), number(r.get("Block Num"))]
+                  number(r.get("Duration(us)")), number(r.get("Wait Time(us)")), number(r.get("Block Num", r.get("Block Dim")))]
         record.extend(clean(r.get(k)) for k in TENSORS)
         series[key].append(record + pmu + [task, stream])
     return series, clock
@@ -139,9 +155,9 @@ def make_catalog(left, right, top_types, left_clock, right_clock, reasons=None):
         for t,n in sorted(left, key=lambda k:(priority.get(k[0],len(priority)), k[0], k[1]))])
 
 
-def npu_pair(current, baseline, top_rows, alias_types):
-    left, lc = npu_sequences(current)
-    right, rc = npu_sequences(baseline)
+def npu_pair(current, baseline, top_rows, alias_types, supplement=(False, False)):
+    left, lc = npu_sequences(current, supplement[0])
+    right, rc = npu_sequences(baseline, supplement[1])
     pairs = {k:k for k in left.keys() & right.keys()}
     # An implementation can change spelling between exports. Reserve exact
     # pairs first; allow only a unique remaining match with evidence.
@@ -198,8 +214,8 @@ def gpu_occurrences(keys, buckets, status, origin):
             for group in sorted(ordered,key=lambda g:g[0][:2])]
 
 
-def gpu_pair(folder, groups, buckets, proposals, gpu_meta, top):
-    left, clock = npu_sequences(folder)
+def gpu_pair(folder, groups, buckets, proposals, gpu_meta, top, supplement=False):
+    left, clock = npu_sequences(folder, supplement)
     # A raw CUDA symbol or a complete uniquely attributable semantic operation
     # defines a sequence. Partial shape buckets cannot retain original ordinals.
     claims = defaultdict(set)

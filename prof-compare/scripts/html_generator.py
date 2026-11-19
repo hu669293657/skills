@@ -5,6 +5,7 @@
 将中间件 JSON 数据渲染为自包含的 HTML 报告。
 """
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 
@@ -81,6 +82,7 @@ def generate_html_report(results: dict, output_path: str):
 
     # Kernel
     kc = results.get('kernel_compare', {})
+    kt = results.get('kernel_type', {})
 
     # API
     api = results.get('api_compare', {})
@@ -135,6 +137,7 @@ def generate_html_report(results: dict, output_path: str):
     源文件: {meta.get('source_file', '-')} ｜ 分析时间: {meta.get('analysis_time', '-')} ｜
     Sheet 数: {meta.get('total_sheets', '-')} ｜ 分析方法: analysis_methodology.md
   </div>
+  {''.join('<p>'+escape(note)+'</p>' for note in (detail or {}).get('notes', []))}
 </div>
 
 <!-- 总体性能 -->
@@ -184,7 +187,7 @@ def generate_html_report(results: dict, output_path: str):
 <!-- 内存统计 -->
 <div class="section" id="memory">
   <div class="section-title">6. 内存统计比对 (MemoryCompareStatistic)</div>
-  {_render_memory_statistic(mem_stat) if mem_stat.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
+  {_render_memory_statistic(mem_stat) if mem_stat.get('available') else '<div class="unavailable">' + escape(mem_stat.get('reason', '该 Sheet 不存在或为空')) + '</div>'}
 </div>
 
 <!-- Kernel 比对 -->
@@ -192,7 +195,8 @@ def generate_html_report(results: dict, output_path: str):
   <div class="section-title">7. Kernel 比对 (KernelCompare)</div>
   {render_device(detail) if detail else ''}
   {render_execution(detail) if detail else ''}
-  {_render_kernel_compare(kc) if kc.get('available') else ('' if detail else '<div class="unavailable">该 Sheet 不存在或为空（仅 NPU vs NPU 场景）</div>')}
+  {_render_kernel_type(kt) if kt.get('available') else ''}
+  {_render_kernel_compare(kc) if kc.get('available') else ('' if detail or kt.get('available') else '<div class="unavailable">该 Sheet 不存在或为空（仅 NPU vs NPU 场景）</div>')}
 </div>
 
 <!-- API 比对 -->
@@ -434,6 +438,14 @@ def _render_memory_statistic(mem_stat):
         parts.append('</table>')
 
     return ''.join(parts)
+
+
+def _render_kernel_type(kt):
+    rows = ''.join(f'<tr><td>{escape(r["kernel_type"])}</td><td>{escape(r["core_type"])}</td>'
+                   f'<td>{_fmt(r["base_total"])}</td><td>{_fmt(r["comp_total"])}</td>'
+                   f'<td>{_fmt(r["diff_total"])}</td></tr>' for r in kt["top10"])
+    return ('<h3>Kernel 类型比对（按累计耗时差值排序）</h3><table><tr><th>类型</th><th>核心</th>'
+            '<th>基准 μs</th><th>比对 μs</th><th>差值 μs</th></tr>' + rows + '</table>')
 
 
 def _render_kernel_compare(kc):

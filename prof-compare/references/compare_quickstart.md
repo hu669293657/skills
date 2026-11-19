@@ -8,13 +8,14 @@ compare 支持任意两边组合：GPU vs NPU、NPU vs NPU、GPU vs GPU（同构
 
 ### NPU 数据（TorchNPU / MindSpore）
 
-目录需指定到以下任意一层级：
+可指定单卡采集目录、实际存放导出文件的目录，或直接指定单个 profiler 主库：
 
 ```text
 # TorchNPU（Text 格式）
 *_ascend_pt/
 ├── ASCEND_PROFILER_OUTPUT/
 │   ├── kernel_details.csv
+│   ├── operator_details.csv
 │   ├── op_statistic.csv
 │   └── trace_view.json
 ├── FRAMEWORK/
@@ -32,7 +33,8 @@ profiler/{rank-*}_{timestamps}_ascend_ms/
 ```
 
 - Text 与 Db 格式均可比对；同一目录两者同时存在时，工具优先使用 Db 格式
-- `--enable_api_compare` 依赖 `trace_view.json`（Text 格式）
+- `--enable_api_compare` 需要采集框架 API 事件。TorchNPU DB 从 `PYTORCH_API` 读取，文本从 `trace_view.json` 读取。`analysis.db` 是分析辅库，单独提供时缺少框架和任务明细。
+- NPU 对 NPU 可以混用两种格式。核对 DB 排名也可传 `--npu-top-csv`；单次执行按同一实现内的开始时间排序。仅有 CSV 的文本输入可以生成原始热点和执行明细，综合工作表还需对应的 trace。
 
 ### GPU 数据（torch.profiler 导出）
 

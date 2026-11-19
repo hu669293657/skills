@@ -1,5 +1,5 @@
 """公共工具函数：安全类型转换、Sheet 数据读取等"""
-from openpyxl.utils import get_column_letter
+import re
 
 
 def safe_float(value, default=0.0):
@@ -28,7 +28,7 @@ def get_sheet_data(wb, sheet_name_keyword, strip=True):
     """
     target_ws = None
     for name in wb.sheetnames:
-        if sheet_name_keyword.lower() in name.lower():
+        if re.search(rf'(?<![a-z]){re.escape(sheet_name_keyword)}(?![a-z])', name, re.I):
             target_ws = wb[name]
             break
     if target_ws is None:
@@ -36,7 +36,7 @@ def get_sheet_data(wb, sheet_name_keyword, strip=True):
     headers = []
     rows = []
     for row_idx, row in enumerate(target_ws.iter_rows(values_only=True), 1):
-        if row_idx == 1:
+        if row_idx == 1 or str(row[0]).strip().lower() in ('index', 'order id', 'top'):
             headers = [str(h).strip() if h is not None else '' for h in row]
             continue
         if strip:

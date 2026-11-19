@@ -15,12 +15,13 @@
 import os
 import sys
 import json
+import math
 import argparse
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from parsers.overall_metrics import parse as parse_overall_metrics
 from parsers.operator import parse_statistic as parse_operator_statistic
@@ -35,14 +36,29 @@ from parsers.kernel import parse_type as parse_kernel_type
 from parsers.api_compare import parse as parse_api_compare
 
 
-def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None) -> dict:
+def json_values(value):
+    """A ratio with a zero denominator is undefined in machine-readable output."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: json_values(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_values(v) for v in value]
+    return value
+
+
+def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None, npu_sources=(), steps=(None, None)) -> dict:
     """主分析流程：解析 xlsx → 生成中间件 JSON"""
     if output_dir is None:
         output_dir = os.path.dirname(os.path.abspath(xlsx_path))
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"[1/4] 加载 xlsx 文件: {xlsx_path}")
-    wb = load_workbook(xlsx_path, data_only=True, read_only=True)
+    if xlsx_path:
+        print(f"[1/4] 加载 xlsx 文件: {xlsx_path}")
+        wb = load_workbook(xlsx_path, data_only=True, read_only=True)
+    else:
+        wb = Workbook()
+        wb.remove(wb.active)
     print(f"  发现 {len(wb.sheetnames)} 个 Sheet: {wb.sheetnames}")
 
     print(f"[2/4] 逐 Sheet 解析并提取关键数据...")
@@ -85,14 +101,24 @@ def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None) -> dict:
     print("  - MemoryCompare 内存明细...")
     top_mem_names = [o['name'] for o in mem_stat.get('top10', [])] if mem_stat.get('available') else None
     results['memory_compare'] = parse_memory_compare(wb, top_mem_names)
+    if mem_stat.get('available') or results['memory_compare'].get('available'):
+        from npu_source import has_operator_memory
+        missing = [label for label, source in npu_sources if source and not has_operator_memory(source)]
+        if missing:
+            reason = '、'.join(missing) + '缺少算子内存分配记录，无法计算两侧的内存差异。'
+            for key in ('memory_statistic', 'memory_compare'):
+                if results[key].get('available'):
+                    results[key] = dict(sheet_name=results[key]['sheet_name'], available=False, reason=reason)
 
     # 9. KernelCompare
     print("  - KernelCompare Kernel比对...")
-    results['kernel_compare'] = parse_kernel_compare(wb)
+    from kernel_sheets import reconcile_kernel_sheets
+    kernel_wb = reconcile_kernel_sheets(wb, [p for _, p in npu_sources], steps)
+    results['kernel_compare'] = parse_kernel_compare(kernel_wb if "KernelCompare" in kernel_wb.sheetnames else wb)
 
     # 10. KernelTypeCompare
     print("  - KernelTypeCompare Kernel类型比对...")
-    results['kernel_type'] = parse_kernel_type(wb)
+    results['kernel_type'] = parse_kernel_type(kernel_wb if "KernelTypeCompare" in kernel_wb.sheetnames else wb)
 
     # 11. ApiCompare
     print("  - ApiCompare API比对...")
@@ -103,7 +129,7 @@ def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None) -> dict:
     if host_kernel is not None:
         results['host_kernel'] = host_kernel
     results['metadata'] = {
-        'source_file': os.path.basename(xlsx_path),
+        'source_file': os.path.basename(xlsx_path) if xlsx_path else '原始 Prof 明细',
         'analysis_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'total_sheets': len(wb.sheetnames),
         'sheet_names': list(wb.sheetnames),
@@ -113,19 +139,22 @@ def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None) -> dict:
     print(f"  生成中文翻译 xlsx...")
     from csv_translator import translate_to_chinese
     translate_dir = os.path.join(output_dir, 'chinese_xlsx')
-    chinese_xlsx_path = translate_to_chinese(wb, translate_dir, host_kernel)
+    chinese_xlsx_path = translate_to_chinese(wb, translate_dir, host_kernel, kernel_wb)
     print(f"  中文 xlsx 已保存: {chinese_xlsx_path}")
 
     wb.close()
+    kernel_wb.close()
 
     # 保存中间件 JSON
     print(f"[3/4] 保存中间件 JSON...")
     json_path = os.path.join(output_dir, 'compare_analysis_result.json')
+    # Execution records already use None for unavailable measurements.
+    payload = {k: v if k == 'host_kernel' else json_values(v) for k, v in results.items()}
     with open(json_path, 'w', encoding='utf-8') as f:
         if host_kernel and host_kernel.get("execution"):
-            json.dump(results, f, ensure_ascii=False, separators=(",", ":"), default=str)
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), default=str, allow_nan=False)
         else:
-            json.dump(results, f, ensure_ascii=False, indent=2, default=str)
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str, allow_nan=False)
     print(f"  中间件已保存: {json_path}")
 
     # 生成 HTML 报告

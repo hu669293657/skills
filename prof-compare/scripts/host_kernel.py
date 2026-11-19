@@ -4,7 +4,8 @@ import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from cross_trace import Metric, ascend_dir, gpu_file, ranked_keys, read_gpu, read_npu
+from cross_trace import Metric, gpu_file, ranked_keys, read_gpu, read_npu
+from npu_source import npu_source
 from kernel_execution import gpu_pair, npu_pair
 
 
@@ -29,6 +30,15 @@ def sum_times(items):
     for x in items:
         total.merge(x)
     return total
+
+
+def missing_details(label, groups, hosts):
+    notes = []
+    if not any(not n.startswith("ProfilerStep#") for n in hosts):
+        notes.append(f"{label} 缺少框架算子事件，无法计算 Host 耗时。")
+    if not groups:
+        notes.append(f"{label} 缺少 device 任务明细，无法统计 Kernel 排名或单次执行。")
+    return notes
 
 
 def tagged_gemm(typ, group, buckets):
@@ -126,7 +136,9 @@ def match_device(key, groups, buckets, names, index, n_hosts, g_hosts):
 
 
 def compare_gpu(npu, gpu, reference=None, host_aliases=None):
-    folder = ascend_dir(npu)
+    folder = npu_source(npu)
+    if folder is None:
+        raise ValueError(f"未识别到 NPU profiler 主库或文本导出：{npu}")
     trace = gpu_file(gpu)
     if not trace:
         raise ValueError("请提供单个 GPU pt.trace.json 文件或所在目录")
@@ -199,10 +211,11 @@ def compare_gpu(npu, gpu, reference=None, host_aliases=None):
         if row["gpu_name"]:
             row["gpu_self_ms"] = (derived_self[row["npu_name"]] if row["gpu_annotations"] else
                                   self_by_name[row["gpu_name"]] / 1e6)
-    result = dict(npu_path=str(folder), gpu_path=str(trace), reference=str(reference) if reference else None,
+    result = dict(npu_path=str(folder), gpu_path=str(trace), notes=missing_details("NPU", groups, n_hosts),
+                  reference=str(reference) if reference else None,
                   npu_steps=n_steps, gpu_steps=g_steps, gpu_kernel_calls=sum(b.time.calls for b in buckets.values()),
                   gpu_graph_calls=sum(b.graph_calls for b in buckets.values()), device=device, host=host)
-    result["execution"] = gpu_pair(folder, groups, buckets, proposals, gpu_meta, top)
+    result["execution"] = gpu_pair(folder, groups, buckets, proposals, gpu_meta, top, Path(npu).is_dir())
     return result
 
 
@@ -242,7 +255,9 @@ def compare_hosts(n_hosts, g_hosts, self_us, n_host_shapes, g_host_shapes, n_pat
 
 
 def compare_npus(current, baseline, reference=None, host_aliases=None):
-    folder, base_folder = ascend_dir(current), ascend_dir(baseline)
+    folder, base_folder = npu_source(current), npu_source(baseline)
+    if folder is None or base_folder is None:
+        raise ValueError("两侧均需要单卡 NPU profiler 主库或文本导出")
     groups, hosts, self_us, steps, shapes, paths = read_npu(folder)
     base_groups, base_hosts, base_self, base_steps, base_shapes, _ = read_npu(base_folder)
     top = ranked_keys(folder, groups, Path(reference) if reference else None)
@@ -290,6 +305,8 @@ def compare_npus(current, baseline, reference=None, host_aliases=None):
         device.append(row)
     host = compare_hosts(hosts, base_hosts, self_us, shapes, base_shapes, paths, {}, host_aliases, "base", base_self)
     return dict(mode="npu_npu", npu_path=str(folder), base_path=str(base_folder),
+                notes=missing_details("比对 NPU", groups, hosts) + missing_details("基准 NPU", base_groups, base_hosts),
                 reference=str(reference) if reference else None, npu_steps=steps, base_steps=base_steps,
                 device=device, host=host, execution=npu_pair(folder, base_folder, device,
-                    {(key[0], other[0]) for key, other in renamed.items()}))
+                    {(key[0], other[0]) for key, other in renamed.items()},
+                    (Path(current).is_dir(), Path(baseline).is_dir())))

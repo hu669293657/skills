@@ -47,7 +47,7 @@ HTML 的「单次执行比对」支持依次选择类型、具体实现和第几
 *_ascend_pt/
 ├── ASCEND_PROFILER_OUTPUT/     # 内含 kernel_details.csv、op_statistic.csv、
 │   ├── ...                     # trace_view.json（Text 格式）
-│   └── analysis.db             # 或 Db 格式（两者同时存在时优先 Db）
+│   └── ascend_pytorch_profiler_0.db  # DB 主库（可直接传入；目录内两种格式并存时优先 DB）
 ├── FRAMEWORK/
 └── PROF_*/
 ```
@@ -95,7 +95,7 @@ prof.export_chrome_trace("gpu_trace.json")
 
 - **建议只采集一个 step**：多 step 数据会混入预热/抖动，影响 E2E、通信等待等判断；多 step 场景用 `--compare_args "--base_step=1 --comparison_step=1"` 固定比对步
 - `-d` 传待比对侧（NPU / 优化后 / 新版本），`-bp` 传基准侧（GPU / 优化前 / 旧版本）
-- `--enable_api_compare` 依赖 `trace_view.json`（Text 格式数据）
+- Host、Device Top 15 和单次执行支持纯 DB、纯文本和两侧 NPU 混合格式。`--enable_api_compare` 从 TorchNPU 主库或文本 trace 读取框架事件。
 - msprof-analyze 未安装时自动从 PyPI 在线安装（Python ≥ 3.7，建议 3.9+）
 
 ## 四、可以得到什么输出
