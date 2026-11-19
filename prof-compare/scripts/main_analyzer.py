@@ -35,7 +35,7 @@ from parsers.kernel import parse_type as parse_kernel_type
 from parsers.api_compare import parse as parse_api_compare
 
 
-def analyze(xlsx_path: str, output_dir: str = None) -> dict:
+def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None) -> dict:
     """主分析流程：解析 xlsx → 生成中间件 JSON"""
     if output_dir is None:
         output_dir = os.path.dirname(os.path.abspath(xlsx_path))
@@ -100,6 +100,8 @@ def analyze(xlsx_path: str, output_dir: str = None) -> dict:
 
     # 生成分析结论
     results['analysis_summary'] = _generate_summary(results)
+    if host_kernel is not None:
+        results['host_kernel'] = host_kernel
     results['metadata'] = {
         'source_file': os.path.basename(xlsx_path),
         'analysis_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -111,7 +113,7 @@ def analyze(xlsx_path: str, output_dir: str = None) -> dict:
     print(f"  生成中文翻译 xlsx...")
     from csv_translator import translate_to_chinese
     translate_dir = os.path.join(output_dir, 'chinese_xlsx')
-    chinese_xlsx_path = translate_to_chinese(wb, translate_dir)
+    chinese_xlsx_path = translate_to_chinese(wb, translate_dir, host_kernel)
     print(f"  中文 xlsx 已保存: {chinese_xlsx_path}")
 
     wb.close()
@@ -120,7 +122,10 @@ def analyze(xlsx_path: str, output_dir: str = None) -> dict:
     print(f"[3/4] 保存中间件 JSON...")
     json_path = os.path.join(output_dir, 'compare_analysis_result.json')
     with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(results, f, ensure_ascii=False, indent=2, default=str)
+        if host_kernel and host_kernel.get("execution"):
+            json.dump(results, f, ensure_ascii=False, separators=(",", ":"), default=str)
+        else:
+            json.dump(results, f, ensure_ascii=False, indent=2, default=str)
     print(f"  中间件已保存: {json_path}")
 
     # 生成 HTML 报告

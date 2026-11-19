@@ -1,0 +1,117 @@
+<section id="kernel-execution" class="raw-detail execution">
+  <h3>单次执行比对</h3>
+  <details class="source-paths"><summary>数据来源</summary><p>__SOURCES__</p></details>
+  <p>两端在所选类型与具体实现内，分别按设备开始时间从早到晚编号，第 N 次与第 N 次并排。序号从 1 开始，同一时间按源文件顺序排列。</p>
+  <div class="execution-controls">
+    <label>算子类型<select data-ctl="type"></select></label>
+    <label>具体实现<select data-ctl="name"></select></label>
+    <label>执行序号<input data-ctl="index" aria-label="执行序号" type="number" min="1" step="1" value="1"></label>
+    <div class="execution-actions"><button type="button" data-ctl="prev">上一次</button><button type="button" data-ctl="next">下一次</button></div>
+  </div>
+  <p data-ctl="counts" aria-live="polite"></p>
+  <p data-ctl="status"></p>
+  <div class="execution-controls">
+    <label>字段<select data-ctl="filter"><option>全部 47 项</option><option>执行信息</option><option>张量</option><option>AIC</option><option>AIV</option></select></label>
+    <label>表格布局<select data-ctl="view"><option>逐字段对照</option><option>每项并列</option></select></label>
+  </div>
+  <div data-ctl="grid" class="event-scroll"></div>
+  <p data-ctl="clock"></p>
+  <script type="application/json" class="event-data">__DATA__</script>
+  <script>
+  (() => {
+    const section = document.currentScript.closest('section');
+    const catalog = JSON.parse(section.querySelector('.event-data').textContent);
+    const ctl = Object.fromEntries(Array.from(section.querySelectorAll('[data-ctl]'), x => [x.dataset.ctl, x]));
+    const leftLabel = '__LEFT__', rightLabel = '__PEER__', isGPU = rightLabel === 'GPU';
+    const groups = new Map();
+    for (const s of catalog.series) {
+      if (!groups.has(s.type)) groups.set(s.type,[]);
+      groups.get(s.type).push(s);
+    }
+    const option = (text,index) => new Option(text,String(index));
+    const types = Array.from(groups.keys());
+    ctl.type.replaceChildren(...types.map(option));
+    const selection = () => groups.get(types[Number(ctl.type.value)])[Number(ctl.name.value)];
+    const esc = v => String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    function formatValue(value,i,gpu,exists) {
+      if (!exists) return '—';
+      if (value == null) return (gpu && i>=13) ? '不适用' : '未采集';
+      if (typeof value !== 'number') return esc(value);
+      if (i===3) return value.toFixed(6);
+      if (i===4 || i===5) return value.toFixed(3);
+      return String(Number(value.toPrecision(15)));
+    }
+    function describe(record,gpu) {
+      if (!record) return '本侧无此序号';
+      const task=gpu?record.task:record[47], stream=gpu?record.stream:record[48];
+      return (gpu?'correlation ':'task ')+(task??'—')+' · stream '+(stream??'—');
+    }
+    function delta(a,b,i) {
+      if (typeof a!=='number' || typeof b!=='number' || i===3 || (isGPU && i===6)) return '—';
+      const ratio = catalog.fields[i][1]==='比值';
+      const d = ratio?(a-b)*100:a-b;
+      return (d>0?'+':'')+formatValue(d,i,false,true)+(ratio?' 个百分点':'');
+    }
+    function draw() {
+      const s=selection(), n=Number(ctl.index.value), greatest=Math.max(s.left.length,s.right.length);
+      if (!Number.isInteger(n)||n<1||n>greatest) return;
+      const lhs=s.left[n-1], rhs=s.right[n-1]||[], rightValues=rhs.map(r=>isGPU?r.values:r);
+      ctl.index.max=String(greatest); ctl.prev.disabled=n===1; ctl.next.disabled=n===greatest;
+      ctl.counts.textContent='第 '+n+' 次　·　'+leftLabel+' 共 '+s.left.length+' 次　/　'+rightLabel+
+        (s.right.length?' 共 '+s.right.length+' 次':' 序列未定位');
+      let status=leftLabel+' '+describe(lhs,false)+'　/　'+rightLabel+' '+(rhs.length?rhs.map(r=>describe(r,isGPU)).join('；'):s.note||'本侧无此序号');
+      if(rhs.length>1) {
+        const sum=rightValues.reduce((v,r)=>v+r[4],0);
+        status+='。本次逻辑调用含 '+rhs.length+' 个 kernel，累计 '+sum.toFixed(3)+' μs';
+        if(typeof lhs?.[4]==='number')status+='，与左侧累计差 '+(lhs[4]-sum).toFixed(3)+' μs';
+        status+='。';
+      }
+      ctl.status.textContent=status;
+      const sides=[leftLabel,...(rhs.length?rhs.map((_,j)=>rightLabel+(rhs.length>1?' · 核 '+(j+1):'')):[rightLabel])];
+      const records=[lhs,...(rhs.length?rightValues:[null])];
+      const entries=catalog.fields.map(([label,unit],i)=>({label,unit,i,
+        group:i<7?'执行信息':i<13?'张量':i<30?'AIC':'AIV'})).filter(f=>ctl.filter.selectedIndex===0||f.group===ctl.filter.value);
+      function value(r,i,j) {
+        const raw=r?.[i], formatted=formatValue(raw,i,isGPU&&j>0,!!r);
+        if(i===0 && typeof raw==='string' && raw.length>110)
+          return '<details class="kernel-symbol"><summary>'+esc(raw.slice(0,78))+'…</summary>'+formatted+'</details>';
+        return formatted;
+      }
+      const cell=(r,i,j)=>'<td data-label="'+esc(sides[j])+'" class="'+(j===0?'ev-left':'ev-right')+'">'+value(r,i,j)+'</td>';
+      const label=f=>esc(f.label)+(f.unit?' <small>'+esc(f.unit)+'</small>':'');
+      const columns=sides.map(s=>'<th scope="col">'+esc(s)+'</th>').join('');
+      if (ctl.view.selectedIndex===0) {
+        const head='<tr><th scope="col">字段</th>'+columns+(rhs.length<=1?'<th scope="col">差值（左 − 右）</th>':'')+'</tr>';
+        const body=entries.map(f=>'<tr><th scope="row">'+label(f)+'</th>'+records.map((r,j)=>cell(r,f.i,j)).join('')+
+          (rhs.length<=1?'<td data-delta data-label="差值（左 − 右）">'+delta(lhs?.[f.i],rightValues[0]?.[f.i],f.i)+'</td>':'')+'</tr>').join('');
+        ctl.grid.innerHTML='<table aria-label="单次执行字段" class="event-vertical'+(rhs.length>1?' split-kernels':'')+'"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>';
+      } else {
+        ctl.grid.innerHTML='<div class="field-grid">'+entries.map(f=>
+          '<div class="field-card"><h4>'+label(f)+'</h4><dl>'+records.map((r,j)=>'<div><dt class="'+(j===0?'ev-left':'ev-right')+'">'+
+          esc(sides[j])+'</dt><dd>'+value(r,f.i,j)+'</dd></div>').join('')+'</dl></div>').join('')+'</div>';
+      }
+    }
+    function chooseName(){ctl.index.value='1'; draw();}
+    function chooseType(){
+      ctl.name.replaceChildren(...groups.get(types[Number(ctl.type.value)]).map((s,i)=>option(s.name,i)));
+      chooseName();
+    }
+    ctl.type.onchange=chooseType;ctl.name.onchange=chooseName;
+    ctl.index.oninput=draw;
+    ctl.index.onchange=()=>{
+      const s=selection();
+      ctl.index.value=String(Math.max(1,Math.min(Math.max(s.left.length,s.right.length),Math.trunc(Number(ctl.index.value))||1)));
+      draw();
+    };
+    ctl.prev.onclick=()=>{ctl.index.value=String(Number(ctl.index.value)-1);draw();};
+    ctl.next.onclick=()=>{ctl.index.value=String(Number(ctl.index.value)+1);draw();};
+    ctl.filter.onchange=draw;ctl.view.onchange=draw;
+    document.querySelectorAll('[data-execution-type]').forEach(link=>link.addEventListener('click',()=>{
+      const i=types.indexOf(link.dataset.executionType);
+      if(i>=0){ctl.type.value=String(i);chooseType();}
+    }));
+    ctl.clock.textContent='开始时间各自相对采集起点（左：'+catalog.clocks[0]+'；右：'+catalog.clocks[1]+'）。PMU time 单位为 ns，ratio 为 0–1。'+(isGPU?' GPU 张量字段显示所属逻辑 GEMM 的标注；拆核时各列共用该标注。每列的时长和 Block 数量取自该次 CUDA kernel，Block 数量为 grid 三维乘积。':'');
+    chooseType();
+  })();
+  </script>
+</section>

@@ -1,15 +1,42 @@
 ---
 name: "prof-compare"
-description: "两份单卡 Prof 数据细粒度比对（GPU vs NPU / NPU vs NPU / 调优前后）。当用户在单卡/单机场景要求对比两份 Prof 的总体性能、算子、模块、内存、Kernel、通信、API 差异，或已有 compare 输出的 performance_comparison_result_*.xlsx 需要分析翻译时使用，例如'对比这两个 prof'、'GPU 和 NPU 跑同一模型差多少'。自动检测并安装 msprof-analyze compare，输出 HTML 报告与中文 xlsx。不用于多卡/集群级比对（用 cluster-compare）；不用于单份数据的独立性能分析（用 cluster-analysis）。"
+description: "比对两份单卡 Prof，支持 NPU 对 GPU 和 NPU 对 NPU。生成含 Host 算子、NPU 耗时 Top 15 kernel 和单次执行明细的综合报告，可按类型、实现和执行序号对照耗时、张量及 AIC/AIV 指标。支持异名与拆核匹配、NPU 调优前后对比及已有 compare xlsx 的分析翻译。"
 ---
 
 # Prof Compare
 
 ## 功能概述
 
-本 Skill 支持两种工作模式：
+### 综合报告中的 Host 算子、Device kernel Top 15 与单次执行
 
-- **模式一（直比）**：用户提供两张 Prof 数据路径（GPU vs NPU、NPU vs NPU），自动检测/安装 msprof-analyze，调用 compare 生成 `performance_comparison_result_*.xlsx`，随后自动进入分析流程
+两份 Prof 默认走 msprof-analyze 的综合报告流程。两侧具备原始明细时，脚本在原 HTML 的「算子统计」和「Kernel 比对」章节中追加实测对照，并在中文 xlsx 中增加两张工作表。
+
+```bash
+python scripts/run_compare.py -d "<rank_0/..._ascend_pt>" -bp "<rank_0/...pt.trace.json>" -o "<报告目录>"
+python scripts/run_compare.py -d "<待比对NPU/..._ascend_pt>" -bp "<基准NPU/..._ascend_pt>" -o "<报告目录>"
+# 若用户给了界面导出的 kernel 排名 CSV，用它核对当前 rank 的分组、次数与耗时
+python scripts/run_compare.py -d "<NPU目录>" -bp "<GPU trace>" --npu-top-csv "<operator_detail_group_by_Operator Type_....csv>" -o "<报告目录>"
+```
+
+NPU 目录使用 `ASCEND_PROFILER_OUTPUT/kernel_details.csv` 和 `operator_details.csv`，有 `op_statistic.csv` 时按其排名，有 `trace_view.json` 时追踪 host 调用路径。也可直接指定 `ASCEND_PROFILER_OUTPUT`。GPU 可指定 JSON、压缩的 JSON.gz 或只含一份 pt.trace 的目录。显式指定 `--host-kernel` 可在缺少文本数据时提示所需输入。
+
+- 打开 `compare_analysis_report.html`，从侧栏进入 Host 框架算子、Device kernel Top 15 或单次执行比对。主 JSON 的 `host_kernel` 保存热点，`host_kernel.execution` 保存可供交互选择的执行序列。Top 15 以左侧 NPU 的累计 device 耗时排序，按 **(Type, Accelerator Core)** 分组。类型相同、核心不同的行分别排名。点击类型可进入单次明细。
+- Device 表按名称、累计耗时、次数和均值成对排列两侧数据。后台用实际 kernel 名、host 标注、输入输出形状与 CUDA launch 的 correlation 处理异名和拆核。多个核心共用的形状不参与逐核心匹配。部分覆盖按已对齐子集计算差值，并标注左侧完整规模；待定位的对端数值留空。
+- 两份 NPU 时按 `-d` 的 Top 15 排序，与 `-bp` 的对应类型及核心逐组对齐。差值统一为左侧减右侧，缺少对端数据时留空。
+- NPU 对 GPU 的热点章节差值为 NPU − GPU，倍率为 NPU / GPU。比较总量时也说明调用次数差异。MoE 的主核与 epilogue 先分别比较，再看这两个阶段的合计；跨 stream 的 kernel 累计耗时与 step 墙钟时间分别解读。
+- Host 以左侧 NPU 的 self 耗时排序，每项指标连续显示两侧的名称、total、self、次数和均值。已核实的 host 异名可用 `--host-aliases aliases.json` 传入，格式为 `{"左侧原名":"右侧原名"}`。
+
+**单次执行比对**
+
+1. 在 HTML 中依次选择算子类型、具体实现、执行序号。例如选择 `GroupedMatmulAdd`、`aclnnGroupedMatmulAddV2_GroupedMatmulAdd_GroupedMatmulAdd`、第 1 次。选择范围涵盖左侧具有可排序记录的实现，也可直接输入序号或逐次翻页。
+2. 两端在各自的对应实现内，按 device 开始时间升序独立编号，从 1 起算。时间相同按源文件顺序。按相同序号并排，张量形状作为实测字段展示。某侧次数较少时，超出其长度的序号显示缺失。原始热点和执行序列均覆盖输入的完整采样窗口。
+3. 两侧 NPU 优先按类型与实现名对齐，异名时结合核心及张量签名检查唯一候选。GPU 按可独立归属的完整序列编号。一次逻辑调用拆出多个 CUDA kernel 时，在同一序号下列出各核及累计耗时。仅能定位部分热点、无法确定完整序列时，保留左侧记录，对端标为“序列未定位”。
+4. 明细共 47 项，包括执行信息、输入输出张量和 34 项 AIC/AIV 计数器。开始时间以各自报告标明的时间原点计算（ms），时长与等待以 μs 计，PMU time 以 ns 计。NPU 优先读取 profiler DB 的任务 PMU，缺少时取 CSV 的可用字段。保留实测零值，区分未采集字段与 GPU 不适用的 Ascend PMU。
+5. 桌面侧栏可收起，窄窗口从顶部打开目录。「逐字段对照」按行展示，「每项并列」让每个字段的各侧数值相邻，字段随正文宽度换行。
+
+### 综合比对与 xlsx 分析
+
+- **模式一（综合比对）**：要求总体性能、内存、通信、API 或完整 xlsx 时，使用 `--msprof` 运行原有 msprof-analyze 流程。默认命令也生成综合报告。`--compare_only` 仅生成 msprof 原始 xlsx。若透传 step 筛选，原始热点附表仍统计完整采样窗口，报告中标明两种范围。
 - **模式二（xlsx 分析）**：用户已持有 compare 输出的 `performance_comparison_result_*.xlsx`，直接解析分析
 
 分析流程针对每个 Sheet 页提炼关键数据并进行分析，最终生成：
@@ -24,7 +51,7 @@ description: "两份单卡 Prof 数据细粒度比对（GPU vs NPU / NPU vs NPU 
 
 ```bash
 # 最简用法：默认开启全部比对能力（msprof-analyze 未安装时自动从 PyPI 安装）
-python scripts/run_compare.py -d <待比对prof路径> -bp <基准prof路径>
+python scripts/run_compare.py --msprof -d <待比对prof路径> -bp <基准prof路径>
 
 # 指定输出目录
 python scripts/run_compare.py -d ./ascend_pt -bp ./base_ascend_pt -o ./out
@@ -44,6 +71,9 @@ python scripts/run_compare.py -d ./ascend_pt -bp ./gpu_trace.json --compare_only
 | `-bp / --benchmark_profiling_path` | 是 | 基准 Prof 路径（通常是 GPU 数据 / 优化前数据 / 旧版本数据） |
 | `-o / --output` | 否 | 输出目录，默认 `./compare_output_<时间戳>` |
 | `--compare_args` | 否 | 透传给 compare 的额外参数字符串，详见 `references/compare_quickstart.md` |
+| `--host-kernel` | 否 | 显式要求原始热点对照并校验输入 |
+| `--npu-top-csv` | 否 | 用导出榜单核对排名侧 Top 15 |
+| `--host-aliases` | 否 | JSON 对象，键和值分别为排名侧和对照侧的 host 原名 |
 | `--compare_only` | 否 | 只执行 compare 生成 xlsx，跳过后续分析 |
 | `--skip_install` | 否 | 跳过 msprof-analyze 检测与自动安装 |
 
@@ -80,6 +110,8 @@ prof-compare/
     ├── run_compare.py                # 直比编排：检测/安装 msprof-analyze → compare → 自动分析
     ├── main_analyzer.py              # 主调度脚本
     ├── html_generator.py             # HTML 报告生成器
+    ├── kernel_execution.py           # 按类型与实现构建两端执行序列
+    ├── execution_panel.html          # 单次执行交互表
     ├── csv_translator.py             # 中文翻译器（xlsx + CSV 同步输出）
     └── parsers/                      # 8 个解析器模块
         ├── __init__.py

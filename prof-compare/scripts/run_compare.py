@@ -28,13 +28,18 @@ PyPI（pip install msprof-analyze），常规在线环境无需任何额外准�
 """
 import argparse
 import glob
+import gzip
+import json
 import importlib.util
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+from contextlib import ExitStack
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -190,6 +195,35 @@ def run_compare(mode: str, base: str, comp: str,
 # 主流程
 # ---------------------------------------------------------------------------
 
+def msprof_input(path, stack):
+    path = Path(path)
+    if path.name == "ASCEND_PROFILER_OUTPUT" and path.is_dir():
+        return str(path.parent)
+    if path.is_file() and path.name.endswith(".json.gz"):
+        folder = stack.enter_context(TemporaryDirectory(prefix="prof-compare-"))
+        plain = Path(folder) / path.stem
+        with gzip.open(path, "rb") as source, plain.open("wb") as target:
+            shutil.copyfileobj(source, target)
+        return str(plain)
+    return str(path)
+
+
+def input_pair(comp, base):
+    from cross_trace import ascend_dir, gpu_file
+    def is_npu(path):
+        folder = ascend_dir(path)
+        return all((folder / file).is_file() for file in ("kernel_details.csv", "operator_details.csv"))
+    current, baseline = is_npu(comp), is_npu(base)
+    if current and baseline:
+        return "npu_npu", comp, base
+    if current or baseline:
+        npu, other = (comp, base) if current else (base, comp)
+        trace = gpu_file(other)
+        if trace:
+            return "npu_gpu", npu, str(trace)
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="两张 Prof 数据直接比对：自动安装 msprof-analyze → 执行 compare → 生成分析报告")
@@ -205,6 +239,12 @@ def main() -> None:
                         help="只执行 compare 生成 xlsx，不进行后续分析")
     parser.add_argument("--skip_install", action="store_true",
                         help="跳过 msprof-analyze 自动安装检测")
+    route = parser.add_mutually_exclusive_group()
+    route.add_argument("--host-kernel", action="store_true",
+                       help="要求在综合报告中加入原始 host 与 device Top 15（NPU/GPU 或 NPU/NPU）")
+    route.add_argument("--msprof", action="store_true", help="显式选择综合报告流程（默认）")
+    parser.add_argument("--npu-top-csv", help="核对按 opType、accCore 分组的 NPU 排名 CSV")
+    parser.add_argument("--host-aliases", help="host 原名映射 JSON（排名侧到对照侧）")
     args = parser.parse_args()
 
     base = os.path.abspath(args.benchmark_profiling_path)
@@ -220,9 +260,36 @@ def main() -> None:
 
     extra = validate_extra_args(args.compare_args)
 
-    mode = ensure_msprof(allow_install=not args.skip_install)
+    required = args.host_kernel or args.npu_top_csv or args.host_aliases
+    if required and args.compare_only:
+        parser.error("--compare_only 只生成原始 xlsx；生成含 host/kernel 的报告时请去掉该开关")
+    detail = None
+    try:
+        pair = input_pair(comp, base) if not args.compare_only else None
+        if pair:
+            from host_kernel import compare_gpu, compare_npus
+            kind, first, second = pair
+            if kind == "npu_gpu":
+                # The raw section always ranks the NPU; keep the caller's direction for msprof.
+                if first == comp:
+                    base = second
+                else:
+                    comp = second
+                detail = compare_gpu(first, second, args.npu_top_csv, args.host_aliases)
+            else:
+                detail = compare_npus(first, second, args.npu_top_csv, args.host_aliases)
+            if any(t.split("=")[0] in ("--base_step", "--comparison_step") for t in extra):
+                detail["msprof_step_filter"] = True
+        elif required:
+            die("需要两份单卡 NPU 文本导出，或一份 NPU 文本导出和 GPU trace")
+    except (OSError, ValueError) as exc:
+        if required:
+            die(str(exc))
+        log(f"原始 host/kernel 明细无法生成：{exc}。继续生成原有综合报告。")
 
-    xlsx = run_compare(mode, base, comp, output, extra)
+    mode = ensure_msprof(allow_install=not args.skip_install)
+    with ExitStack() as stack:
+        xlsx = run_compare(mode, msprof_input(base, stack), msprof_input(comp, stack), output, extra)
     if args.compare_only:
         log(f"--compare_only 已设置，跳过分析。结果文件：{xlsx}")
         return
@@ -231,7 +298,13 @@ def main() -> None:
     if SCRIPTS_DIR not in sys.path:
         sys.path.insert(0, SCRIPTS_DIR)
     from main_analyzer import analyze
-    analyze(xlsx, output)
+    analyze(xlsx, output, detail)
+    if detail:
+        # Older bookmarks and consumers used these names for the raw comparison.
+        report = Path(output) / "compare_analysis_report.html"
+        shutil.copyfile(report, report.with_name("host_kernel_compare.html"))
+        report.with_name("host_kernel_compare.json").write_text(
+            json.dumps(detail, ensure_ascii=False, separators=(",", ":"), allow_nan=False), encoding="utf-8")
     log("全流程完成！")
 
 

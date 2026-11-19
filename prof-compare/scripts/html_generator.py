@@ -5,6 +5,7 @@
 将中间件 JSON 数据渲染为自包含的 HTML 报告。
 """
 from datetime import datetime
+from pathlib import Path
 
 
 def _fmt(val, suffix='', decimals=2):
@@ -83,7 +84,14 @@ def generate_html_report(results: dict, output_path: str):
 
     # API
     api = results.get('api_compare', {})
+    detail = results.get('host_kernel')
+    if detail:
+        from host_kernel_report import render_device, render_host
+        from kernel_execution import render_execution
 
+    template_dir = Path(__file__).parent
+    stylesheet = (template_dir / "report.css").read_text(encoding="utf-8")
+    layout_script = (template_dir / "report_layout.js").read_text(encoding="utf-8")
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -91,93 +99,36 @@ def generate_html_report(results: dict, output_path: str):
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>性能比对分析报告</title>
 <style>
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ font-family: -apple-system, 'Segoe UI', 'Noto Sans CJK SC', sans-serif; background: #0C0F16; color: #E6EBF4; line-height: 1.6; }}
-.container {{ max-width: 1200px; margin: 0 auto; padding: 24px 24px 24px 200px; }}
-.header {{ position: relative; background: #101523; color: #E6EBF4; padding: 40px 32px; border-radius: 16px; margin-bottom: 24px; border: 1px solid #263042; overflow: hidden; }}
-.header::before {{ content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, #3DDC97, #6EA8FE, transparent 70%); }}
-.header h1 {{ font-size: 28px; margin-bottom: 8px; font-family: 'Cascadia Code', Consolas, 'Noto Sans CJK SC', monospace; letter-spacing: 1px; }}
-.header .meta {{ font-size: 14px; color: #8B98AD; font-family: 'Cascadia Code', Consolas, monospace; }}
-.section {{ background: #131826; border: 1px solid #263042; border-radius: 12px; padding: 24px; margin-bottom: 20px; }}
-.section-title {{ font-size: 18px; font-weight: 700; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #263042; font-family: 'Cascadia Code', Consolas, 'Noto Sans CJK SC', monospace; letter-spacing: 0.5px; }}
-.kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px; }}
-.kpi-card {{ background: #101523; border: 1px solid #263042; border-radius: 8px; padding: 16px; }}
-.kpi-card .label {{ font-size: 13px; color: #8B98AD; margin-bottom: 4px; }}
-.kpi-card .value {{ font-size: 24px; font-weight: 700; font-family: 'Cascadia Code', Consolas, monospace; }}
-.kpi-card .sub {{ font-size: 12px; color: #8B98AD; margin-top: 4px; }}
-.bad {{ color: #FF7A7A; }}
-.good {{ color: #3DDC97; }}
-.neutral {{ color: #8B98AD; }}
-table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-.table-wrap {{ overflow-x: auto; margin-bottom: 8px; }}
-th {{ background: #16233A; padding: 10px 12px; text-align: left; font-weight: 600; color: #AFC6E8; border-bottom: 1px solid #2C3B57; white-space: nowrap; }}
-td {{ padding: 10px 12px; border-bottom: 1px solid #1E2735; }}
-tr:hover td {{ background: #1A2233; }}
-.tag {{ display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; }}
-.tag-bad {{ background: rgba(255,122,122,0.12); color: #FF7A7A; }}
-.tag-good {{ background: rgba(61,220,151,0.12); color: #3DDC97; }}
-.tag-neutral {{ background: rgba(139,152,173,0.14); color: #8B98AD; }}
-.findings {{ list-style: none; }}
-.findings li {{ background: rgba(245,198,79,0.12); border-left: 4px solid #F5C64F; padding: 12px 16px; margin-bottom: 8px; border-radius: 0 8px 8px 0; font-size: 14px; }}
-.chart-container {{ position: relative; height: 300px; margin: 16px 0; }}
-.unavailable {{ background: #101523; color: #5C6B7A; border: 1px dashed #263042; padding: 40px; text-align: center; border-radius: 8px; }}
-.col-num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-.bar-container {{ display: flex; align-items: center; gap: 8px; }}
-.bar {{ height: 8px; border-radius: 4px; background: #263042; flex: 1; overflow: hidden; }}
-.bar-fill {{ height: 100%; border-radius: 4px; }}
-.footer {{ text-align: center; padding: 24px; color: #5C6B7A; font-size: 13px; font-family: 'Cascadia Code', Consolas, monospace; }}
-.dim-card {{ display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #263042; }}
-.dim-card.primary {{ border-color: #6EA8FE; background: #1A2438; }}
-/* 悬浮侧边导航 */
-.nav-sidebar {{ position: fixed; top: 24px; left: 24px; width: 168px; max-height: calc(100vh - 48px); overflow-y: auto; background: #131826; border: 1px solid #263042; border-radius: 12px; padding: 16px; font-size: 13px; }}
-.nav-sidebar .nav-title {{ font-weight: 700; font-size: 14px; margin-bottom: 10px; color: #E6EBF4; }}
-.nav-sidebar a {{ display: block; padding: 4px 0 4px 12px; color: #8B98AD; text-decoration: none; border-left: 2px solid #263042; margin-bottom: 2px; }}
-.nav-sidebar a:hover {{ color: #3DDC97; border-left-color: #3DDC97; }}
-.nav-sidebar a.nav-sub {{ font-size: 12px; color: #5C6B7A; padding-left: 24px; }}
-.nav-sidebar .nav-sep {{ height: 1px; background: #263042; margin: 8px 0; }}
-/* Excel 样式表 */
-.excel-table {{ width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'Segoe UI', 'Noto Sans CJK SC', sans-serif; }}
-.excel-table th {{ background: #16233A; color: #AFC6E8; padding: 6px 10px; text-align: center; font-weight: 600; border: 1px solid #2C3B57; white-space: nowrap; font-size: 11px; }}
-.excel-table td {{ padding: 5px 10px; border: 1px solid #263042; text-align: center; }}
-.excel-table td.col-label {{ text-align: left; font-weight: 500; background: #101523; }}
-.excel-table tr:nth-child(even) td {{ background: #151B29; }}
-.excel-table tr:nth-child(even) td.col-label {{ background: #182031; }}
-.excel-table td.bad {{ color: #FF7A7A; font-weight: 600; }}
-.excel-table td.good {{ color: #3DDC97; font-weight: 600; }}
-.excel-table td.indent {{ padding-left: 24px; }}
-.excel-table td.indent2 {{ padding-left: 40px; }}
-.excel-table tr.row-key td {{ background: #1A2438; font-weight: 600; }}
-.excel-table tr.row-key td.col-label-bold {{ background: #1E2B44; font-weight: 700; color: #6EA8FE; }}
-/* 暗色主题：滚动条与选区 */
-::-webkit-scrollbar {{ width: 10px; height: 10px; }}
-::-webkit-scrollbar-track {{ background: #0C0F16; }}
-::-webkit-scrollbar-thumb {{ background: #263042; border-radius: 5px; }}
-::-webkit-scrollbar-thumb:hover {{ background: #33415C; }}
-::selection {{ background: rgba(61,220,151,0.25); }}
+{stylesheet}
 </style>
 </head>
 <body>
 <div class="container">
 
-<!-- 悬浮侧边导航 -->
-<div class="nav-sidebar">
-  <div class="nav-title">目录导航</div>
+<details class="nav-sidebar" open>
+  <summary class="nav-title">目录</summary>
+  <nav aria-label="报告章节">
   <a href="#overall">1. 总体性能比对</a>
   <a href="#conclusion">2. 分析结论</a>
   <div class="nav-sep"></div>
   <a href="#operator">3. 算子统计</a>
+  {'<a href="#host-ops" class="nav-sub">Host 框架算子</a>' if detail else ''}
   <a href="#module">4. 模块统计</a>
   <a href="#communication">5. 通信比对</a>
   <a href="#memory">6. 内存统计</a>
   <a href="#kernel">7. Kernel比对</a>
+  {'<a href="#device-top" class="nav-sub">Device kernel Top 15</a>' if detail else ''}
+  {'<a href="#kernel-execution" class="nav-sub">单次执行比对</a>' if detail and detail.get('execution', {}).get('series') else ''}
   <a href="#kernel-data" class="nav-sub">- 两卡数据量比对</a>
   <a href="#kernel-top10" class="nav-sub">- Top10计算算子</a>
   <a href="#kernel-imbalance" class="nav-sub">- 负载不均预警</a>
   <a href="#api">8. API比对</a>
   <a href="#sheets">9. Sheet可用性</a>
-</div>
+  </nav>
+</details>
 
 <!-- 头部 -->
+<main>
 <div class="header">
   <h1>性能比对分析报告</h1>
   <div class="meta">
@@ -195,7 +146,7 @@ tr:hover td {{ background: #1A2233; }}
 <!-- 分析结论 -->
 <div class="section" id="conclusion">
   <div class="section-title">2. 分析结论</div>
-  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+  <div class="conclusion-grid">
     <div>
       <h4 style="color: #3DDC97; margin-bottom: 8px;">[改善] 改善亮点</h4>
       <ul class="findings" style="list-style: none;">
@@ -215,6 +166,7 @@ tr:hover td {{ background: #1A2233; }}
 <div class="section" id="operator">
   <div class="section-title">3. 算子统计比对 (OperatorCompareStatistic)</div>
   {_render_operator_statistic(op_stat) if op_stat.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
+  {render_host(detail) if detail else ''}
 </div>
 
 <!-- 模块统计 -->
@@ -238,7 +190,9 @@ tr:hover td {{ background: #1A2233; }}
 <!-- Kernel 比对 -->
 <div class="section" id="kernel">
   <div class="section-title">7. Kernel 比对 (KernelCompare)</div>
-  {_render_kernel_compare(kc) if kc.get('available') else '<div class="unavailable">该 Sheet 不存在或为空（仅 NPU vs NPU 场景）</div>'}
+  {render_device(detail) if detail else ''}
+  {render_execution(detail) if detail else ''}
+  {_render_kernel_compare(kc) if kc.get('available') else ('' if detail else '<div class="unavailable">该 Sheet 不存在或为空（仅 NPU vs NPU 场景）</div>')}
 </div>
 
 <!-- API 比对 -->
@@ -261,7 +215,9 @@ tr:hover td {{ background: #1A2233; }}
   Generated by Prof Compare ｜ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 
+</main>
 </div>
+<script>{layout_script}</script>
 </body>
 </html>"""
 

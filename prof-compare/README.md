@@ -1,8 +1,12 @@
 # prof-compare（Prof 数据比对分析）
 
-昇腾 Prof 数据比对工具：**比对两份 Prof 数据（GPU vs NPU / NPU vs NPU / GPU vs GPU）**，自动检测安装 msprof-analyze 并调用 compare 生成结果 xlsx，随后解析为 HTML 可视化分析报告与中文版 xlsx。也支持对已有的 compare 结果 xlsx 直接分析翻译。
+两份单卡 Prof 默认生成综合报告 `compare_analysis_report.html`。NPU 对 GPU、NPU 对 NPU 具备原始明细时，Host 和 Device Top 15 表按指标并排列出两侧的数据。可以用 `--npu-top-csv` 核对导出的 NPU 榜单。中文 xlsx 同步包含这两张表。
+
+HTML 的「单次执行比对」支持依次选择类型、具体实现和第几次执行。两侧按各自设备开始时间独立编号，相同序号并排展示 47 项执行、张量与 PMU 字段。例如选择 `GroupedMatmulAdd → aclnnGroupedMatmulAddV2_GroupedMatmulAdd_GroupedMatmulAdd → 第 1 次`，即可查看两张卡上该实现各自的首次执行。GPU 单次逻辑调用拆核时，同一序号显示各 CUDA kernel 与累计耗时。详见 [SKILL.md](SKILL.md)。
 
 ---
+
+报告正文随窗口宽度展开。桌面可点击「目录」收起侧栏，窄窗口可从顶部打开目录。Host 和 Device Top 15 表在窄窗口中按算子分块，同一指标的两侧数值仍然相邻。单次执行的「每项并列」会按可用宽度排列字段。
 
 ## 一、应用场景
 

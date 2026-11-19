@@ -133,7 +133,7 @@ def _is_header_row(row_data: list) -> bool:
     return any(h in row_str for h in KNOWN_HEADERS)
 
 
-def translate_to_chinese(wb_src, output_dir: str):
+def translate_to_chinese(wb_src, output_dir: str, host_kernel=None):
     """将已加载的 Workbook 翻译为中文 xlsx + CSV
 
     优化：直接接收 wb_src 对象，不再重复加载 xlsx 文件。
@@ -217,6 +217,24 @@ def translate_to_chinese(wb_src, output_dir: str):
 
         sheet_count += 1
         print(f"  Sheet: {chinese_name} ({data_row_count} 行)")
+
+    if host_kernel:
+        from host_kernel_report import spreadsheet_tables
+        for title, rows in spreadsheet_tables(host_kernel):
+            ws = wb_out.create_sheet(title)
+            with open(os.path.join(csv_dir, title + ".csv"), "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv_mod.writer(f)
+                for row in rows:
+                    ws.append(row)
+                    writer.writerow(row)
+            for col, cell in enumerate(ws[1], 1):
+                cell.font, cell.fill, cell.alignment = HEADER_FONT, HEADER_FILL, HEADER_ALIGN
+                width = max(len(str(row[col-1] or "")) for row in rows)
+                ws.column_dimensions[cell.column_letter].width = min(52, max(width + 3, 15))
+            ws.freeze_panes = "B2"
+            ws.auto_filter.ref = ws.dimensions
+            sheet_count += 1
+            total_rows += len(rows)
 
     # 保存 xlsx
     output_filename = "compare_chinese_result.xlsx"
