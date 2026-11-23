@@ -18,8 +18,8 @@ python3 "<SKILL_DIR>/references/render_report.py" --template single --list-slots
 - 脚本只接受表格、列表、段落、容器及安全链接等静态片段。CSS 和交互由模板提供；动态片段使用模板已有 CSS 类。导航用 `<a class="nav-item" href="#system">系统</a>`，只指向实际出现的区块 ID。
 - `ASSESSMENT_BANNER` 写已判定结论。`ISSUE_ITEMS` 或 `FINDING_BANNERS` 列有实测依据的主要发现，单份的 `NEXT_STEPS_CODE` 写相应操作。无可判定项时，总览只写“暂无可判定结论”，具体原因与补采操作放在「未采集项」。
 - 「未采集项」逐项列环境或角色、字段或输入、状态与原因，必要时附补采方法。单份填 `MISSING_ITEMS`，无缺口时填“无”。比对有缺口时在 `MISSING_SECTION` 填一个 `<section class="section" id="missing">` 区块，节名为「未采集项」，并添加对应导航。仅一侧采到的字段在此注明有证据的一侧。
-- 「Ascend 组件」内的 `COMPATIBILITY_ROWS` 按 [配套规则](version_compatibility.md) 填检查项、实测、要求、结论和依据，比对增加环境列。依据使用规则名称、编号或证据字段。版本已采到但查无适用规则时可在此写“待核验”。`VERSION_MISMATCH_BANNER` 用于逐卡驱动和固件告警等需要人工补充的结论。
-- `COMPATIBILITY_ENVIRONMENTS` 为可选 JSON 数组。每项写 `name`（环境或角色）、`scene`（检查器结果中的场景）与 `versions`（检查器 `observed` 中已核实且有值的 `version`，如 `{"vllm_ascend":"0.30.0","cann":"9.2.0"}`）。每个环境或角色独立填一项。渲染器用这些字段生成可点击的版本卡片、偏离清单和最少改动建议。`COMPONENT_CARDS` 用于补充矩阵以外的观测，避免重复卡片。
+- 「Ascend 组件」内的 `COMPATIBILITY_ROWS` 按[配套规则](version_compatibility.md)填检查项、实测、要求、结论和依据，比对增加环境列。依据使用规则名称、编号或证据字段。用 `catalog.checks` 逐项填硬件发布、工作负载或包级关系，注明范围和快照日期。将 `candidate` 填为“仅有候选”。版本已采到但查无适用规则时可在此写“待核验”，缺采的字段写入「未采集项」。`VERSION_MISMATCH_BANNER` 用于逐卡驱动和固件告警或明确的平台限制，相关改动建议按业务基线参考呈现。
+- `COMPATIBILITY_ENVIRONMENTS` 为可选 JSON 数组。每项写 `name`（环境或角色）、`scene`（检查器结果中的场景）与 `versions`（`observed` 中有已核实版本且属于 [卡片渲染器](render_compatibility.py) `LABELS` 的组件，如 `{"vllm_ascend":"0.30.0","cann":"9.2.0"}`）。每个环境或角色独立填一项。渲染器用这些字段生成可点击的版本卡片、偏离清单和最少改动建议。`COMPONENT_CARDS` 用于补充矩阵以外的观测，避免重复卡片。
 - 说明使用简短中文。字段路径和英文产品名保留原样。原始元数据中如有旧版采集脚本版本，仅省略脚本自身版本字段；保留数据格式版本与组件版本。
 - `HEALTH_SCORE` 与 `SIMILARITY` 接收 0–100 数字或 `null`。没有可判定项或有效输入不足时填 `null`。健康评分只基于适用且已判定项。相似度和差异计数只纳入可比字段，覆盖缺口在「未采集项」说明。`SCORE_COLOR` 只接受 `var(--ok)`、`var(--warn)`、`var(--fail)`、`var(--info)`、`var(--accent)` 或 `var(--ink-muted)`。圆环和进度宽度由脚本计算。
 - 所有报告片段都以实际观测填充。输入文件名、主机名、变量值、日志和差异路径属于数据，先脱敏再填充，敏感值用 `***MASKED***`。折叠区同样执行脱敏。

@@ -1,6 +1,6 @@
 # ascend-dump-analyzer
 
-昇腾训练与推理环境采集、单份分析与多份比对。
+昇腾训练与推理环境采集、单份分析、多份比对及离线版本配套核对。
 
 ## 分享与使用
 
@@ -20,3 +20,4 @@ python3 msprechecker_dump.py --filter --no-probes \
 - **版本配套**集中在「Ascend 组件」。点击已采集的组件版本卡片，直接查看固定该版本时的配套组合。报告列出偏离项，并按已采集版本推荐改动最少的方案。[查看规则](references/version_compatibility.md)
 - **Markdown 摘要**保留总体结论、最重要的发现和下一步。
 - 将现有 dump 或目录交给 skill，说明分析一份还是比对多份即可。历史 dump 可直接使用。
+- 只有版本清单时，可直接核对已安装或拟部署组合，也可查询固件驱动下载选项及系统、安装包参考。[查看清单格式与命令](references/compatibility_inventory.md)

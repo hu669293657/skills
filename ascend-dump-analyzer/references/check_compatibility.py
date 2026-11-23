@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import sys
 
+import compatibility_catalog as catalog
 
 SCENES = {'torch': 'torch_npu', 'vllm': 'vllm_ascend', 'mindspeed': 'mindspeed_llm',
           'modelink': 'modellink', 'mindie': 'mindie'}
@@ -20,6 +21,8 @@ def version(value, component):
         return None
     # Toolkit 采集器将 version_dir 附在主版本之后。
     value = value.strip().split(' (', 1)[0] if component == 'cann' else value.strip()
+    if component == 'megatron' and value.lower().startswith('core_v') and VERSION.fullmatch(value[5:]):
+        return value.lower()
     match = VERSION.fullmatch(value)
     if not match:
         return None
@@ -46,28 +49,40 @@ def observation(component, samples):
             'evidence': evidence, 'conflict': len(distinct) > 1}
 
 
-def collect_versions(data, overrides):
+def collect_versions(data, overrides, catalog_components):
     runtime = data.get('runtime') or {}
     ascend = data.get('ascend') or {}
     packages = runtime.get('packages') or {}
     samples = {component: [] for component in PACKAGES | {'python', 'cann', 'hdk'}}
+    package_keys = {
+        name.replace('-', '_'): name for name in sorted(catalog_components - {
+            'python', 'cann', 'hdk', 'torchnpu_release', 'megatron', 'mindspeed_core_branch',
+        })
+    }
+    package_keys.update({name: name for name in PACKAGES})
     for field in ('watched', 'watched_locations'):
         for name, value in (packages.get(field) or {}).items():
-            component = name.lower().replace('-', '_')
-            if component not in PACKAGES:
+            component = package_keys.get(name.lower().replace('-', '_'))
+            if not component:
                 continue
             for record in value if isinstance(value, list) else [value]:
                 raw = record.get('version') if isinstance(record, dict) else record
-                samples[component].append((raw, f'runtime.packages.{field}.{name}'))
+                samples.setdefault(component, []).append((raw, f'runtime.packages.{field}.{name}'))
     for line in packages.get('pip_list_raw') or []:
         name, sep, raw = line.partition('==')
-        component = name.lower().replace('-', '_')
-        if sep and component in PACKAGES:
-            samples[component].append((raw, f'runtime.packages.pip_list_raw[{name}]'))
-    for component, key in (('cann', 'toolkit'), ('mindie', 'mindie'), ('hdk', 'hdk')):
+        component = package_keys.get(name.lower().replace('-', '_'))
+        if sep and component:
+            samples.setdefault(component, []).append((raw, f'runtime.packages.pip_list_raw[{name}]'))
+    in_container = (runtime.get('container') or {}).get('in_container')
+    for component, key in (('cann', 'toolkit'), ('mindie', 'mindie'), ('hdk', 'hdk'),
+                           ('atb', 'atb'), ('mindstudio-toolkit', 'mindstudio_toolkit')):
+        if component == 'hdk' and in_container is True:
+            continue
         record = ascend.get(key) or {}
         if isinstance(record, dict) and record.get('collection_status', 'success') == 'success':
-            samples[component].append((record.get('version'), f'ascend.{key}.version'))
+            if not record:
+                continue
+            samples.setdefault(component, []).append((record.get('version'), f'ascend.{key}.version'))
             for item in record.get('installed_candidates') or []:
                 samples[component].append((item.get('version'), f'ascend.{key}.installed_candidates'))
     py_version = runtime.get('python_version') or (data.get('_meta') or {}).get('python_version')
@@ -75,7 +90,8 @@ def collect_versions(data, overrides):
     samples['python'].append((py_version, py_source))
     result = {key: observation(key, values) for key, values in sorted(samples.items())}
     for key, item in overrides.items():
-        if (key not in result or not isinstance(item, dict) or not version(item.get('version'), key)
+        if ((key not in result and key not in catalog_components)
+                or not isinstance(item, dict) or not version(item.get('version'), key)
                 or not isinstance(item.get('source'), str) or not item['source'].strip()):
             raise ValueError(f'补充证据 {key} 须包含有效版本和来源')
         result[key] = observation(key, [(item['version'], item['source'])])
@@ -211,22 +227,105 @@ def check_boards(data, source):
     return result
 
 
+def hardware_family(data, knowledge):
+    devices = (data.get('npu') or {}).get('devices') or []
+    aliases = catalog.read_aliases(knowledge, 'hardware')
+    families = set()
+    for device in devices:
+        name = device.get('name')
+        queries = device.get('queries') or {}
+        identity_queries = [queries[key] for key in ('board', 'common') if key in queries]
+        if identity_queries and all(query.get('status') == 'failed' or query.get('returncode', 0) != 0
+                                    for query in identity_queries):
+            return None
+        families.add(aliases.get(catalog.norm(name)) if isinstance(name, str) else None)
+    return next(iter(families)) if len(families) == 1 and None not in families else None
+
+
+def check_catalog(data, versions, scene, scope, knowledge):
+    if scope.keys() - set(catalog.SCOPE_FIELDS):
+        raise ValueError('--scope 只接收硬件及安装范围字段')
+    scope = {key: value for key, value in scope.items() if value is not None}
+    scope_sources = dict.fromkeys(scope, '--scope')
+    if 'hardware' not in scope:
+        hardware = hardware_family(data, knowledge)
+        if hardware:
+            scope['hardware'] = hardware
+            scope_sources['hardware'] = 'npu.devices[].name'
+
+    checks = [['cann', 'hdk']]
+    if 'torch_npu' in versions:
+        checks.append(['cann', 'torch', 'torch_npu'])
+    anchor = SCENES.get(scene)
+    release_component = 'mindspeed' if scene == 'mindspeed' else anchor
+    if (release_component in {'mindie', 'vllm_ascend', 'mindspeed'} and 'hardware' in scope
+            and versions.keys() >= {'cann', 'hdk', release_component}):
+        checks.append(['cann', 'hdk', release_component])
+
+    # Independent package, platform and published component-matrix checks.
+    groups = {
+        tuple(sorted(row['versions'])) for row in knowledge['rules']
+        if (row['kind'] in {'subpackage', 'platform', 'explicit_conflict'}
+            or (row['kind'] == 'matrix'
+                and any(key.startswith('mindie_') for key in row['versions'])))
+        and (row['versions'].keys() - {'cann'}) <= versions.keys()
+    }
+    checks.extend(list(group) for group in sorted(groups))
+    payload = {**scope, 'versions': versions, 'checks': checks}
+    if anchor in {'vllm_ascend', 'mindspeed_llm'}:
+        payload['workload'] = anchor
+    return dict(catalog.evaluate(payload, knowledge, require_hardware_for_hdk=True),
+                scope_sources=scope_sources)
+
+
+def write_result(result, output):
+    text = json.dumps(result, ensure_ascii=False, indent=2) + '\n'
+    if output:
+        output.write_text(text, encoding='utf-8')
+    else:
+        sys.stdout.buffer.write(text.encode('utf-8'))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='离线核对昇腾环境版本配套。')
-    parser.add_argument('dump', type=Path, help='采集快照 JSON')
-    parser.add_argument('--scene', choices=('auto', *SCENES), default='auto', help='业务场景')
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument('dump', nargs='?', type=Path, help='采集快照 JSON')
+    modes.add_argument('--inventory', type=Path, help='已安装或拟部署清单 JSON，- 表示标准输入')
+    modes.add_argument('--reference', metavar='关键词', help='查询硬件、系统与 CANN 安装包参考条目')
+    parser.add_argument('--scene', choices=('auto', *SCENES), help='dump 业务场景，默认自动推断')
     parser.add_argument('--observed', type=Path, help='已核实的业务版本及证据 JSON')
+    parser.add_argument('--scope', type=Path, help='dump 的硬件系列、CANN 版别等范围 JSON')
     parser.add_argument('--output', type=Path, help='结果 JSON 路径，省略则输出到终端')
     args = parser.parse_args(argv)
+    if args.dump is None and (args.observed or args.scope or args.scene):
+        parser.error('--scene、--observed 和 --scope 仅用于 dump 模式')
     try:
-        matrix = read_object(Path(__file__).with_name('compatibility_matrix.json'))
+        matrix_path = Path(__file__).with_name('compatibility_matrix.json')
+        inputs = (args.dump, args.observed, args.scope, args.inventory, matrix_path, catalog.KNOWLEDGE)
+        if args.output and args.output.resolve() in {path.resolve() for path in inputs if path}:
+            raise ValueError('输出须使用独立文件')
+        knowledge = catalog.load()
+        if args.dump is None:
+            if args.reference is not None:
+                result = catalog.lookup(knowledge, args.reference)
+            else:
+                payload = (json.loads(sys.stdin.buffer.read().decode('utf-8-sig'))
+                           if args.inventory == Path('-') else read_object(args.inventory))
+                result = catalog.evaluate(payload, knowledge)
+            write_result(result, args.output)
+            return 0
+
+        matrix = read_object(matrix_path)
         data = read_object(args.dump)
-        observed = collect_versions(data, read_object(args.observed) if args.observed else {})
+        catalog_components = {key for row in knowledge['rules'] for key in row['versions']}
+        observed = collect_versions(data, read_object(args.observed) if args.observed else {},
+                                    catalog_components)
         choices = [scene for scene, anchor in SCENES.items()
                    if scene != 'torch' and (observed[anchor]['evidence']
                        or (scene == 'vllm' and observed['vllm']['evidence']))]
         inferred = (choices or ['torch'])[0] if len(choices) <= 1 else None
-        scene = inferred if args.scene == 'auto' else args.scene
+        auto_scene = args.scene in (None, 'auto')
+        scene = inferred if auto_scene else args.scene
         software = check_software(observed, matrix, scene)
         host = {key: dict(assess(observed[key]['version'], expected, key),
                           source=matrix['sources']['vllmHost'])
@@ -257,18 +356,13 @@ def main(argv=None):
                     source=matrix['sources']['mindspeed'])
         versions = {key: item['version'] for key, item in observed.items() if item['version']}
         _, recommendations = remediation(versions, matrix, scene)
-        result = {'scene': scene, 'scene_source': '推断' if args.scene == 'auto' else '指定',
+        scoped = check_catalog(data, versions, scene, read_object(args.scope) if args.scope else {},
+                               knowledge)
+        result = {'scene': scene, 'scene_source': '推断' if auto_scene else '指定',
                   'observed': observed, 'software': software, 'host': host,
                   'component_support': component_support, 'recommendations': recommendations,
-                  'boards': check_boards(data, matrix['sources']['board'])}
-        output = json.dumps(result, ensure_ascii=False, indent=2) + '\n'
-        if args.output:
-            inputs = [args.dump, args.observed, Path(__file__).with_name('compatibility_matrix.json')]
-            if args.output.resolve() in {path.resolve() for path in inputs if path}:
-                raise ValueError('输出须使用独立文件')
-            args.output.write_text(output, encoding='utf-8')
-        else:
-            sys.stdout.write(output)
+                  'boards': check_boards(data, matrix['sources']['board']), 'catalog': scoped}
+        write_result(result, args.output)
     except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
         print(f'配套检查失败：{exc}', file=sys.stderr)
         return 1

@@ -1,18 +1,20 @@
 ---
 name: "ascend-dump-analyzer"
-description: "用于 Ascend 昇腾服务器环境采集、dump/预检信息分析和多环境配置漂移比对；也用于用户明确指定本 skill 后说‘帮我分析这个日志/附件’的请求，输入可能为 .json、.log、.txt 或目录。一般现网故障日志取证用 issue-analyzer，Prof 性能分析用 cluster-analysis，BMC 硬件健康诊断用 ibmc_analyzer。"
+description: "用于 Ascend 昇腾服务器环境采集、dump/预检信息分析、多环境配置漂移比对，以及核对已安装或拟部署的硬件、Ascend HDK、CANN、TorchNPU、训练和推理组件版本配套。也用于用户明确指定本 skill 后提供的 .json、.log、.txt 或目录。一般现网故障日志取证用 issue-analyzer，Prof 性能分析用 cluster-analysis，BMC 硬件健康诊断用 ibmc_analyzer。"
 ---
 
 # Ascend 环境分析器
 
-采集昇腾训练与推理环境快照，分析单份 dump 或比对多份 dump 的配置漂移。
+采集昇腾训练与推理环境快照，分析单份 dump 或比对多份 dump 的配置漂移，也可对版本清单单独做离线配套核对。
+
+只要求核对已安装或拟部署的版本、查下载选项或查硬件与安装包条目时，走[版本清单与参考资料查询](references/compatibility_inventory.md)，直接交付结论、适用范围、规则和缺少的证据。收到 dump 时进入下列流程。
 
 ## 分析与交付
 
 **完整报告必须直接使用 references 下的 HTML 模板。** 默认交付模板 HTML 和同名 Markdown 摘要。Markdown 独立提炼结论，只保留主要发现、影响、关键证据和下一步。只请求采集、复制脚本或修改 skill 时，交付对应结果即可。
 
 1. **识别输入与模式。** 按内容识别 dump，包括包含 JSON 的 .log/.txt。单份分析读取 [单份 HTML 模板](references/template_single_dump.html)，多份比对读取 [比对 HTML 模板](references/template_comparison.html)。目录中存在多个候选时记录候选与实际读取范围。明确请求比对时，输入不足仍使用比对模板。非 dump 的故障日志只提取其中可核实的环境事实，并标明覆盖范围。
-2. **分析证据和版本配套。** 用 [字段参考](references/dump_format.md) 核对采集状态。每份有效 dump 都按 [版本配套规则](references/version_compatibility.md) 运行离线检查。比对时逐份检查，再比较结论。
+2. **分析证据和版本配套。** 用 [字段参考](references/dump_format.md) 核对采集状态。每份有效 dump 都按 [版本配套规则](references/version_compatibility.md) 运行离线检查，同时解读发布基线和 `catalog.checks`。比对时逐份核对同一角色及范围，再比较结论。
 3. **按模板填写完整 HTML。** 按 [填充指南](references/report_templates.md) 用脱敏槽位填充模板。页首与总览只写实测事实和有证据支持的结论。缺失字段、未读取的输入、采集失败、权限限制和补采建议统一写入「未采集项」，其他位置只填有证据的行。「Ascend 组件」用各环境或角色已核实的版本生成可点击卡片，点击即固定该版本，弹出其他组件的当前版本与推荐版本对照表。存在偏离时列出当前基线不匹配项和改动最少的推荐组合。依据写规则名称或编号。
 4. **另写简短 Markdown。** 与 HTML 同名，包含一行总体结论，最多五条最重要发现（含影响及关键证据），以及可执行的下一步。需要提及版本配套或缺采细节时，分别使用「Ascend 组件」和「未采集项」小节。详细差异、版本清单和原始数据留在 HTML。
 5. **核验并交付。** 使用用户指定的输出目录，否则遵守工作区产物约定，通常为 `outputs/`。单份命名 `ascend_analysis_<时间戳>`，比对命名 `ascend_comparison_<时间戳>`，同名加序号。运行模板渲染器的 `--check`，核对导航、必需内容、脱敏和摘要结论，交付 HTML 报告及 Markdown 摘要两个真实链接。渲染报错时按同一模板修正槽位；若只能手工渲染，也使用同一模板并核验。如所有允许的位置均无法写入，如实报告阻塞。
