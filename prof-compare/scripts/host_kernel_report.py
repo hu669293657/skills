@@ -73,8 +73,6 @@ def render_device(result, comparison=None):
         name=escape(r["op"])
         if result.get("execution"):
             name=f'<a class="ev-left" href="#kernel-execution" data-execution-type="{escape(r["op"],quote=True)}">{name}</a>'
-        if r["status"] == "见框架子组":
-            name += '<small><a href="#kernel-attribution">见框架子组</a></small>'
         symbols=list(r[peer+"_symbols"])
         if peer=="gpu":
             peers=" / ".join(dict.fromkeys(gpu_short(s) for s in symbols)) if symbols else "—"
@@ -187,29 +185,3 @@ def attribution_tables(result, comparison=None):
                        a["mean_ms"], b["mean_ms"], row["mean_ratio"],
                        a.get("operand_rows"), b.get("operand_rows"), row["note"]])
     return [("Kernel归属覆盖", coverage), ("跨平台框架分组", groups)]
-
-
-def render_attribution(result, comparison=None):
-    tables = attribution_tables(result, comparison)
-    if not tables:
-        return ""
-
-    def cell(value, index, integer_columns):
-        if isinstance(value, (float, int)):
-            return fmt(value, 0 if index in integer_columns else 3)
-        return escape(value) if value is not None else "—"
-
-    def table(rows, integer_columns):
-        headers, *body = rows
-        head = "".join(f'<th scope="col">{escape(label)}</th>' for label in headers)
-        rendered = ["<tr>" + "".join(f"<td>{cell(v, i, integer_columns)}</td>"
-                                      for i, v in enumerate(row)) + "</tr>" for row in body]
-        return '<div class="table-wrap"><table><thead><tr>'+head+'</tr></thead><tbody>'+''.join(rendered)+'</tbody></table></div>'
-
-    return ('<section class="raw-detail" id="kernel-attribution">'
-            '<p>覆盖率以本侧设备事件为分母。Launch、flow 和框架归属可以重叠，CUDA Graph 重放入口只提供图级归属。</p>'
-            + table(tables[0][1], {2}) +
-            '<p>累计值为 kernel 耗时之和，可能跨流重叠。'
-            '倍率按同形状的逻辑调用均值计算。空倍率表示计算边界或工作量仍需确认。</p>'
-            + (table(tables[1][1], {2,3,4,5,11,12}) if result["attribution"]["groups"]
-               else '<p>当前数据未找到可展示的框架分组。</p>') + '</section>')

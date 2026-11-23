@@ -40,9 +40,9 @@ python scripts/run_compare.py -d "<NPU目录>" -bp "<GPU trace>" --npu-top-csv "
 
 **跨平台 Kernel 框架归属**
 
-- 用「Kernel 归属覆盖」区分唯一 CUDA launch、可复核的 `ac2g` flow、直接 CPU 算子和 CUDA Graph 重放。Graph 入口只证明图级归属。逐节点需要采集时的节点到框架映射，异步重放的入口时刻、stream 和符号用于辅助定位候选。
+- 用中文 Excel 的「Kernel归属覆盖」区分唯一 CUDA launch、可复核的 `ac2g` flow、直接 CPU 算子和 CUDA Graph 重放。Graph 入口只证明图级归属。逐节点需要采集时的节点到框架映射，异步重放的入口时刻、stream 和符号用于辅助定位候选。
 - NPU 优先用 `TASK → CONNECTION_IDS → PYTORCH_API`。原生连接缺失时，用唯一 `TASK.connectionId → CANN_API.launch` 定位同线程完整包含 launch 的唯一内层框架调用。证据不足的任务计入未定位。
-- 在「跨平台框架分组」核对模块、逻辑调用、形状和 dtype。交叉熵按框架调用归并 GPU 分块，再按 token 桶比较均值。`Add` 先按 `aten::add`、`aten::add_`、`aten::addmm` 区分语义。分组 GEMM 同时核对专家数、矩阵尾维和操作数行数。仅对边界和工作量可比的分组展示倍率。此表与 Top 15 可引用同一 NPU 事件，分别用于下钻和排名。
+- 在中文 Excel 的「跨平台框架分组」核对模块、逻辑调用、形状和 dtype。交叉熵按框架调用归并 GPU 分块，再按 token 桶比较均值。`Add` 先按 `aten::add`、`aten::add_`、`aten::addmm` 区分语义。分组 GEMM 同时核对专家数、矩阵尾维和操作数行数。仅对边界和工作量可比的分组展示倍率。此表与 Top 15 可引用同一 NPU 事件，分别用于下钻和排名。
 - 复核来源时用 JSON 的 `host_kernel.attribution`。有原始 NPU DB 和 GPU trace 时，读取 [跨平台归属方法](references/analysis_methodology.md#跨平台-kernel-归属) 确认分母、事件 ID 和证据限制。
 
 **单次执行比对**
