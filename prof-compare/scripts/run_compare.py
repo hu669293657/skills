@@ -273,12 +273,15 @@ def input_pair(comp, base):
 
 
 def main() -> None:
+    from profile_identity import add_label_args, comparison_identity, read_profile_identity
+
     parser = argparse.ArgumentParser(
         description="两张 Prof 数据直接比对：自动安装 msprof-analyze → 执行 compare → 生成分析报告")
     parser.add_argument("-d", "--profiling_path", required=True,
-                        help="待比对 Prof 路径（通常是 NPU 数据 / 优化后数据 / 新版本数据）")
+                        help="比对侧 Prof 路径，可传 NPU 或 GPU")
     parser.add_argument("-bp", "--benchmark_profiling_path", required=True,
-                        help="基准 Prof 路径（通常是 GPU 数据 / 优化前数据 / 旧版本数据）")
+                        help="基线侧 Prof 路径，可传 NPU 或 GPU")
+    add_label_args(parser)
     parser.add_argument("-o", "--output", default=None,
                         help="输出目录（默认 ./compare_output_<时间戳>）")
     parser.add_argument("--compare_args", default="",
@@ -297,7 +300,8 @@ def main() -> None:
 
     base = os.path.abspath(args.benchmark_profiling_path)
     comp = os.path.abspath(args.profiling_path)
-    for label, path in (("基准 Prof (-bp)", base), ("待比对 Prof (-d)", comp)):
+    original_paths = (base, comp)
+    for label, path in (("基线 Prof (-bp)", base), ("比对 Prof (-d)", comp)):
         if not os.path.exists(path):
             die(f"{label} 路径不存在：{path}")
         log(f"{label}：{path}")
@@ -316,6 +320,7 @@ def main() -> None:
     if required and args.compare_only:
         parser.error("--compare_only 只生成原始 xlsx；生成含 host/kernel 的报告时请去掉该开关")
     detail = None
+    gpu_metadata = {}
     try:
         pair = input_pair(comp, base) if not args.compare_only else None
         if pair:
@@ -323,13 +328,16 @@ def main() -> None:
             kind, first, second = pair
             if kind == "npu_gpu":
                 # The raw section always ranks the NPU; keep the caller's direction for msprof.
-                if first == comp:
+                npu_is_compare = first == comp
+                if npu_is_compare:
                     base = second
                 else:
                     comp = second
-                detail = compare_gpu(first, second, args.npu_top_csv, args.host_aliases)
+                detail = compare_gpu(first, second, args.npu_top_csv, args.host_aliases, gpu_metadata)
+                detail["side_roles"] = ["compare", "base"] if npu_is_compare else ["base", "compare"]
             else:
                 detail = compare_npus(first, second, args.npu_top_csv, args.host_aliases)
+                detail["side_roles"] = ["compare", "base"]
             if any(t.split("=")[0] in ("--base_step", "--comparison_step") for t in extra):
                 detail["msprof_step_filter"] = True
         elif required:
@@ -370,14 +378,26 @@ def main() -> None:
     if SCRIPTS_DIR not in sys.path:
         sys.path.insert(0, SCRIPTS_DIR)
     from main_analyzer import analyze
+    from cross_trace import gpu_file
+    identities = []
+    for original, path, source in zip(original_paths, (base, comp), sources):
+        gpu = None
+        if source is None:
+            try:
+                gpu = gpu_file(path)
+            except (OSError, ValueError):
+                pass
+        identities.append(read_profile_identity(original, source, gpu, gpu_metadata or None))
+    comparison = comparison_identity(*identities, labels=(args.base_label, args.compare_label))
     analyze(xlsx, output, detail, tuple(zip(("基准侧 NPU", "比对侧 NPU"), sources)),
-            (step_args.base_step, step_args.comparison_step))
+            (step_args.base_step, step_args.comparison_step), comparison=comparison)
     if detail:
         # Older bookmarks and consumers used these names for the raw comparison.
         report = Path(output) / "compare_analysis_report.html"
         shutil.copyfile(report, report.with_name("host_kernel_compare.html"))
         report.with_name("host_kernel_compare.json").write_text(
-            json.dumps(detail, ensure_ascii=False, separators=(",", ":"), allow_nan=False), encoding="utf-8")
+            json.dumps({**detail, "comparison": comparison}, ensure_ascii=False, separators=(",", ":"),
+                       allow_nan=False), encoding="utf-8")
     log("全流程完成！")
 
 

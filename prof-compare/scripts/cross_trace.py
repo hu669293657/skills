@@ -44,14 +44,18 @@ def duration(value):
     return value
 
 
-def trace_events(path):
+def trace_document(path):
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rb") as f:
         obj = json.load(f)
     events = obj.get("traceEvents") if isinstance(obj, dict) else obj
     if not isinstance(events, list):
         raise ValueError(f"{path} 缺少 traceEvents 数组")
-    return events
+    return (obj if isinstance(obj, dict) else {}), events
+
+
+def trace_events(path):
+    return trace_document(path)[1]
 
 
 def gpu_file(path):
@@ -241,8 +245,12 @@ class GpuBucket:
     launches: list = field(default_factory=list)
 
 
-def read_gpu(path, execution=None):
-    events = trace_events(path)
+def read_gpu(path, execution=None, identity=None):
+    header, events = trace_document(path)
+    if identity is not None:
+        from profile_identity import gpu_identity
+        identity.update(gpu_identity(header, events))
+    del header
     lanes, hosts, external = defaultdict(list), defaultdict(Metric), defaultdict(set)
     steps, devices = set(), set()
     host_shapes = defaultdict(lambda: defaultdict(Metric))

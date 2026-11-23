@@ -462,8 +462,126 @@ hb_environment_pid(){
   hb_entry environment_process EXECUTION_FAILED "$rel" target_identity_changed_or_write_failed 1
 }
 
+hb_install_prefix(){
+  local file=$1 key=$2
+  [[ -f "$file" && -r "$file" ]] || return
+  # The installer record is data. Read only the requested absolute path.
+  awk -v key="$key" '
+    sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "") {
+      sub(/[[:space:]]+$/, "")
+      if ($0 ~ /^".*"$/ || $0 ~ /^\047.*\047$/) $0=substr($0,2,length($0)-2)
+      if ($0 ~ /^\// && $0 !~ /[[:cntrl:]]/) { print; exit }
+    }' "$file"
+}
+
+hb_ascend_version_file(){
+  local rel="hostbound/environment/ascend/$1.txt" candidate non_regular=""
+  local -A cseen=()
+  shift
+  for candidate in "$@"; do
+    [[ -n "${cseen[$candidate]+x}" ]] && continue
+    cseen[$candidate]=1
+    if [[ -f "$candidate" ]]; then
+      hb_file environment_ascend "$candidate" "$rel" "$candidate"
+      return
+    fi
+    if [[ -z "$non_regular" && ( -e "$candidate" || -L "$candidate" ) ]]; then
+      non_regular=$candidate
+    fi
+  done
+  if [[ -n "$non_regular" ]]; then
+    hb_entry environment_ascend UNSUPPORTED "$rel" version_source_not_regular 1 null null true null null "$non_regular"
+  else
+    hb_entry environment_ascend UNSUPPORTED "$rel" interface_missing 1 null null true null null "$1"
+  fi
+}
+
+hb_ascend_versions(){
+  local etc=$1 ascend=$2 prefix dir config driver arch id suffix ambiguous="" atb_home llm_home
+  local -a prefixes=() roots=() versions=() candidates=() suffixes=()
+  if [[ ${CONDA_PREFIX:-} == /* && -d "$CONDA_PREFIX/Ascend" ]]; then
+    prefixes+=("${CONDA_PREFIX%/}/Ascend")
+  fi
+  if [[ ${HOME:-} == /* ]]; then
+    config=$(hb_install_prefix "$HOME/Ascend/ascend_cann_install.info" Install_Path)
+    [[ -n "$config" ]] && prefixes+=("${config%/}")
+  fi
+  config=$(hb_install_prefix "$etc/Ascend/ascend_cann_install.info" Install_Path)
+  [[ -n "$config" ]] && prefixes+=("${config%/}")
+  prefixes+=("$ascend")
+  [[ ${HOME:-} == /* && -d "$HOME/Ascend" ]] && prefixes+=("${HOME%/}/Ascend")
+
+  # Select one installation before probing its components. An active prefix
+  # may expose both the new and old entry points.
+  for dir in "${ASCEND_HOME_PATH:-}" "${ASCEND_TOOLKIT_HOME:-}"; do
+    if [[ "$dir" == /* && -d "$dir" ]]; then roots+=("${dir%/}"); break; fi
+  done
+  if ((${#roots[@]} == 0)); then
+    for prefix in "${prefixes[@]}"; do
+      for dir in "$prefix/cann" "$prefix/ascend-toolkit/latest"; do
+        [[ -d "$dir" ]] && roots+=("$dir")
+      done
+      ((${#roots[@]})) && break
+      for dir in "$prefix"/cann-[0-9]* "$prefix"/ascend-toolkit/[0-9]* "$prefix/nnrt/latest" "$prefix/nnae/latest"; do
+        [[ -d "$dir" ]] || continue
+        [[ ${#versions[@]} -gt 0 && "$dir" -ef "${versions[0]}" ]] && continue
+        versions+=("$dir")
+        ((${#versions[@]} > 1)) && break
+      done
+      if ((${#versions[@]})); then
+        if ((${#versions[@]} == 1)); then roots=("${versions[0]}"); else ambiguous=$prefix; fi
+        break
+      fi
+    done
+  fi
+  if ((${#roots[@]} == 0)); then roots=("${prefixes[0]}/cann" "${prefixes[0]}/ascend-toolkit/latest"); fi
+  driver=$(hb_install_prefix "$etc/ascend_install.info" Driver_Install_Path_Param)
+  arch=$(uname -m)
+  atb_home=${ATB_HOME_PATH%/}
+  llm_home=${MINDIE_LLM_HOME_PATH%/}
+  for id in driver toolkit runtime compiler hccl opp atb mindie; do
+    candidates=()
+    case "$id" in
+      driver)
+        [[ -n "$driver" ]] && candidates+=("${driver%/}/driver/version.info")
+        candidates+=("$ascend/driver/version.info");;
+      atb)
+        case "$atb_home" in /*/atb/cxx_abi_[01]) candidates+=("${atb_home%/atb/cxx_abi_?}/version.info");; esac
+        for prefix in "${prefixes[@]}"; do
+          candidates+=("$prefix/nnal/atb/latest/version.info" "$prefix/atb/latest/version.info")
+        done;;
+      mindie)
+        case "$llm_home" in /*/mindie-llm) candidates+=("${llm_home%/mindie-llm}/version.info");; esac
+        for prefix in "${prefixes[@]}"; do candidates+=("$prefix/mindie/latest/version.info"); done;;
+      *)
+        if [[ "$id" == opp && ${ASCEND_OPP_PATH:-} == /* && -d "$ASCEND_OPP_PATH" ]]; then
+          candidates+=("${ASCEND_OPP_PATH%/}/version.info")
+        fi
+        if [[ -n "$ambiguous" ]]; then
+          if ((${#candidates[@]})); then
+            hb_ascend_version_file "$id" "${candidates[@]}"
+          else
+            hb_entry environment_ascend UNSUPPORTED "hostbound/environment/ascend/$id.txt" ambiguous_cann_installation 1 null null true null null "$ambiguous"
+          fi
+          continue
+        fi
+        suffixes=("$id/version.info")
+        if [[ "$id" == toolkit ]]; then
+          case "$arch" in aarch64|x86_64) suffixes+=("$arch-linux/ascend_toolkit_install.info");; esac
+          suffixes+=("asc-devkit/version.info" "share/info/asc-devkit/version.info")
+        else
+          suffixes+=("share/info/$id/version.info")
+        fi
+        for suffix in "${suffixes[@]}"; do
+          for dir in "${roots[@]}"; do candidates+=("$dir/$suffix"); done
+        done;;
+    esac
+    hb_ascend_version_file "$id" "${candidates[@]}"
+  done
+}
+
 hb_environment(){
-  local etc=$1 ascend=$2 root=hostbound/environment id path candidate pid os_release
+  local etc=$1 ascend=$2 root=hostbound/environment id path pid os_release
   local -A seen=()
   mkdir -p -- "$SNAP/$root/host" "$SNAP/$root/ascend" || return 1
   os_release="$etc/os-release"
@@ -477,22 +595,7 @@ hb_environment(){
     case "$id" in enabled) id=thp;; current_clocksource) id=clocksource;; esac
     hb_file environment_host "$path" "$root/host/$id.txt" "$path"
   done
-  for id in driver toolkit runtime compiler hccl opp atb mindie; do
-    case "$id" in
-      driver) path="$ascend/driver/version.info";;
-      atb) path="$ascend/nnal/atb/latest/version.info";;
-      mindie) path="$ascend/mindie/latest/version.info";;
-      *)
-        path="$ascend/cann/$id/version.info"
-        candidate="$ascend/ascend-toolkit/latest/$id/version.info"
-        if [[ ! -r "$path" && -f "$candidate" ]]; then path="$candidate"; fi;;
-    esac
-    if [[ -f "$path" || ! -e "$path" ]]; then
-      hb_file environment_ascend "$path" "$root/ascend/$id.txt" "$path"
-    else
-      hb_entry environment_ascend UNSUPPORTED "$root/ascend/$id.txt" version_source_not_regular 1 null null true null null "$path"
-    fi
-  done
+  hb_ascend_versions "$etc" "$ascend"
   if ((HOSTBOUND)) && [[ -n "$PID_LIST" ]]; then
     for pid in ${PID_LIST//,/ }; do
       [[ -n "${seen[$pid]+x}" ]] && continue

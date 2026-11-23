@@ -23,11 +23,18 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 | Manifest 类别 | 证据 | 范围 |
 |---|---|---|
 | `environment_host` | `host/*.txt` | `os-release`、`uname`、THP、NUMA balancing、swappiness、overcommit_memory、内核时钟源 |
-| `environment_ascend` | `ascend/*.txt` | `/usr/local/Ascend` 常见安装位置的驱动、CANN Toolkit/Runtime/Compiler、HCCL、OPP、ATB、MindIE 版本文件 |
+| `environment_ascend` | `ascend/*.txt` | 按实际安装位置采集驱动、Toolkit、Runtime、Compiler、HCCL、OPP、ATB、MindIE 的版本文件 |
 | `environment_process` | `pid_<TGID>.json` | 显式 `--pid` 指定的目标。记录 PID、starttime、可执行文件、启动变量、已映射的共享库和进程资源限额 |
 | `environment_dump` | `msprechecker_dumped.json` | 默认调用内置原版采集器。包内位于 `hostbound/environment/`，独立文件位于输出目录，命名为 `<采集目录名>_msprechecker_dumped.json` |
 
-宿主机文件路径记录在 Manifest 的 `source` 中，命令来源记录在 `command` 中。组件路径缺失时只记录该候选路径的状态。自定义安装路径或容器内安装版本需用对应环境的独立证据核对。宿主机安装版本与进程实际映射的库路径含义不同。
+宿主机文件路径记录在 Manifest 的 `source` 中，命令来源记录在 `command` 中。版本取自文件内容，目录名仅用于定位。各产品对应的软件包、安装方式与华为文档见[安装路径参考](ascend_install_paths.md)。
+
+1. **选 CANN 安装目录。** 优先使用采集进程中第一个存在的绝对目录 `ASCEND_HOME_PATH`、`ASCEND_TOOLKIT_HOME`。否则依次检查活动 Conda 环境的 `Ascend` 前缀、当前用户与系统 CANN 安装记录中的 `Install_Path`、`/usr/local/Ascend`、当前用户的 `$HOME/Ascend`。安装记录仅解析对应键。
+2. **识别布局。** 在选中的前缀下先查 `cann` 与 `ascend-toolkit/latest`。若均无有效入口，仅在该前缀下识别 `cann-<版本>`、`ascend-toolkit/<版本>`、`nnrt/latest` 和 `nnae/latest`。有多个不同的候选目录时记为 `ambiguous_cann_installation`，`source` 指向有歧义的前缀。可通过上述环境变量明确选定目录。如果新旧两个活动入口实际指向不同安装，默认探测仍按组件兼容查找这两个入口；现场需要单套版本时应显式指定目录。
+3. **定位组件。** 对每项先查 `<组件>/version.info`，再查 `share/info/<组件>/version.info`。Toolkit 的旧版文件与本机架构的 `<arch>-linux/ascend_toolkit_install.info` 优先于 `asc-devkit/version.info`、`share/info/asc-devkit/version.info`。OPP 可由 `ASCEND_OPP_PATH/version.info` 单独定位。驱动从 `/etc/ascend_install.info` 的 `Driver_Install_Path_Param` 定位，ATB、MindIE 还识别 `ATB_HOME_PATH` 的 ABI 目录和 `MINDIE_LLM_HOME_PATH` 的 LLM 子目录，读取上层版本记录。
+4. **解释结果。** 命中常规文件后按实际读取结果记录状态。仅遇到目录或断链时记录首个异常路径和 `version_source_not_regular`，均不存在时记录首选路径和 `interface_missing`。报告逐组件合并 Bash 快照与原生 Dump，并显示提供该值的来源。只有子包证据时项目显示为“asc-devkit 子包”。独立原生 JSON 仍反映原生采集器自己的探测范围。
+
+默认命令只能观察采集进程可见的环境和文件系统。sudo 清除了安装用户的环境、pip 安装位于独立虚拟环境、或同机部署多套 CANN 时，可显式提供 CANN 的版本目录。容器内组件与业务进程实际加载的库需结合对应容器或 `--pid` 证据判断。
 
 进程快照仅用于读取。先核对 TGID 和 starttime，读完再次核对 starttime。进程退出或身份变化时丢弃该次快照。启动变量取自 `/proc/<PID>/environ`，仅保留 Rank、可见设备、OpenMP/BLAS 线程设置、HCCL 超时等白名单键和允许的值格式。启动环境读取上限为 1 MiB，映射表读取上限为 4 MiB，库路径结果上限为 64 KiB。达到限制时记录字段失败原因。完整环境、进程代码执行、包枚举和主动网络探测在此快照范围之外。
 

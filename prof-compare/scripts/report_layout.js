@@ -29,7 +29,7 @@
       for (const [i, metric] of metrics.entries()) {
         for (const side of sides.slice(i * 2, i * 2 + 2)) labels.push(side + ' · ' + metric.textContent);
       }
-      labels.push('差值（左 − 右 ms）', '倍率（左 / 右）');
+      labels.push('差值 · ' + sides.at(-2), '倍率 · ' + sides.at(-1));
       dataRows = table.tBodies[0].rows;
     } else {
       const [header, ...rows] = table.rows;

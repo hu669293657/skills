@@ -159,3 +159,6 @@ tr:hover td { background: #1A2233; }
   .header h1 { font-size:23px; }
   .section { padding:10px; margin-bottom:12px; }
 }
+.comparison-paths { margin-top: 12px; }
+.comparison-paths dd { margin: 4px 0 12px; overflow-wrap: anywhere; }
+#comparison-sources td, #comparison-sources th { overflow-wrap: anywhere; }

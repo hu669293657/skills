@@ -6,6 +6,7 @@
 """
 from datetime import datetime
 from html import escape
+from profile_identity import IDENTITY_COLUMNS, identity_rows
 from pathlib import Path
 
 
@@ -56,6 +57,9 @@ def _diff_color(diff):
 def generate_html_report(results: dict, output_path: str):
     """生成 HTML 报告"""
     meta = results.get('metadata', {})
+    comparison = meta.get('comparison', {})
+    base_label = escape(comparison.get('base', {}).get('short_label', '基线'))
+    compare_label = escape(comparison.get('compare', {}).get('short_label', '比对'))
     summary = results.get('analysis_summary', {})
 
     # 可用 Sheet 列表
@@ -110,6 +114,7 @@ def generate_html_report(results: dict, output_path: str):
 <details class="nav-sidebar" open>
   <summary class="nav-title">目录</summary>
   <nav aria-label="报告章节">
+  {'<a href="#comparison-sources">比对来源</a>' if comparison else ''}
   <a href="#overall">1. 总体性能比对</a>
   <a href="#conclusion">2. 分析结论</a>
   <div class="nav-sep"></div>
@@ -140,10 +145,12 @@ def generate_html_report(results: dict, output_path: str):
   {''.join('<p>'+escape(note)+'</p>' for note in (detail or {}).get('notes', []))}
 </div>
 
+{_render_comparison_sources(comparison) if comparison else ''}
+
 <!-- 总体性能 -->
 <div class="section" id="overall">
   <div class="section-title">1. 总体性能比对 (OverallMetrics)</div>
-  {_render_overall_metrics(om, e2e, dims, sub_cats) if om.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
+  {_render_overall_metrics(om, e2e, dims, sub_cats, base_label, compare_label) if om.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
 </div>
 
 <!-- 分析结论 -->
@@ -169,7 +176,7 @@ def generate_html_report(results: dict, output_path: str):
 <div class="section" id="operator">
   <div class="section-title">3. 算子统计比对 (OperatorCompareStatistic)</div>
   {_render_operator_statistic(op_stat) if op_stat.get('available') else '<div class="unavailable">该 Sheet 不存在或为空</div>'}
-  {render_host(detail) if detail else ''}
+  {render_host(detail, comparison) if detail else ''}
 </div>
 
 <!-- 模块统计 -->
@@ -193,8 +200,8 @@ def generate_html_report(results: dict, output_path: str):
 <!-- Kernel 比对 -->
 <div class="section" id="kernel">
   <div class="section-title">7. Kernel 比对 (KernelCompare)</div>
-  {render_device(detail) if detail else ''}
-  {render_execution(detail) if detail else ''}
+  {render_device(detail, comparison) if detail else ''}
+  {render_execution(detail, comparison) if detail else ''}
   {_render_kernel_type(kt) if kt.get('available') else ''}
   {_render_kernel_compare(kc) if kc.get('available') else ('' if detail or kt.get('available') else '<div class="unavailable">该 Sheet 不存在或为空（仅 NPU vs NPU 场景）</div>')}
 </div>
@@ -229,9 +236,29 @@ def generate_html_report(results: dict, output_path: str):
         f.write(html)
 
 
-def _render_overall_metrics(om, e2e, dims, sub_cats):
+def _render_comparison_sources(comparison):
+    headers = ''.join(f'<th scope="col">{label}</th>' for label in IDENTITY_COLUMNS[:7])
+    rows = []
+    paths = []
+    for record, row in zip(comparison.values(), identity_rows(comparison)):
+        fields = ''.join(f'<td>{escape(str(value))}</td>' for value in row[1:7])
+        rows.append(f'<tr><th scope="row">{escape(row[0])}</th>{fields}</tr>')
+        if record['input_path']:
+            origin = '工作簿记录路径' if record['input_path_origin'] == 'xlsx' else '输入路径'
+            paths.append(f'<dt>{escape(row[0])} · {origin}</dt><dd><code>{escape(row[7])}</code></dd>')
+            if record['source_path'] and record['source_path'] != record['input_path']:
+                paths.append(f'<dt>{escape(row[0])} · 实际读取来源</dt><dd><code>{escape(row[8])}</code></dd>')
+    details = ('<details class="comparison-paths"><summary>完整来源路径</summary><dl>'
+               + ''.join(paths) + '</dl></details>') if paths else ''
+    return ('<section class="section" id="comparison-sources"><h2 class="section-title">比对来源</h2>'
+            '<div class="table-wrap"><table><thead><tr>' + headers + '</tr></thead><tbody>'
+            + ''.join(rows) + '</tbody></table></div>' + details + '</section>')
+
+
+def _render_overall_metrics(om, e2e, dims, sub_cats, base_label, compare_label):
     """渲染总体性能部分"""
-    parts = []
+    delta_label = f"{compare_label} − {base_label}"
+    parts = [f'<p>差值 {delta_label} ｜ 比率 {compare_label} / {base_label}</p>']
 
     # E2E KPI + 趋势
     trend = om.get('overall_trend', '')
@@ -240,11 +267,11 @@ def _render_overall_metrics(om, e2e, dims, sub_cats):
         parts.append(f"""
         <div class="kpi-grid">
           <div class="kpi-card">
-            <div class="label">E2E 总耗时（基准）</div>
+            <div class="label">E2E 总耗时（{base_label}）</div>
             <div class="value">{_fmt(e2e.get('base'), 'ms')}</div>
           </div>
           <div class="kpi-card">
-            <div class="label">E2E 总耗时（比对）</div>
+            <div class="label">E2E 总耗时（{compare_label}）</div>
             <div class="value {_diff_color(e2e.get('diff'))}">{_fmt(e2e.get('comp'), 'ms')}</div>
           </div>
           <div class="kpi-card">
@@ -288,7 +315,8 @@ def _render_overall_metrics(om, e2e, dims, sub_cats):
     # 子类别 Top
     if sub_cats:
         parts.append('<div style="margin-top:16px;"><h4 style="margin-bottom:12px;">子类别变化 Top 8</h4><table>')
-        parts.append('<tr><th>子类别</th><th class="col-num">基准(ms)</th><th class="col-num">比对(ms)</th><th class="col-num">差异(ms)</th><th class="col-num">比率</th><th>状态</th></tr>')
+        parts.append(f'<tr><th>子类别</th><th class="col-num">{base_label} (ms)</th>'
+                     f'<th class="col-num">{compare_label} (ms)</th><th class="col-num">差异(ms)</th><th>比率</th><th>状态</th></tr>')
         for s in sub_cats:
             cls = _ratio_color(s.get('diff_ratio'))
             if s.get('is_improved'):
@@ -309,7 +337,9 @@ def _render_overall_metrics(om, e2e, dims, sub_cats):
     if raw_metrics:
         parts.append('<h4 style="margin:16px 0 8px;">总体性能原始数据</h4>')
         parts.append('<div class="table-wrap"><table class="excel-table">')
-        parts.append('<tr><th>指标</th><th>基准耗时(ms)</th><th>基准占比</th><th>基准数量</th><th>比对耗时(ms)</th><th>比对占比</th><th>比对数量</th><th>差异(ms)</th><th>差异比率</th></tr>')
+        side_headers = ''.join(f'<th>{side} {metric}</th>' for side in (base_label, compare_label)
+                               for metric in ('耗时(ms)', '占比', '数量'))
+        parts.append(f'<tr><th>指标</th>{side_headers}<th>差值(ms)</th><th>比率</th></tr>')
         for m in raw_metrics:
             idx = m['index']
             # 缩进处理：一级 \t 用 indent，二级 \t\t 用 indent2

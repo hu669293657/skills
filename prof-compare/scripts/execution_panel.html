@@ -22,7 +22,8 @@
     const section = document.currentScript.closest('section');
     const catalog = JSON.parse(section.querySelector('.event-data').textContent);
     const ctl = Object.fromEntries(Array.from(section.querySelectorAll('[data-ctl]'), x => [x.dataset.ctl, x]));
-    const leftLabel = '__LEFT__', rightLabel = '__PEER__', isGPU = rightLabel === 'GPU';
+    const [leftLabel, rightLabel] = catalog.labels, isGPU = catalog.gpu_peer;
+    const deltaLabel = leftLabel + ' − ' + rightLabel;
     const groups = new Map();
     for (const s of catalog.series) {
       if (!groups.has(s.type)) groups.set(s.type,[]);
@@ -63,7 +64,7 @@
       if(rhs.length>1) {
         const sum=rightValues.reduce((v,r)=>v+r[4],0);
         status+='。本次逻辑调用含 '+rhs.length+' 个 kernel，累计 '+sum.toFixed(3)+' μs';
-        if(typeof lhs?.[4]==='number')status+='，与左侧累计差 '+(lhs[4]-sum).toFixed(3)+' μs';
+        if(typeof lhs?.[4]==='number')status+='，'+deltaLabel+' 累计差 '+(lhs[4]-sum).toFixed(3)+' μs';
         status+='。';
       }
       ctl.status.textContent=status;
@@ -81,9 +82,9 @@
       const label=f=>esc(f.label)+(f.unit?' <small>'+esc(f.unit)+'</small>':'');
       const columns=sides.map(s=>'<th scope="col">'+esc(s)+'</th>').join('');
       if (ctl.view.selectedIndex===0) {
-        const head='<tr><th scope="col">字段</th>'+columns+(rhs.length<=1?'<th scope="col">差值（左 − 右）</th>':'')+'</tr>';
+        const head='<tr><th scope="col">字段</th>'+columns+(rhs.length<=1?'<th scope="col">'+esc(deltaLabel)+'</th>':'')+'</tr>';
         const body=entries.map(f=>'<tr><th scope="row">'+label(f)+'</th>'+records.map((r,j)=>cell(r,f.i,j)).join('')+
-          (rhs.length<=1?'<td data-delta data-label="差值（左 − 右）">'+delta(lhs?.[f.i],rightValues[0]?.[f.i],f.i)+'</td>':'')+'</tr>').join('');
+          (rhs.length<=1?'<td data-delta data-label="'+esc(deltaLabel)+'">'+delta(lhs?.[f.i],rightValues[0]?.[f.i],f.i)+'</td>':'')+'</tr>').join('');
         ctl.grid.innerHTML='<table aria-label="单次执行字段" class="event-vertical'+(rhs.length>1?' split-kernels':'')+'"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>';
       } else {
         ctl.grid.innerHTML='<div class="field-grid">'+entries.map(f=>

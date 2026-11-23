@@ -7,6 +7,12 @@ description: "比对两份单卡 Prof，支持 GPU JSON trace 与 NPU profiler D
 
 ## 功能概述
 
+### 基线、比对与采集来源
+
+- 按用户指定的角色传参。 `-bp` 对应基线，`-d` 对应比对，两侧均可用 NPU 或 GPU。用户给了「旧版」「新策略」等名称时，用 `--base-label` 和 `--compare-label` 原样传入。两个报告入口均支持这两个参数。
+- 从 HTML 首页「比对来源」、中文 xlsx 首张表或 JSON 的 `metadata.comparison` 核对设备、主机和采集来源。同号卡可按主机区分，同一主机同号卡的多次运行可按不同采集路径区分。设备号是 Prof 记录的编号，rank 单独显示。分析旧 xlsx 时，从原工作表表头恢复可用路径，其余未知字段显示为「未知」。
+- 解读差值时引用该章节的表头。总体性能使用 `-d − -bp`。NPU / NPU 热点和单次执行同样使用 `-d − -bp`。NPU / GPU 热点和单次执行固定使用 NPU − GPU，表头随两侧角色变化。
+
 ### 综合报告中的 Host 算子、Device kernel Top 15 与单次执行
 
 两份 Prof 默认走 msprof-analyze 的综合报告流程。两侧具备原始明细时，脚本在原 HTML 的「算子统计」和「Kernel 比对」章节中追加实测对照，并在中文 xlsx 中增加两张工作表。
@@ -59,8 +65,8 @@ python scripts/run_compare.py -d "<NPU目录>" -bp "<GPU trace>" --npu-top-csv "
 # 最简用法：默认开启全部比对能力（msprof-analyze 未安装时自动从 PyPI 安装）
 python scripts/run_compare.py --msprof -d <待比对prof路径> -bp <基准prof路径>
 
-# 指定输出目录
-python scripts/run_compare.py -d ./ascend_pt -bp ./base_ascend_pt -o ./out
+# 指定输出目录和业务名称
+python scripts/run_compare.py -d ./ascend_pt -bp ./base_ascend_pt --base-label "旧版" --compare-label "新版" -o ./out
 
 # 透传 compare 的额外参数（开关、step 过滤等）
 python scripts/run_compare.py -d ./ascend_pt -bp ./gpu_trace.json --compare_args "--enable_operator_compare --use_input_shape"
@@ -73,8 +79,9 @@ python scripts/run_compare.py -d ./ascend_pt -bp ./gpu_trace.json --compare_only
 
 | 参数 | 必选 | 说明 |
 |---|---|---|
-| `-d / --profiling_path` | 是 | 待比对 Prof 路径（通常是 NPU 数据 / 优化后数据 / 新版本数据） |
-| `-bp / --benchmark_profiling_path` | 是 | 基准 Prof 路径（通常是 GPU 数据 / 优化前数据 / 旧版本数据） |
+| `-d / --profiling_path` | 是 | 比对侧 Prof 路径 |
+| `-bp / --benchmark_profiling_path` | 是 | 基线侧 Prof 路径 |
+| `--base-label` / `--compare-label` | 否 | 写入分析报告的基线、比对业务名称 |
 | `-o / --output` | 否 | 输出目录，默认 `./compare_output_<时间戳>` |
 | `--compare_args` | 否 | 透传给 compare 的额外参数字符串，详见 `references/compare_quickstart.md` |
 | `--host-kernel` | 否 | 显式要求原始热点对照并校验输入 |
@@ -101,7 +108,7 @@ python scripts/run_compare.py -d ./ascend_pt -bp ./gpu_trace.json --compare_only
 python scripts/main_analyzer.py <xlsx_file_path> [-o <output_dir>]
 
 # 示例
-python scripts/main_analyzer.py ./performance_comparison_result_20250101.xlsx -o ./report_output
+python scripts/main_analyzer.py ./performance_comparison_result_20250101.xlsx --base-label "旧版" --compare-label "新版" -o ./report_output
 ```
 
 ## 文件结构

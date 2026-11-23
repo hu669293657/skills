@@ -22,6 +22,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from openpyxl import Workbook, load_workbook
+from profile_identity import add_label_args, comparison_identity, workbook_identities
 
 from parsers.overall_metrics import parse as parse_overall_metrics
 from parsers.operator import parse_statistic as parse_operator_statistic
@@ -47,7 +48,8 @@ def json_values(value):
     return value
 
 
-def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None, npu_sources=(), steps=(None, None)) -> dict:
+def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None, npu_sources=(), steps=(None, None),
+            *, comparison=None, labels=(None, None)) -> dict:
     """主分析流程：解析 xlsx → 生成中间件 JSON"""
     if output_dir is None:
         output_dir = os.path.dirname(os.path.abspath(xlsx_path))
@@ -60,6 +62,8 @@ def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None, npu_source
         wb = Workbook()
         wb.remove(wb.active)
     print(f"  发现 {len(wb.sheetnames)} 个 Sheet: {wb.sheetnames}")
+    if comparison is None:
+        comparison = comparison_identity(**workbook_identities(wb), labels=labels)
 
     print(f"[2/4] 逐 Sheet 解析并提取关键数据...")
     results = {}
@@ -133,13 +137,14 @@ def analyze(xlsx_path: str, output_dir: str = None, host_kernel=None, npu_source
         'analysis_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'total_sheets': len(wb.sheetnames),
         'sheet_names': list(wb.sheetnames),
+        'comparison': comparison,
     }
 
     # 生成中文翻译 xlsx（传入已加载的 wb 对象，避免重复加载）
     print(f"  生成中文翻译 xlsx...")
     from csv_translator import translate_to_chinese
     translate_dir = os.path.join(output_dir, 'chinese_xlsx')
-    chinese_xlsx_path = translate_to_chinese(wb, translate_dir, host_kernel, kernel_wb)
+    chinese_xlsx_path = translate_to_chinese(wb, translate_dir, host_kernel, kernel_wb, comparison)
     print(f"  中文 xlsx 已保存: {chinese_xlsx_path}")
 
     wb.close()
@@ -306,13 +311,14 @@ def main():
     parser = argparse.ArgumentParser(description='Prof Compare - 解析 compare 输出并生成分析报告')
     parser.add_argument('xlsx_path', type=str, help='compare 输出的 xlsx 文件路径')
     parser.add_argument('-o', '--output', type=str, default=None, help='输出目录（默认与 xlsx 同目录）')
+    add_label_args(parser)
     args = parser.parse_args()
 
     if not os.path.exists(args.xlsx_path):
         print(f"错误：文件不存在 - {args.xlsx_path}")
         sys.exit(1)
 
-    analyze(args.xlsx_path, args.output)
+    analyze(args.xlsx_path, args.output, labels=(args.base_label, args.compare_label))
 
 
 if __name__ == '__main__':

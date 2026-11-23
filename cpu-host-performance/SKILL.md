@@ -62,7 +62,9 @@ sudo bash scripts/cpu_trace_collect.sh
 
 默认 3 秒、全量安全 ftrace、HostBound、全部进程/线程前后快照、NPU 原始表、CPU/NUMA/IRQ/频率/Idle/cgroup/NUMA 页分布，并记录机器资源原始快照。资源快照覆盖 CPU、内存/换页/OOM、磁盘容量/inode/I/O 和 PSI，任务 cgroup 快照补充 CPU/内存/PID 限额。默认 `--buffer-size 16384` KiB/CPU，实测丢失时按该配置重采并对比丢失计数。进程快照记录 PPID、TGID、TID、starttime、namespace、逐线程有效 cpuset 与 NUMA 页汇总，便于离线发现 AI 主进程、子进程和线程。`--duration` 调整时长，`--pid` 增加明确宿主机根 TGID 并保存其 NUMA 原始文件；`--hostbound`/`--discover` 为兼容参数。`--no-hostbound` 关闭进程/NPU采集；`--minimal` 仅精简 ftrace 事件，保留安全快照和低频轮询。每次在输出位置自动新建 `cpu_trace_YYYYMMDD_HHMMSS_随机后缀/`，压缩包同名；重复执行不会覆盖旧数据，也不要求用户换目录。
 
-环境快照在 ftrace 开始前采集。默认读取操作系统、内核参数和 Ascend 常见安装目录的组件版本。沿用 `--pid PID[,PID]` 追加明确的宿主机进程环境，读取前后核对 starttime，只保留经过键名和值格式筛选的启动变量。目标进程以其自身的 `/proc/<PID>` 证据为准，采集器环境不可替代。环境采集范围见 [采集契约](references/collection_contract.md#环境快照)。
+环境快照在 ftrace 开始前采集。采集器通过当前环境、安装记录和标准入口定位 Ascend 组件。A2、A3、A5 多版本共存时，可在 sudo 命令中明确指定已选 CANN 版本目录，如 `sudo env ASCEND_HOME_PATH=/opt/Ascend/cann-9.0.0 bash scripts/cpu_trace_collect.sh`。现场出现新目录布局时，先核对 Manifest 的 `source`、安装记录及包名，再把经核实的布局加入采集回归用例。[安装路径与官方依据](references/ascend_install_paths.md) · [环境采集契约](references/collection_contract.md#环境快照)
+
+沿用 `--pid PID[,PID]` 追加明确的宿主机进程环境，读取前后核对 starttime，只保留经过键名和值格式筛选的启动变量。业务进程实际映射的库以其自身的 `/proc/<PID>` 证据为准。
 
 默认命令会生成两个 Skill 共用的原生环境快照。用 `--pid` 补充指定业务进程的环境。
 

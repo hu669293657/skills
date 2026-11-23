@@ -2,8 +2,12 @@
 from html import escape
 
 
-def labels(result):
-    return ("比对 NPU", "基准 NPU", "base") if result.get("mode") == "npu_npu" else ("NPU", "GPU", "gpu")
+def labels(result, comparison=None):
+    left, right, peer = (("比对 NPU", "基线 NPU", "base") if result.get("mode") == "npu_npu"
+                         else ("NPU", "GPU", "gpu"))
+    if comparison and result.get("side_roles"):
+        left, right = [comparison[role]["short_label"] for role in result["side_roles"]]
+    return left, right, peer
 
 
 def fmt(value, decimals=2, signed=False):
@@ -20,7 +24,8 @@ def pair_headers(left, right, metrics):
     groups = "".join(f'<th scope="colgroup" colspan="2">{m}</th>' for m in metrics)
     sides = "".join(f'<th class="ev-left" scope="col">{left}</th><th class="ev-right" scope="col">{right}</th>' for _ in metrics)
     return (f'<thead><tr><th scope="col" rowspan="2">#</th>{groups}<th colspan="2" scope="colgroup">累计耗时差异</th></tr>'
-            f'<tr>{sides}<th scope="col">左 − 右 ms</th><th scope="col">左 / 右</th></tr></thead>')
+            f'<tr>{sides}<th scope="col">{left} − {right} (ms)</th>'
+            f'<th scope="col">{left} / {right}</th></tr></thead>')
 
 
 def times(row, peer, is_host=False):
@@ -61,8 +66,8 @@ def gpu_short(symbol):
     return name[5:] if name.startswith("void ") else name
 
 
-def render_device(result):
-    left,right,peer = labels(result)
+def render_device(result, comparison=None):
+    left, right, peer = labels(result, comparison)
     rows = []
     for i,r in enumerate(result["device"],1):
         name=escape(r["op"])
@@ -81,7 +86,6 @@ def render_device(result):
         title=escape("\n".join(symbols),quote=True)
         rows.append(f'<tr><th scope="row">{i}</th><td class="ev-left">{name}{small(r["core"])}</td>'
                     f'<td class="ev-right" title="{title}">{other}</td>'+metric_cells(r,peer)+'</tr>')
-    hdr=pair_headers(left,right,["Kernel 名称","累计耗时 ms","调用次数","单次均值 μs"])
     note=f"按{left}全量累计耗时排名。部分覆盖行用可比子集计算差值，并列出全量值。— 表示缺少可比数据。"
     scope=f"{left} step {', '.join(result['npu_steps'])} / {right} step {', '.join(result[peer+'_steps']) or '未标注'}。"
     if result.get("msprof_step_filter"):
@@ -94,15 +98,19 @@ def render_device(result):
                 n=sum(r["matched_npu"]["total_ms"] for r in pair)
                 g=sum(r[peer]["total_ms"] for r in pair)
                 phases.append(f"<tr><td>{phase}</td><td>{fmt(n)}</td><td>{fmt(g)}</td><td>{fmt(n-g,signed=True)}</td></tr>")
-    phase_table=("<h4>MoE 主核与 epilogue 合计</h4><table><tr><th>阶段</th><th>NPU ms</th><th>GPU ms</th><th>差值 ms</th></tr>"
+    left, right = escape(left), escape(right)
+    phase_table=(f"<h4>MoE 主核与 epilogue 合计</h4><table><tr><th>阶段</th><th>{left} ms</th>"
+                 f"<th>{right} ms</th><th>{left} − {right} (ms)</th></tr>"
                  +"".join(phases)+"</table>") if phases else ""
+    hdr=pair_headers(left,right,["Kernel 名称","累计耗时 ms","调用次数","单次均值 μs"])
     return (f'<section class="raw-detail" id="device-top"><h3>Device kernel · {left} 耗时 Top {len(rows)}</h3>'
-            f'<p>{escape(scope)}{note}</p><div class="table-wrap"><table class="paired-table">{hdr}<tbody>'
+            f'<p>{escape(scope)}{escape(note)}</p><div class="table-wrap"><table class="paired-table">{hdr}<tbody>'
             +''.join(rows)+'</tbody></table></div>'+phase_table+'</section>')
 
 
-def render_host(result):
-    left,right,peer = labels(result)
+def render_host(result, comparison=None):
+    left, right, peer = labels(result, comparison)
+    left, right = escape(left), escape(right)
     rows=[]
     for i,r in enumerate(result["host"],1):
         hidden=' hidden' if i>15 else ''
@@ -120,10 +128,11 @@ def render_host(result):
             b.textContent=all?'仅显示前 15 行':'显示全部 '+b.dataset.total+' 行';};})();</script></section>""")
 
 
-def spreadsheet_tables(result):
-    left,right,peer = labels(result)
+def spreadsheet_tables(result, comparison=None):
+    left, right, peer = labels(result, comparison)
     def cols(metrics):
-        return [side+" "+metric for metric in metrics for side in (left,right)]+["差值 ms","倍率"]
+        return [side+" "+metric for metric in metrics for side in (left,right)]+[
+            f"{left} − {right} (ms)", f"{left} / {right}"]
     device=[["排名",left+" 类型",right+" 类型或实现","加速器核",*cols(["累计 ms","次数","单次 μs"]),
              left+" 全量 ms",left+" 全量次数","覆盖情况"]]
     for i,r in enumerate(result["device"],1):

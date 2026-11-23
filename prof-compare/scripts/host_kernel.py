@@ -135,7 +135,7 @@ def match_device(key, groups, buckets, names, index, n_hosts, g_hosts):
     return [], None, "待定位", "缺少可独占的 GPU kernel 或同口径的形状、阶段证据。"
 
 
-def compare_gpu(npu, gpu, reference=None, host_aliases=None):
+def compare_gpu(npu, gpu, reference=None, host_aliases=None, identity=None):
     folder = npu_source(npu)
     if folder is None:
         raise ValueError(f"未识别到 NPU profiler 主库或文本导出：{npu}")
@@ -145,7 +145,7 @@ def compare_gpu(npu, gpu, reference=None, host_aliases=None):
     groups, n_hosts, self_us, n_steps, n_host_shapes, n_paths = read_npu(folder)
     top = ranked_keys(folder, groups, Path(reference) if reference else None)
     gpu_meta = {}
-    buckets, g_hosts, g_steps, g_host_shapes, annotations = read_gpu(trace, gpu_meta)
+    buckets, g_hosts, g_steps, g_host_shapes, annotations = read_gpu(trace, gpu_meta, identity)
     names = {k[0] for k in buckets}
     index = host_index(groups)
     proposals = {key: match_device(key, groups, buckets, names, index, n_hosts, g_hosts) for key in groups}

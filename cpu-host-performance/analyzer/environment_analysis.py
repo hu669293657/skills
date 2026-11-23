@@ -205,6 +205,44 @@ def _native_environment(data):
     return {'host': host, 'ascend': ascend, 'targets': targets, 'target_scope': scope}, coverage
 
 
+def toolkit_version_location(row):
+    """Identify the package and installation root from the captured source path."""
+    if row.get('id') != 'toolkit' or not isinstance(row.get('source'), str):
+        return None, None
+    path = PurePosixPath(row['source'])
+    if path.name == 'version.info' and path.parent.name in ('asc-devkit', 'toolkit'):
+        package = path.parent.name
+        root = path.parent.parent
+        if root.parts[-2:] == ('share', 'info'):
+            root = root.parent.parent
+    elif path.name == 'ascend_toolkit_install.info' and path.parent.name in ('aarch64-linux', 'x86_64-linux'):
+        package, root = 'toolkit', path.parent.parent
+    else:
+        return None, None
+    return package, root if root.is_absolute() and '..' not in root.parts else None
+
+
+def _merge_component_versions(bash_rows, native_rows):
+    """Keep each parsed version with the source that actually provided it."""
+    components = {row['id']: row for row in bash_rows}
+    for native in native_rows:
+        key = native['id']
+        existing = components.get(key)
+        if existing is None:
+            components[key] = native
+            continue
+        if existing['reason'] == 'ambiguous_cann_installation':
+            continue
+        if native['status'] != 'COLLECTED' or not (native['value'] or '').strip():
+            continue
+        if existing['status'] == 'COLLECTED' and existing['value']:
+            package, root = toolkit_version_location(existing)
+            if package != 'asc-devkit' or root is None or toolkit_version_location(native) != ('toolkit', root):
+                continue
+        components[key] = native
+    return list(components.values())
+
+
 def analyze_environment(snapshot, integrity):
     rows = [row for row in integrity.get('entries', []) if row.get('category') in ENV_CATEGORIES]
     result = {'status': 'UNKNOWN', 'host': [], 'ascend': [], 'targets': [], 'target_scope': 'UNKNOWN'}
@@ -255,5 +293,6 @@ def analyze_environment(snapshot, integrity):
             if any(view[key] for key in ('host', 'ascend', 'targets')):
                 if result['status'] == 'AVAILABLE':
                     result['bash_snapshot'] = {key: result[key] for key in view}
+                view['ascend'] = _merge_component_versions(result['ascend'], view['ascend'])
                 result.update(view, status='AVAILABLE')
     return result

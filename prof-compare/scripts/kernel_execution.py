@@ -251,14 +251,16 @@ def gpu_pair(folder, groups, buckets, proposals, gpu_meta, top, supplement=False
     return make_catalog(left,right,(k[0] for k in top),clock,gpu_meta["origin_kind"],reasons)
 
 
-def render_execution(result):
+def render_execution(result, comparison=None):
     catalog = result.get("execution")
     if not catalog or not catalog["series"]:
         return ""
     template = Path(__file__).with_name("execution_panel.html").read_text(encoding="utf-8-sig")
-    payload = json.dumps(catalog,ensure_ascii=False,separators=(",",":"),allow_nan=False).replace("<","\\u003c")
-    peer = "base" if result.get("mode")=="npu_npu" else "gpu"
-    sources = "　/　".join(f"{label} · {escape(result[k])}" for label,k in (
-        ("左侧","npu_path"), ("右侧",peer+"_path")))
-    return template.replace("__SOURCES__",sources).replace("__PEER__", "基准 NPU" if peer=="base" else "GPU").replace(
-        "__LEFT__", "比对 NPU" if result.get("mode")=="npu_npu" else "NPU").replace("__DATA__",payload)
+    from host_kernel_report import labels
+    left, right, peer = labels(result, comparison)
+    display = dict(labels=[left, right], gpu_peer=peer == "gpu")
+    payload = json.dumps({**catalog, **display}, ensure_ascii=False, separators=(",", ":"),
+                         allow_nan=False).replace("<", "\\u003c")
+    sources = "　/　".join(escape(f"{label} · {result[key]}") for label, key in
+                         ((left, "npu_path"), (right, peer + "_path")))
+    return template.replace("__DATA__", payload, 1).replace("__SOURCES__", sources, 1)

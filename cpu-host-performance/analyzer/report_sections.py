@@ -1,5 +1,6 @@
 """Shared report sections for frequency, discovery, and evidence-backed contention."""
 from html import escape
+from .environment_analysis import toolkit_version_location
 from .report_explanation import fmt
 from .npu_affinity import _topology, cpu_list
 from .report_tables import disclose_table, limit_markdown_tables
@@ -67,7 +68,8 @@ def environment_section(data):
             out.append(paragraph('此采集包缺少这类证据。', True))
             continue
         out.append(table(['项目', '采集值', '来源', '状态', '采集时间', '缺失原因'],
-                         [(_ENV_LABELS.get(row['id'], row['id']), row['value'], row['source'],
+                         [('asc-devkit 子包' if toolkit_version_location(row)[0] == 'asc-devkit'
+                           else _ENV_LABELS.get(row['id'], row['id']), row['value'], row['source'],
                            row['status'], row.get('collected_at'), row.get('reason') or '—') for row in rows], True))
 
     out.append(heading('业务进程启动环境与已加载库', True))
