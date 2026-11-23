@@ -13,6 +13,7 @@ import csv as csv_mod
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from profile_identity import XLSX_HEADERS
 
 
 # 英文 → 中文 表头映射
@@ -133,31 +134,6 @@ def _is_header_row(row_data: list) -> bool:
     return any(h in row_str for h in KNOWN_HEADERS)
 
 
-def write_comparison_sheet(wb, comparison, host_kernel):
-    from host_kernel_report import labels
-    from profile_identity import IDENTITY_COLUMNS, identity_rows
-
-    ws = wb.create_sheet("比对来源")
-    ws.append(IDENTITY_COLUMNS)
-    for values in identity_rows(comparison):
-        ws.append(values)
-        for cell in ws[ws.max_row]:
-            if isinstance(cell.value, str):
-                cell.data_type = "s"
-                cell.alignment = Alignment(wrap_text=True, vertical="top")
-    base, comp = (comparison[role]["short_label"] for role in ("base", "compare"))
-    ws.append(["总览差值", f"{comp} − {base}"])
-    if host_kernel:
-        left, right, _ = labels(host_kernel, comparison)
-        ws.append(["热点及单次执行差值", f"{left} − {right}"])
-    if any(side["input_path_origin"] == "xlsx" for side in comparison.values()):
-        ws.append(["路径说明", "完整输入路径来自原 compare xlsx 表头。"])
-    for col, (cell, width) in enumerate(zip(ws[1], (24, 25, 15, 24, 25, 12, 40, 55, 55)), 1):
-        cell.font, cell.fill, cell.alignment = HEADER_FONT, HEADER_FILL, HEADER_ALIGN
-        ws.column_dimensions[get_column_letter(col)].width = width
-    ws.freeze_panes = "B2"
-
-
 def translate_to_chinese(wb_src, output_dir: str, host_kernel=None, kernel_wb=None, comparison=None):
     """将已加载的 Workbook 翻译为中文 xlsx + CSV
 
@@ -168,13 +144,11 @@ def translate_to_chinese(wb_src, output_dir: str, host_kernel=None, kernel_wb=No
 
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
-    if comparison:
-        write_comparison_sheet(wb_out, comparison, host_kernel)
 
     csv_dir = os.path.join(output_dir, 'chinese_csv')
     os.makedirs(csv_dir, exist_ok=True)
 
-    sheet_count = len(wb_out.sheetnames)
+    sheet_count = 0
     total_rows = 0
 
     for sheet_name in wb_src.sheetnames:
@@ -198,6 +172,13 @@ def translate_to_chinese(wb_src, output_dir: str, host_kernel=None, kernel_wb=No
                     row_data.append('')
                 else:
                     row_data.append(str(cell))
+
+            if comparison and row_idx <= 2:
+                for i, value in enumerate(row_data):
+                    for role, prefix in XLSX_HEADERS.items():
+                        if value.startswith(prefix):
+                            row_data[i] = comparison[role]["short_label"]
+                            break
 
             if all(v == '' for v in row_data):
                 continue

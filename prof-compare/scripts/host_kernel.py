@@ -215,6 +215,15 @@ def compare_gpu(npu, gpu, reference=None, host_aliases=None, identity=None):
                   reference=str(reference) if reference else None,
                   npu_steps=n_steps, gpu_steps=g_steps, gpu_kernel_calls=sum(b.time.calls for b in buckets.values()),
                   gpu_graph_calls=sum(b.graph_calls for b in buckets.values()), device=device, host=host)
+    from kernel_attribution import cross_platform_attribution
+    result["attribution"] = cross_platform_attribution(folder, *gpu_meta["attribution"])
+    subgroups = {g["op"] for g in result["attribution"]["groups"]}
+    display_ops = {"cross_entropy_forward_kernel": {"CE 前向"}, "cross_entropy_backward_kernel": {"CE 反向"},
+                   "Add": {"aten::add", "aten::add_"}, "GroupedMatmulAdd": {"GroupedMatmulAdd"}}
+    for row in device:
+        if row["diff"] is None and subgroups.intersection(display_ops.get(row["op"], ())):
+            row["status"] = "见框架子组"
+            row["note"] = "框架归属章节列出可核对的子组、拆核和工作量。本行保留 NPU 全量统计。"
     result["execution"] = gpu_pair(folder, groups, buckets, proposals, gpu_meta, top, Path(npu).is_dir())
     return result
 

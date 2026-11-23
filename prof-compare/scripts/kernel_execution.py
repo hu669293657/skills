@@ -6,7 +6,6 @@ import sqlite3
 from collections import Counter, defaultdict
 from contextlib import closing
 from decimal import Decimal
-from html import escape
 from pathlib import Path
 from cross_trace import kernel_rows
 from npu_source import is_main_db
@@ -261,6 +260,4 @@ def render_execution(result, comparison=None):
     display = dict(labels=[left, right], gpu_peer=peer == "gpu")
     payload = json.dumps({**catalog, **display}, ensure_ascii=False, separators=(",", ":"),
                          allow_nan=False).replace("<", "\\u003c")
-    sources = "　/　".join(escape(f"{label} · {result[key]}") for label, key in
-                         ((left, "npu_path"), (right, peer + "_path")))
-    return template.replace("__DATA__", payload, 1).replace("__SOURCES__", sources, 1)
+    return template.replace("__DATA__", payload, 1)

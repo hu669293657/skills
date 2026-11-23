@@ -73,6 +73,8 @@ def render_device(result, comparison=None):
         name=escape(r["op"])
         if result.get("execution"):
             name=f'<a class="ev-left" href="#kernel-execution" data-execution-type="{escape(r["op"],quote=True)}">{name}</a>'
+        if r["status"] == "见框架子组":
+            name += '<small><a href="#kernel-attribution">见框架子组</a></small>'
         symbols=list(r[peer+"_symbols"])
         if peer=="gpu":
             peers=" / ".join(dict.fromkeys(gpu_short(s) for s in symbols)) if symbols else "—"
@@ -138,8 +140,76 @@ def spreadsheet_tables(result, comparison=None):
     for i,r in enumerate(result["device"],1):
         partial=r["matched_npu"] and r["matched_npu"]["calls"]<r["npu"]["calls"]
         device.append([i,r["op"],r.get("base_op") or "\n".join(r[peer+"_symbols"]),r["core"],*times(r,peer),
-                       r["npu"]["total_ms"],r["npu"]["calls"],"部分覆盖" if partial else "整组" if r["diff"] else "未匹配"])
+                       r["npu"]["total_ms"],r["npu"]["calls"],"部分覆盖" if partial else "整组" if r["diff"] else r["status"]])
     host=[[left+" 算子",right+" 算子",*cols(["累计 ms","Self ms","次数","单次 μs"])]]
     for r in result["host"]:
         host.append([r["npu_name"],r[peer+"_name"],*times(r,peer,True)])
-    return [("Device热点Top15",device),("Host算子实测",host)]
+    return [("Device热点Top15",device),("Host算子实测",host), *attribution_tables(result, comparison)]
+
+COVERAGE_LABELS = {
+    "npu": {"all": "设备任务", "native_framework": "原生框架连接", "cann_context": "CANN launch 回溯",
+            "no_unique_framework": "未定位唯一框架调用"},
+    "gpu": {"all": "Device kernel", "launch": "唯一 launch", "flow": "ac2g flow",
+            "launch_and_flow": "launch 与 flow 一致", "framework": "直接 CPU 算子",
+            "aten": "其中有 aten 上下文", "graph_replay": "CUDA Graph 重放",
+            "no_cpu_context": "有独立 launch，缺少唯一 CPU 算子",
+            "gemm_annotation_only": "其中有独立 GEMM 标注",
+            "no_launch": "缺少 launch", "ambiguous_launch": "launch 存在歧义"}
+}
+
+
+def attribution_tables(result, comparison=None):
+    audit = result.get("attribution")
+    if not audit:
+        return []
+    left, right, _ = labels(result, comparison)
+    coverage = [["设备", "归属证据", "事件数", "占本侧事件数 %", "累计 ms"]]
+    for side, name in (("npu", left), ("gpu", right)):
+        metrics = audit[side]
+        total = metrics.get("all", {}).get("calls", 0)
+        if not metrics:
+            coverage.append([name, "缺少原生 DB 归属证据", None, None, None])
+        for key, label in COVERAGE_LABELS[side].items():
+            if key in metrics:
+                value = metrics[key]
+                coverage.append([name, label, value["calls"], 100 * value["calls"] / total if total else None,
+                                 value["total_ms"]])
+    coverage.extend([left, "Add 内 " + name, calls, None, None]
+                    for name, calls in sorted(audit["npu_add_owners"].items()))
+    groups = [["框架分组", "计算签名", left+" kernel 数", right+" kernel 数",
+               left+" 逻辑调用数", right+" 逻辑调用数", left+" 累计 ms", right+" 累计 ms",
+               left+" 每逻辑调用 ms", right+" 每逻辑调用 ms", left+" / "+right+" 均值",
+               left+" GEMM 行数", right+" GEMM 行数", "证据与口径"]]
+    for row in audit["groups"]:
+        a, b = row["npu"], row["gpu"]
+        groups.append([row["op"], row["signature"], a["kernels"], b["kernels"],
+                       a["logical_calls"], b["logical_calls"], a["total_ms"], b["total_ms"],
+                       a["mean_ms"], b["mean_ms"], row["mean_ratio"],
+                       a.get("operand_rows"), b.get("operand_rows"), row["note"]])
+    return [("Kernel归属覆盖", coverage), ("跨平台框架分组", groups)]
+
+
+def render_attribution(result, comparison=None):
+    tables = attribution_tables(result, comparison)
+    if not tables:
+        return ""
+
+    def cell(value, index, integer_columns):
+        if isinstance(value, (float, int)):
+            return fmt(value, 0 if index in integer_columns else 3)
+        return escape(value) if value is not None else "—"
+
+    def table(rows, integer_columns):
+        headers, *body = rows
+        head = "".join(f'<th scope="col">{escape(label)}</th>' for label in headers)
+        rendered = ["<tr>" + "".join(f"<td>{cell(v, i, integer_columns)}</td>"
+                                      for i, v in enumerate(row)) + "</tr>" for row in body]
+        return '<div class="table-wrap"><table><thead><tr>'+head+'</tr></thead><tbody>'+''.join(rendered)+'</tbody></table></div>'
+
+    return ('<section class="raw-detail" id="kernel-attribution">'
+            '<p>覆盖率以本侧设备事件为分母。Launch、flow 和框架归属可以重叠，CUDA Graph 重放入口只提供图级归属。</p>'
+            + table(tables[0][1], {2}) +
+            '<p>累计值为 kernel 耗时之和，可能跨流重叠。'
+            '倍率按同形状的逻辑调用均值计算。空倍率表示计算边界或工作量仍需确认。</p>'
+            + (table(tables[1][1], {2,3,4,5,11,12}) if result["attribution"]["groups"]
+               else '<p>当前数据未找到可展示的框架分组。</p>') + '</section>')

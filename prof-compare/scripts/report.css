@@ -46,7 +46,6 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .field-card h4 { margin-bottom:8px; }
 .field-card dl { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,7rem),1fr)); gap:8px 12px; }
 .field-card dt { font-size:12px; } .field-card dd { margin:0; font-variant-numeric:tabular-nums; }
-.source-paths { font-size:13px; } .source-paths p { padding:6px 10px; }
 .kernel-symbol summary { overflow-wrap:anywhere; } .kernel-symbol[open] summary { margin-bottom:4px; }
 .raw-detail { margin: 18px 0; scroll-margin-top: 12px; }
 .raw-detail p, .raw-detail small { color: #8B98AD; }
@@ -159,6 +158,3 @@ tr:hover td { background: #1A2233; }
   .header h1 { font-size:23px; }
   .section { padding:10px; margin-bottom:12px; }
 }
-.comparison-paths { margin-top: 12px; }
-.comparison-paths dd { margin: 4px 0 12px; overflow-wrap: anywhere; }
-#comparison-sources td, #comparison-sources th { overflow-wrap: anywhere; }

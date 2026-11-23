@@ -32,15 +32,17 @@ import glob
 import gzip
 import json
 import importlib.util
+import math
 import os
 import shlex
 import shutil
 import subprocess
 import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Optional
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -175,19 +177,22 @@ def find_result_xlsx(output_dir: str) -> str:
 
 
 def run_compare(mode: str, base: str, comp: str,
-                output: str, extra: list) -> str:
+                output: str, extra: list, *, required=True) -> Optional[str]:
     """执行 compare 并返回结果 xlsx 路径。"""
     os.makedirs(output, exist_ok=True)
     cmd = build_compare_cmd(mode, base, comp, output, extra)
     log("开始执行性能比对（算子/内存比对较耗时，请耐心等待）...")
     code = run_cmd(cmd, "执行 msprof-analyze compare")
+    report_error = die if required else log
     if code != 0:
-        die(f"compare 执行失败（退出码 {code}）。"
+        report_error(f"compare 执行失败（退出码 {code}）。"
             f"请检查 Prof 数据格式（NPU 目录需含 ASCEND_PROFILER_OUTPUT 或 PROF_*；"
             f"GPU 需为 torch profiler 导出的 *.pt.trace.json）。")
+        return None
     xlsx = find_result_xlsx(output)
     if not xlsx:
-        die(f"compare 退出码为 0，但在输出目录中未找到 {COMPARE_RESULT_PATTERN}：{output}")
+        report_error(f"compare 退出码为 0，但在输出目录中未找到 {COMPARE_RESULT_PATTERN}：{output}")
+        return None
     log(f"compare 完成，结果文件：{xlsx}")
     return xlsx
 
@@ -272,6 +277,45 @@ def input_pair(comp, base):
     return None
 
 
+def collect_xlsx(mode, base, comp, output, extra, steps, *, required=True):
+    with ExitStack() as stack:
+        try:
+            use_type = "--use_kernel_type" in extra
+            base_input = msprof_input(base, stack, use_type, steps.base_step)
+            comp_input = msprof_input(comp, stack, use_type, steps.comparison_step)
+        except (ValueError, OSError) as exc:
+            if required:
+                die(str(exc))
+            log(str(exc))
+            return None
+        return run_compare(mode, base_input, comp_input, output, extra, required=required)
+
+
+def read_e2e(xlsx):
+    from openpyxl import load_workbook
+    from parsers.overall_metrics import parse
+
+    with closing(load_workbook(xlsx, read_only=True, data_only=True)) as wb:
+        e2e = parse(wb).get("e2e")
+    if e2e and all(math.isfinite(e2e[k]) and e2e[k] > 0 for k in ("base", "comp")):
+        return e2e["base"], e2e["comp"]
+    return None
+
+
+def probe_e2e(mode, base, comp, extra, steps):
+    probe_args = ["--enable_profiling_compare", *(t for t in extra if not t.startswith("--enable_"))]
+    with TemporaryDirectory(prefix="prof-e2e-") as output:
+        log("读取两份 Prof 的 E2E 耗时，选择基线。")
+        xlsx = collect_xlsx(mode, base, comp, output, probe_args, steps, required=False)
+        return read_e2e(xlsx) if xlsx else None
+
+
+def reverse_steps(extra):
+    swapped = {"--base_step": "--comparison_step", "--comparison_step": "--base_step"}
+    return [swapped.get(flag, flag) + sep + value
+            for flag, sep, value in (t.partition("=") for t in extra)]
+
+
 def main() -> None:
     from profile_identity import add_label_args, comparison_identity, read_profile_identity
 
@@ -281,6 +325,8 @@ def main() -> None:
                         help="比对侧 Prof 路径，可传 NPU 或 GPU")
     parser.add_argument("-bp", "--benchmark_profiling_path", required=True,
                         help="基线侧 Prof 路径，可传 NPU 或 GPU")
+    parser.add_argument("--auto-base", action="store_true",
+                        help="按 E2E 耗时选择基线，-bp 和 -d 作为初始顺序")
     add_label_args(parser)
     parser.add_argument("-o", "--output", default=None,
                         help="输出目录（默认 ./compare_output_<时间戳>）")
@@ -300,11 +346,9 @@ def main() -> None:
 
     base = os.path.abspath(args.benchmark_profiling_path)
     comp = os.path.abspath(args.profiling_path)
-    original_paths = (base, comp)
-    for label, path in (("基线 Prof (-bp)", base), ("比对 Prof (-d)", comp)):
+    for label, path in (("-bp", base), ("-d", comp)):
         if not os.path.exists(path):
             die(f"{label} 路径不存在：{path}")
-        log(f"{label}：{path}")
 
     output = os.path.abspath(args.output) if args.output else os.path.abspath(
         f"compare_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -319,6 +363,33 @@ def main() -> None:
     required = args.host_kernel or args.npu_top_csv or args.host_aliases
     if required and args.compare_only:
         parser.error("--compare_only 只生成原始 xlsx；生成含 host/kernel 的报告时请去掉该开关")
+
+    from npu_source import npu_source
+    try:
+        sources = [npu_source(path) for path in (base, comp)]
+    except ValueError as exc:
+        die(str(exc))
+    csv_only = [src for src in sources if src and src.is_dir() and not (src / "trace_view.json").is_file()]
+    mode = None
+    labels = (args.base_label, args.compare_label)
+    if args.auto_base:
+        if not csv_only:
+            mode = ensure_msprof(allow_install=not args.skip_install)
+        times = probe_e2e(mode, base, comp, extra, step_args) if mode else None
+        if times is None:
+            log("缺少可比较的 E2E 耗时，按输入顺序确定基线。")
+        else:
+            log(f"两侧 E2E 耗时：{times[0]:g} ms 和 {times[1]:g} ms。")
+            if times[1] < times[0]:
+                base, comp = comp, base
+                sources.reverse()
+                labels = labels[::-1]
+                extra = reverse_steps(extra)
+                step_args, _ = step_parser.parse_known_args(extra)
+
+    original_paths = (base, comp)
+    log(f"基线 Prof：{base}")
+    log(f"比对 Prof：{comp}")
     detail = None
     gpu_metadata = {}
     try:
@@ -347,12 +418,6 @@ def main() -> None:
             die(str(exc))
         log(f"原始 host/kernel 明细无法生成：{exc}。继续生成原有综合报告。")
 
-    from npu_source import npu_source
-    try:
-        sources = [npu_source(path) for path in (base, comp)]
-    except ValueError as exc:
-        die(str(exc))
-    csv_only = [src for src in sources if src and src.is_dir() and not (src / "trace_view.json").is_file()]
     if csv_only:
         note = "文本导出缺少 trace_view.json，msprof 综合工作表无法生成：" + "，".join(map(str, csv_only))
         if not detail or args.compare_only:
@@ -361,15 +426,8 @@ def main() -> None:
         log(note + "。生成可用的 Host、Kernel 和单次执行报告。")
         xlsx = None
     else:
-        mode = ensure_msprof(allow_install=not args.skip_install)
-        with ExitStack() as stack:
-            try:
-                use_type = "--use_kernel_type" in extra
-                base_input = msprof_input(base, stack, use_type, step_args.base_step)
-                comp_input = msprof_input(comp, stack, use_type, step_args.comparison_step)
-            except (ValueError, OSError) as exc:
-                die(str(exc))
-            xlsx = run_compare(mode, base_input, comp_input, output, extra)
+        mode = mode or ensure_msprof(allow_install=not args.skip_install)
+        xlsx = collect_xlsx(mode, base, comp, output, extra, step_args)
     if args.compare_only:
         log(f"--compare_only 已设置，跳过分析。结果文件：{xlsx}")
         return
@@ -388,7 +446,7 @@ def main() -> None:
             except (OSError, ValueError):
                 pass
         identities.append(read_profile_identity(original, source, gpu, gpu_metadata or None))
-    comparison = comparison_identity(*identities, labels=(args.base_label, args.compare_label))
+    comparison = comparison_identity(*identities, labels=labels)
     analyze(xlsx, output, detail, tuple(zip(("基准侧 NPU", "比对侧 NPU"), sources)),
             (step_args.base_step, step_args.comparison_step), comparison=comparison)
     if detail:

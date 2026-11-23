@@ -62,10 +62,9 @@ class ProfileIdentityTest(unittest.TestCase):
         self.assertIn("比对 · NPU 0 · node-b − 基线 · NPU 0 · node-a", self.report(out))
         wb = load_workbook(out / "chinese_xlsx" / "compare_chinese_result.xlsx", read_only=True)
         self.addCleanup(wb.close)
-        self.assertEqual(wb.sheetnames[0], "比对来源")
-        first_sheet = list(wb["比对来源"].values)
-        for host in ("node-a", "node-b"):
-            self.assertTrue(any(host in row for row in first_sheet))
+        self.assertNotIn("比对来源", wb.sheetnames)
+        self.assertNotIn('id="comparison-sources"', self.report(out))
+        self.assertNotIn('class="source-paths"', self.report(out))
 
     def test_same_host_and_device_number_use_run_path_to_distinguish(self):
         from profile_identity import comparison_identity, read_npu_identity
@@ -73,16 +72,15 @@ class ProfileIdentityTest(unittest.TestCase):
         comp = write_npu(self.root / "new" / "run_057" / "rank_0", "node-a")
         sides = comparison_identity(read_npu_identity(base, base / "ASCEND_PROFILER_OUTPUT"),
                                     read_npu_identity(comp, comp / "ASCEND_PROFILER_OUTPUT"))
-        self.assertEqual(sides["base"]["short_label"], "基线 · NPU 0 · run_042/rank_0")
-        self.assertEqual(sides["compare"]["short_label"], "比对 · NPU 0 · run_057/rank_0")
+        self.assertEqual(sides["base"]["short_label"], "基线 · NPU 0 · run_042")
+        self.assertEqual(sides["compare"]["short_label"], "比对 · NPU 0 · run_057")
 
     def test_rank_without_device_number_is_reported_as_unknown(self):
-        from profile_identity import comparison_identity, identity_rows, read_npu_identity
+        from profile_identity import comparison_identity, read_npu_identity
         base = write_npu(self.root / "run_042" / "rank_0", "node-a", device="")
         sides = comparison_identity(read_npu_identity(base, base / "ASCEND_PROFILER_OUTPUT"))
         self.assertEqual(sides["base"]["rank"], 0)
         self.assertIsNone(sides["base"]["device_id"])
-        self.assertEqual(next(identity_rows(sides))[2], "NPU（设备号未知）")
 
     def test_cross_platform_hotspot_keeps_npu_left_when_roles_swap(self):
         npu = write_npu(self.root / "npu", "node-a")
@@ -108,8 +106,9 @@ class ProfileIdentityTest(unittest.TestCase):
                 self.assertEqual(raw["host"][0]["diff"]["delta_ms"], 2)
                 left, right = ("基线", "比对") if npu_is_base else ("比对", "基线")
                 html = self.report(out)
-                self.assertIn(f"{left} · NPU 0 − {right} · GPU 0 · NVIDIA H20", html)
-                self.assertIn(f'"labels":["{left} · NPU 0","{right} · GPU 0 · NVIDIA H20"],"gpu_peer":true', html)
+                self.assertIn(f"{left} · NPU 0 − {right} · GPU 0", html)
+                self.assertIn(f'"labels":["{left} · NPU 0","{right} · GPU 0"],"gpu_peer":true', html)
+                self.assertNotIn("NVIDIA H20", html)
 
     def test_db_uses_rank_map_and_model_for_selected_device(self):
         from profile_identity import read_npu_identity
@@ -162,12 +161,33 @@ class ProfileIdentityTest(unittest.TestCase):
         self.assertIsNone(base["device_type"])
         self.assertEqual(data["overall_metrics"]["e2e"]["diff"], 50)
         html = self.report(out)
-        self.assertIn("比对 · 新版 · new/rank_0 − 基线 · =旧版&lt;script&gt; · old/rank_0", html)
+        self.assertIn("比对 · 新版 − 基线 · =旧版&lt;script&gt;", html)
         self.assertNotIn("=旧版<script>", html)
         wb = load_workbook(out / "chinese_xlsx" / "compare_chinese_result.xlsx", read_only=True)
         self.addCleanup(wb.close)
-        cells = [cell for row in wb["比对来源"] for cell in row if cell.value == "=旧版<script>"]
+        self.assertNotIn("比对来源", wb.sheetnames)
+        cells = [cell for row in wb["总体性能比对"] for cell in row if cell.value == "基线 · =旧版<script>"]
         self.assertEqual([cell.data_type for cell in cells], ["s"])
+
+    def test_e2e_selection_requires_two_positive_finite_measurements(self):
+        from run_compare import read_e2e
+        path = self.root / "probe.xlsx"
+        for base, comp, expected in ((200, 100, (200, 100)), (0, 100, None), (100, None, None),
+                                     (100, "INF", None), (100, 100, (100, 100))):
+            with self.subTest(base=base, comp=comp):
+                wb = Workbook()
+                wb.active.title = "OverallMetrics"
+                wb.active.append(["Index"])
+                wb.active.append(["E2E Time", base, 1, 1, comp, 1, 1, 0, 1])
+                wb.save(path)
+                self.assertEqual(read_e2e(path), expected)
+
+    def test_auto_base_keeps_candidate_order_without_e2e(self):
+        base = write_npu(self.root / "first", "node-a")
+        comp = write_npu(self.root / "second", "node-b")
+        out = self.root / "out"
+        self.cli("run_compare.py", "-bp", base, "-d", comp, "--auto-base", "-o", out)
+        self.assertEqual(self.result(out)["metadata"]["comparison"]["base"]["hostname"], "node-a")
 
     def test_xlsx_without_source_headers_keeps_identity_unknown(self):
         path = self.root / "original.xlsx"

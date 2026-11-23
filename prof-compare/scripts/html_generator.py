@@ -6,7 +6,6 @@
 """
 from datetime import datetime
 from html import escape
-from profile_identity import IDENTITY_COLUMNS, identity_rows
 from pathlib import Path
 
 
@@ -92,7 +91,7 @@ def generate_html_report(results: dict, output_path: str):
     api = results.get('api_compare', {})
     detail = results.get('host_kernel')
     if detail:
-        from host_kernel_report import render_device, render_host
+        from host_kernel_report import render_attribution, render_device, render_host
         from kernel_execution import render_execution
 
     template_dir = Path(__file__).parent
@@ -114,7 +113,6 @@ def generate_html_report(results: dict, output_path: str):
 <details class="nav-sidebar" open>
   <summary class="nav-title">目录</summary>
   <nav aria-label="报告章节">
-  {'<a href="#comparison-sources">比对来源</a>' if comparison else ''}
   <a href="#overall">1. 总体性能比对</a>
   <a href="#conclusion">2. 分析结论</a>
   <div class="nav-sep"></div>
@@ -125,6 +123,7 @@ def generate_html_report(results: dict, output_path: str):
   <a href="#memory">6. 内存统计</a>
   <a href="#kernel">7. Kernel比对</a>
   {'<a href="#device-top" class="nav-sub">Device kernel Top 15</a>' if detail else ''}
+  {'<a href="#kernel-attribution" class="nav-sub">跨平台 Kernel 框架归属</a>' if detail and detail.get('attribution') else ''}
   {'<a href="#kernel-execution" class="nav-sub">单次执行比对</a>' if detail and detail.get('execution', {}).get('series') else ''}
   <a href="#kernel-data" class="nav-sub">- 两卡数据量比对</a>
   <a href="#kernel-top10" class="nav-sub">- Top10计算算子</a>
@@ -138,14 +137,13 @@ def generate_html_report(results: dict, output_path: str):
 <main>
 <div class="header">
   <h1>性能比对分析报告</h1>
+  {f'<p>{base_label} ｜ {compare_label}</p>' if comparison else ''}
   <div class="meta">
     源文件: {meta.get('source_file', '-')} ｜ 分析时间: {meta.get('analysis_time', '-')} ｜
     Sheet 数: {meta.get('total_sheets', '-')} ｜ 分析方法: analysis_methodology.md
   </div>
   {''.join('<p>'+escape(note)+'</p>' for note in (detail or {}).get('notes', []))}
 </div>
-
-{_render_comparison_sources(comparison) if comparison else ''}
 
 <!-- 总体性能 -->
 <div class="section" id="overall">
@@ -201,6 +199,7 @@ def generate_html_report(results: dict, output_path: str):
 <div class="section" id="kernel">
   <div class="section-title">7. Kernel 比对 (KernelCompare)</div>
   {render_device(detail, comparison) if detail else ''}
+  {render_attribution(detail, comparison) if detail else ''}
   {render_execution(detail, comparison) if detail else ''}
   {_render_kernel_type(kt) if kt.get('available') else ''}
   {_render_kernel_compare(kc) if kc.get('available') else ('' if detail or kt.get('available') else '<div class="unavailable">该 Sheet 不存在或为空（仅 NPU vs NPU 场景）</div>')}
@@ -234,25 +233,6 @@ def generate_html_report(results: dict, output_path: str):
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html)
-
-
-def _render_comparison_sources(comparison):
-    headers = ''.join(f'<th scope="col">{label}</th>' for label in IDENTITY_COLUMNS[:7])
-    rows = []
-    paths = []
-    for record, row in zip(comparison.values(), identity_rows(comparison)):
-        fields = ''.join(f'<td>{escape(str(value))}</td>' for value in row[1:7])
-        rows.append(f'<tr><th scope="row">{escape(row[0])}</th>{fields}</tr>')
-        if record['input_path']:
-            origin = '工作簿记录路径' if record['input_path_origin'] == 'xlsx' else '输入路径'
-            paths.append(f'<dt>{escape(row[0])} · {origin}</dt><dd><code>{escape(row[7])}</code></dd>')
-            if record['source_path'] and record['source_path'] != record['input_path']:
-                paths.append(f'<dt>{escape(row[0])} · 实际读取来源</dt><dd><code>{escape(row[8])}</code></dd>')
-    details = ('<details class="comparison-paths"><summary>完整来源路径</summary><dl>'
-               + ''.join(paths) + '</dl></details>') if paths else ''
-    return ('<section class="section" id="comparison-sources"><h2 class="section-title">比对来源</h2>'
-            '<div class="table-wrap"><table><thead><tr>' + headers + '</tr></thead><tbody>'
-            + ''.join(rows) + '</tbody></table></div>' + details + '</section>')
 
 
 def _render_overall_metrics(om, e2e, dims, sub_cats, base_label, compare_label):

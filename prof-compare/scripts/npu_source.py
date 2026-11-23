@@ -111,7 +111,7 @@ def db_kernels(path):
             yield r
 
 
-def db_host_spans(path):
+def db_host_spans(path, *, include_data=False):
     """Yield framework ops once even when one API launches several device tasks."""
     with open_db(path) as db:
         fields = columns(db, "PYTORCH_API")
@@ -123,7 +123,7 @@ def db_host_spans(path):
             for group, conn in db.execute("SELECT id,connectionId FROM CONNECTION_IDS"):
                 if conn is not None:
                     links[group].add(conn)
-        sql = "SELECT * FROM PYTORCH_API"
+        sql = "SELECT rowid AS source_rowid,* FROM PYTORCH_API" if include_data else "SELECT * FROM PYTORCH_API"
         if "type" in fields:
             sql += (" WHERE type IN (SELECT id FROM ENUM_API_TYPE WHERE lower(name)='op')"
                     if columns(db, "ENUM_API_TYPE") else " WHERE type=50001")
@@ -131,6 +131,10 @@ def db_host_spans(path):
             name = strings.get(r["name"])
             if not name or r["startNs"] is None or r["endNs"] is None:
                 continue
-            yield (r["globalTid"], int(r["startNs"]), int(r["endNs"]), name,
-                   strings.get(r["inputShapes"]) if "inputShapes" in fields else None,
-                   links.get(r["connectionId"], ()) if "connectionId" in fields else ())
+            span = (r["globalTid"], int(r["startNs"]), int(r["endNs"]), name,
+                    strings.get(r["inputShapes"]) if "inputShapes" in fields else None,
+                    links.get(r["connectionId"], ()) if "connectionId" in fields else ())
+            if include_data:
+                span += ({"id": r["source_rowid"],
+                          "dtype": strings.get(r["inputDtypes"]) if "inputDtypes" in fields else None},)
+            yield span

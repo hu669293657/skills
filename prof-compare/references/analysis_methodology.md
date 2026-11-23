@@ -62,7 +62,7 @@
 #### 分析经验
 
 1. **集中度判断**：Top 10 算子劣化量占总劣化量的比例 > 80% 说明问题集中，可针对性优化；< 50% 说明劣化分散，可能是系统性问题
-2. **调用次数变化**：如果 Number 列变化，说明模型结构变化（如新增算子或执行路径不同），需先确认比对基准是否合理
+2. **调用次数变化**：Number 列变化说明两次采集记录了不同的调用量。结合执行路径和单次耗时判断总耗时差异。
 3. **GPU vs NPU 场景**：GPU 和 NPU 算子名不同（如 GPU 的 `aten::flash_attention` vs NPU 的自定义算子），需配合 `--op_name_map` 映射
 
 ### 3. OperatorCompare（算子明细比对）
@@ -268,3 +268,14 @@ E2E 改善？
 | 1.05 - 1.10 | 显著劣化 | 红色 | 需要关注和优化 |
 | > 1.10 | 严重劣化 | 深红 | 需要立即优化 |
 | inf | 基准为 0 | - | 新增项，需评估是否必要 |
+
+
+## 跨平台 Kernel 归属
+
+`host_kernel.attribution` 为完整采样窗口的补充分析。NPU 分母为 `COMPUTE_TASK_INFO` 和 `COMMUNICATION_SCHEDULE_TASK_INFO` 通过 `globalTaskId` 关联的设备任务，逻辑通信事件独立统计。GPU 分母为 `cat=kernel` 的设备事件。每端的主要归属分类按事件闭环。GPU 的 launch、flow、二者一致、aten、GEMM 标注覆盖率用于证据交叉核对，有些集合互相包含。累计耗时可能跨流重叠。
+
+- NPU `sources[].event` 是 `TASK.globalTaskId`，`host` 是 `PYTORCH_API.rowid`，CANN 回溯时 `launch` 是 `CANN_API.rowid`。GPU 三个字段是 `traceEvents` 的零基索引，`host` 指逻辑算子或 GEMM 标注。`correlation` 保存对应平台的关联 ID。同一侧的事件在该表内唯一归属。
+- CANN 回溯要求唯一连接和完整同线程包含。CUDA launch 接受 runtime/driver API。重复关联 ID 且依现有时间证据不能消歧时留空。图重放独立计入覆盖率。部分 eager GEMM 有完整 launch 和 GEMM 标注，仍可缺少直接 CPU 算子，此时用标注作候选证据。
+- MMQ Cross Entropy 规则要求原始 CUDA 符号、同名逻辑模块、词表与 token 数及 BF16 证据。每个形状桶按本侧独立逻辑调用数取均值。受支持的 Quack 实现以每次调用的 CUDA grid.x 行数之和核对 token 覆盖，覆盖不足时留空倍率。两个平台可能以不同频次出现同一形状桶。
+- 逐元素 Add 要分别看原位和非原位。Shape 和 dtype 一致可生成候选。确认模块和设备形状一致后才给倍率。对于扁平化存储，用 Host 张量形状召回候选，再核查 stride、广播和输出，单凭元素数只能说明规模。
+- GroupedMatmulAdd 的候选表展示 CE 权重梯度与多专家 GEMM。分块权重梯度核对每个框架调用内的 GEMM 行数。专家组保留两侧实际行数，逐专家布局和 token 分配还原后再作同工作量比较。GPU 只剩 Graph 标记时保留未定位。

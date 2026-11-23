@@ -94,8 +94,8 @@ prof.export_chrome_trace("gpu_trace.json")
 ### 3.3 关键约定与建议
 
 - **建议只采集一个 step**：多 step 数据会混入预热/抖动，影响 E2E、通信等待等判断；多 step 场景用 `--compare_args "--base_step=1 --comparison_step=1"` 固定比对步
-- `-bp` 传基线，`-d` 传比对。两侧均可传 NPU 或 GPU。直比和已有 xlsx 分析均支持 `--base-label "旧版" --compare-label "新版"`。只生成上游原始工作簿的 `--compare_only` 模式可在后续分析时再补标签。
-- 报告首页展示设备、型号、采集主机、rank 和运行来源，完整输入路径可展开。两张 `NPU 0` 通过主机或采集目录区分。设备号、型号或主机缺少证据时显示「未知」。旧 xlsx 可从 `Base Profiling`、`Comparison Profiling` 表头恢复已记录的路径。
+- `-bp` 传基线，`-d` 传比对。两侧均可传 NPU 或 GPU。未指定基线时加 `--auto-base`，以 E2E 较短的一侧为基线。两侧 E2E 相同或缺失时保留输入顺序。旧 xlsx 沿用保存时的比对方向。
+- 报告用 `NPU 0`、`GPU 0` 等短标签。有两张同号卡时，可用主机名或不同的运行目录名区分。直比和已有 xlsx 分析均支持 `--base-label "旧版" --compare-label "新版"`。自动选择时，名称和 step 跟随各自的 Prof。
 - 总体性能差值为比对 − 基线。NPU / GPU 的热点和单次执行差值为 NPU − GPU，NPU / NPU 的热点和单次执行差值为比对 − 基线。
 - Host、Device Top 15 和单次执行支持纯 DB、纯文本和两侧 NPU 混合格式。`--enable_api_compare` 从 TorchNPU 主库或文本 trace 读取框架事件。
 - msprof-analyze 未安装时自动从 PyPI 在线安装（Python ≥ 3.7，建议 3.9+）
@@ -107,7 +107,7 @@ prof.export_chrome_trace("gpu_trace.json")
 | compare 结果 xlsx | `performance_comparison_result_<时间戳>.xlsx` | 仅模式一：msprof-analyze compare 的原始比对结果（含总体/算子/模块/内存/Kernel/通信/API 等 Sheet） |
 | 中间件 JSON | `compare_analysis_result.json` | 各 Sheet 的结构化分析结果，`metadata.comparison` 记录两侧身份，`host_kernel.side_roles` 记录热点左右角色 |
 | HTML 报告 | `compare_analysis_report.html` | 改善亮点/劣化风险双维度可视化报告 |
-| 中文 xlsx | `compare_chinese_result.xlsx` | 首张表「比对来源」，其余为中文工作表与热点数据 |
+| 中文 xlsx | `compare_chinese_result.xlsx` | 中文工作表与热点数据，表头标明基线与比对 |
 | 中文 CSV | `chinese_csv/*.csv` | 数据工作表的独立 CSV |
 
 默认输出目录为 `./compare_output_<时间戳>`，可用 `-o` 自定义。

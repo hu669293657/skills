@@ -10,7 +10,6 @@ from npu_source import columns, is_main_db, open_db
 
 ROLES = {"base": ("基线", "-bp"), "compare": ("比对", "-d")}
 XLSX_HEADERS = {"base": "Base Profiling: ", "compare": "Comparison Profiling: "}
-IDENTITY_COLUMNS = ("角色", "业务名称", "设备", "型号", "采集主机", "Rank", "采集来源", "完整输入路径", "实际读取来源")
 
 
 def text(value):
@@ -177,12 +176,10 @@ def workbook_identities(wb):
 
 
 def source_fragments(base, compare):
-    paths = [path_parts(p) for p in (base, compare)]
-    length = 2
-    if all(paths) and paths[0] != paths[1]:
-        while paths[0][-length:] == paths[1][-length:]:
-            length += 1
-    return ["/".join(p[-length:]) or None for p in paths]
+    a, b = path_parts(base), path_parts(compare)
+    while a and b and a[-1] == b[-1]:
+        a, b = a[:-1], b[:-1]
+    return [p[-1] if p else None for p in (a, b)]
 
 
 def comparison_identity(base=None, compare=None, labels=(None, None)):
@@ -203,29 +200,15 @@ def comparison_identity(base=None, compare=None, labels=(None, None)):
         paths = [r["source_path"] or r["input_path"] for r in records]
     fragments = source_fragments(*paths)
     a, b = records
-    same_device = all(a[k] is None or b[k] is None or a[k] == b[k]
-                      for k in ("device_type", "device_id", "device_model"))
+    same_name = (a["label"], a["device"]) == (b["label"], b["device"])
     different_hosts = a["hostname"] and b["hostname"] and a["hostname"] != b["hostname"]
     for record, fragment in zip(records, fragments):
         record["source"] = fragment
-        parts = [record["role_name"], record["label"], record["device"], record["device_model"]]
-        if same_device:
+        parts = [record["role_name"], record["label"], record["device"]]
+        if same_name:
             parts.append(record["hostname"] if different_hosts else fragment)
         record["short_label"] = " · ".join(filter(None, parts))
     return {record["role"]: record for record in records}
-
-
-def identity_rows(comparison):
-    def display(value):
-        return "未知" if value is None else value
-
-    for side in comparison.values():
-        device = display(side["device"])
-        if side["device_type"] and side["device_id"] is None:
-            device += "（设备号未知）"
-        yield [f'{side["role_name"]}（{side["flag"]}）', display(side["label"]), device,
-               *[display(side[field]) for field in ("device_model", "hostname", "rank", "source",
-                                                    "input_path", "source_path")]]
 
 
 def add_label_args(parser):

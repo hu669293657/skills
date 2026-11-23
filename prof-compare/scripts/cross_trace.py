@@ -246,6 +246,8 @@ class GpuBucket:
 
 
 def read_gpu(path, execution=None, identity=None):
+    from kernel_attribution import gpu_attribution, is_graph_launch
+
     header, events = trace_document(path)
     if identity is not None:
         from profile_identity import gpu_identity
@@ -256,6 +258,7 @@ def read_gpu(path, execution=None, identity=None):
     host_shapes = defaultdict(lambda: defaultdict(Metric))
     annotation_events = {}
     launch_external = defaultdict(set)
+    graph_launches = set()
     host_lanes = defaultdict(list)
     # Attribute launch correlation IDs to the containing annotated GEMM call.
     for idx, e in enumerate(events):
@@ -286,6 +289,8 @@ def read_gpu(path, execution=None, identity=None):
         elif cat in ("cuda_driver", "cuda_runtime"):
             lanes[e["pid"], e["tid"]].append((e, None))
             args = e.get("args", {})
+            if "correlation" in args and is_graph_launch(e["name"]):
+                graph_launches.add(args["correlation"])
             if "External id" in args and "correlation" in args:
                 launch_external[args["correlation"]].add(args["External id"])
     correlation = defaultdict(set)
@@ -303,7 +308,7 @@ def read_gpu(path, execution=None, identity=None):
             continue
         args = e.get("args", {})
         devices.add(args.get("device", e.get("pid")))
-        graph = bool(args.get("graph id", 0))
+        graph = bool(args.get("graph id", 0)) or args.get("correlation") in graph_launches
         refs = correlation.get(args.get("correlation"), ()) if not graph else ()
         tag_id, spec = next(iter(refs)) if len(refs) == 1 else (None, ("",))
         b = buckets[e["name"], spec[0], spec[1:]]
@@ -313,7 +318,7 @@ def read_gpu(path, execution=None, identity=None):
         b.graph_calls += int(graph)
         if tag_id is not None:
             b.annotations.add(tag_id)
-        owners = external.get(args.get("External id"), ())
+        owners = external.get(args.get("External id"), ()) if not graph else ()
         if not owners and not graph:
             ext = launch_external.get(args.get("correlation"), ())
             if len(ext) == 1:
@@ -322,6 +327,7 @@ def read_gpu(path, execution=None, identity=None):
     if len(devices) != 1 or not hosts:
         raise ValueError("GPU trace 需要包含单卡 kernel 和 host 算子事件")
     if execution is not None:
+        execution["attribution"] = gpu_attribution(events)
         execution["self_ns"] = host_self_ns(host_lanes)
         trace_starts = [e["ts"] for e in events if e.get("cat") == "Trace" and e.get("ph") == "X"]
         execution["origin_us"] = min(trace_starts) if trace_starts else min(

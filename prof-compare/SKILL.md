@@ -7,10 +7,10 @@ description: "比对两份单卡 Prof，支持 GPU JSON trace 与 NPU profiler D
 
 ## 功能概述
 
-### 基线、比对与采集来源
+### 基线与比对
 
-- 按用户指定的角色传参。 `-bp` 对应基线，`-d` 对应比对，两侧均可用 NPU 或 GPU。用户给了「旧版」「新策略」等名称时，用 `--base-label` 和 `--compare-label` 原样传入。两个报告入口均支持这两个参数。
-- 从 HTML 首页「比对来源」、中文 xlsx 首张表或 JSON 的 `metadata.comparison` 核对设备、主机和采集来源。同号卡可按主机区分，同一主机同号卡的多次运行可按不同采集路径区分。设备号是 Prof 记录的编号，rank 单独显示。分析旧 xlsx 时，从原工作表表头恢复可用路径，其余未知字段显示为「未知」。
+- 用用户给出的两份 Prof 生成报告。解读跨平台性能前，以报告中的 rank、step、模块和形状核对工作量。未指定基线时，传 `--auto-base`，将 E2E 耗时更短的一侧作为基线。E2E 相同或缺失时保留输入顺序。用户指定基线时直接用 `-bp`，比对用 `-d`。已有 xlsx 沿用工作簿记录的角色。
+- 报告用「基线 · NPU 0」「比对 · GPU 0」这样的短标签。同号卡的标签有歧义时，用主机名或不同的运行目录名区分。用户提供的业务名称用 `--base-label`、`--compare-label` 传入。自动选择时，名称跟随对应 Prof。
 - 解读差值时引用该章节的表头。总体性能使用 `-d − -bp`。NPU / NPU 热点和单次执行同样使用 `-d − -bp`。NPU / GPU 热点和单次执行固定使用 NPU − GPU，表头随两侧角色变化。
 
 ### 综合报告中的 Host 算子、Device kernel Top 15 与单次执行
@@ -37,6 +37,13 @@ python scripts/run_compare.py -d "<NPU目录>" -bp "<GPU trace>" --npu-top-csv "
 - 两份 NPU 时按 `-d` 的 Top 15 排序，与 `-bp` 的对应类型及核心逐组对齐。差值统一为左侧减右侧，缺少对端数据时留空。
 - NPU 对 GPU 的热点章节差值为 NPU − GPU，倍率为 NPU / GPU。比较总量时也说明调用次数差异。MoE 的主核与 epilogue 先分别比较，再看这两个阶段的合计；跨 stream 的 kernel 累计耗时与 step 墙钟时间分别解读。
 - Host 以左侧 NPU 的 self 耗时排序，每项指标连续显示两侧的名称、total、self、次数和均值。已核实的 host 异名可用 `--host-aliases aliases.json` 传入，格式为 `{"左侧原名":"右侧原名"}`。
+
+**跨平台 Kernel 框架归属**
+
+- 用「Kernel 归属覆盖」区分唯一 CUDA launch、可复核的 `ac2g` flow、直接 CPU 算子和 CUDA Graph 重放。Graph 入口只证明图级归属。逐节点需要采集时的节点到框架映射，异步重放的入口时刻、stream 和符号用于辅助定位候选。
+- NPU 优先用 `TASK → CONNECTION_IDS → PYTORCH_API`。原生连接缺失时，用唯一 `TASK.connectionId → CANN_API.launch` 定位同线程完整包含 launch 的唯一内层框架调用。证据不足的任务计入未定位。
+- 在「跨平台框架分组」核对模块、逻辑调用、形状和 dtype。交叉熵按框架调用归并 GPU 分块，再按 token 桶比较均值。`Add` 先按 `aten::add`、`aten::add_`、`aten::addmm` 区分语义。分组 GEMM 同时核对专家数、矩阵尾维和操作数行数。仅对边界和工作量可比的分组展示倍率。此表与 Top 15 可引用同一 NPU 事件，分别用于下钻和排名。
+- 复核来源时用 JSON 的 `host_kernel.attribution`。有原始 NPU DB 和 GPU trace 时，读取 [跨平台归属方法](references/analysis_methodology.md#跨平台-kernel-归属) 确认分母、事件 ID 和证据限制。
 
 **单次执行比对**
 
@@ -65,6 +72,9 @@ python scripts/run_compare.py -d "<NPU目录>" -bp "<GPU trace>" --npu-top-csv "
 # 最简用法：默认开启全部比对能力（msprof-analyze 未安装时自动从 PyPI 安装）
 python scripts/run_compare.py --msprof -d <待比对prof路径> -bp <基准prof路径>
 
+# 未指定基线时自动选 E2E 较短侧
+python scripts/run_compare.py --auto-base -bp ./prof_a -d ./prof_b -o ./out
+
 # 指定输出目录和业务名称
 python scripts/run_compare.py -d ./ascend_pt -bp ./base_ascend_pt --base-label "旧版" --compare-label "新版" -o ./out
 
@@ -81,6 +91,7 @@ python scripts/run_compare.py -d ./ascend_pt -bp ./gpu_trace.json --compare_only
 |---|---|---|
 | `-d / --profiling_path` | 是 | 比对侧 Prof 路径 |
 | `-bp / --benchmark_profiling_path` | 是 | 基线侧 Prof 路径 |
+| `--auto-base` | 否 | 根据 E2E 决定角色，`-bp`、`-d` 提供初始顺序。业务名称和 step 跟随各自输入 |
 | `--base-label` / `--compare-label` | 否 | 写入分析报告的基线、比对业务名称 |
 | `-o / --output` | 否 | 输出目录，默认 `./compare_output_<时间戳>` |
 | `--compare_args` | 否 | 透传给 compare 的额外参数字符串，详见 `references/compare_quickstart.md` |
