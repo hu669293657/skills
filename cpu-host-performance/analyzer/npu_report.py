@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """NPU affinity summaries and concrete AI task binding plans for HTML."""
 from html import escape
+from urllib.parse import quote
+
+from hostbind.delivery import DESIGN_NAME, SCRIPT_NAME, RUN_COMMAND, design_text
+from hostbind.placement import A3_POLICY, EXPLICIT
 from .environment_analysis import ENV_CATEGORIES
 from .npu_affinity import STATE_CN
 from .report_explanation import collection_actions_html
@@ -11,9 +15,9 @@ _EXPLANATION = ('allowed CPU 是调度许可范围；PSR 是采样时最近运�
                 '绿色表示全量现有线程的许可范围落在 NPU 亲和 CPU 内；橙色表示可跨节点或证据不足；'
                 '红色表示观测到非亲和 CPU/绑定范围偏离。CPU 绑定与内存页 NUMA 分布分别核验，'
                 '亲和性风险不等于已确认的 HostBound 根因。主进程按占卡显存最高推定，所有占卡 PID 均保留。')
-_OPERATIONS = ('在原宿主机以有权限的账户执行，PID/TID 与采集时身份及 cpuset 需保持一致。'
-               'taskset -apc 作用于指定进程的所有现有线程。现有子进程与辅助任务仅作清单展示。'
-               '新建线程/子进程通常继承创建者当时的 affinity；taskset 不迁移既有内存页。')
+_OPERATIONS = ('执行前，在原宿主机核对占卡 PID、线程身份及其当前有效 cpuset，并保存原掩码。'
+               '运行 Python 命令会立即修改配置中列出的目标。脚本没有预检与自动回滚；'
+               '业务重启或拓扑变化后须重新生成配置。')
 
 
 def affinity_html(data, integrity=None):
@@ -113,23 +117,39 @@ def _ai_rankings_html(data, table):
     return ''.join(parts)
 
 
-def binding_html(data, integrity=None, plan=None, rankings=None):
-    from urllib.parse import quote
+def binding_html(data, integrity=None, plan=None, rankings=None, product=None):
     from .report_sections import table
     if plan is None:
         plan = data.get('binding_plan', {})
     tasks = plan.get('tasks', [])
-    parts = ['<h3>具体绑核命令与脚本</h3><p>%s</p>' % escape(_OPERATIONS)]
-    commands = ((plan.get('commands') if plan else data.get('commands')) or '').splitlines()
-    if commands:
-        parts.append('<div class="code-panel"><button type="button" class="copy-code" onclick="copyBinding(this)">复制绑核命令</button><pre><code>%s</code></pre></div>' % escape('\n'.join(commands[:DISPLAY_LIMIT])))
-        if len(commands) > DISPLAY_LIMIT:
-            parts.append('<p>仅展示前100 / %d条命令；完整脚本与JSON保留全部命令。</p>' % len(commands))
-        if plan.get('script'):
-            parts.append('<p><a download="bind_cpu.sh" href="data:text/x-shellscript;charset=utf-8,%s">下载绑核入口 bind_cpu.sh</a>（默认只预览。--apply 委托 Skill 的 scripts/ascend_bind.py，现场重新核验并生成计划、保存回滚日志、执行与读回；需 Python 3.8+ 及完整 Skill 目录。）</p>' % quote(plan['script'], safe=''))
-            parts.append('<p>闭环顺序：本报告诊断 → plan 自动识别实际 NPU / Rank 标签 / 子进程线程 → NUMA 计划 → apply → 同负载复采及业务样本 verify → 无收益或异常 rollback。角色名称不能证明专核需求；Rank 标签不能代替实际设备归属。用 bash bind_cpu.sh --help 查看执行与回滚方式；详细指标格式见 Skill 的 references/binding_workflow.md。</p>')
+    parts = ['<h3>现场绑核配置与脚本</h3>']
+    if product and (product.get('evidence') or product.get('status') == 'identified'):
+        product_label = {'unknown': '未识别', 'conflict': '型号证据冲突'}.get(
+            product['status'], product['generation'])
+        names = '、'.join(dict.fromkeys(item['value'] for item in product.get('evidence', [])))
+        parts.append('<p>采集机型：%s%s</p>' %
+                     (escape(product_label), '（%s）' % escape(names) if names else ''))
+    design = plan.get('design', {'custom_bind': []})
+    entries = design['custom_bind']
+    if entries:
+        by_pid = {row['pid']: row for row in tasks if row['pid'] == row['tid']}
+        methods = {A3_POLICY: 'A3 均衡策略（硬件亲和未知）', EXPLICIT: '设备显式亲和'}
+        targets = []
+        for entry in entries:
+            pid = entry['pid'][0]
+            row = by_pid.get(pid, {})
+            targets.append([pid, row.get('npu_ids'), row.get('numa'), entry['cpu_list'][0],
+                            methods.get(row.get('placement_source'), '见采集记录')])
+        parts.append(table(['目标 PID', 'NPU', '目标 NUMA', '允许的逻辑 CPU', '分配依据'],
+                           targets, True, title='计划绑定的主进程'))
+        parts.append('<p>%s</p>' % escape(_OPERATIONS))
+        for name, mime, content in ((SCRIPT_NAME, 'text/x-python', plan['script']),
+                                    (DESIGN_NAME, 'application/json', design_text(design))):
+            parts.append('<a download="%s" href="data:%s;charset=utf-8,%s">下载 %s</a> ' %
+                         (name, mime, quote(content, safe=''), name))
+        parts.append('<div class="code-panel"><button type="button" class="copy-code" onclick="copyBinding(this)">复制执行命令</button><pre><code>%s</code></pre></div>' % escape(RUN_COMMAND))
     else:
-        parts.append('<p>本次没有通过核验的绑核命令。</p>')
+        parts.append('<p>本次采集未产生通过核验的绑核条目，现场配置为空。</p>')
     blocked = [row for row in tasks if row['object_type'] == 'NPU 主进程' and row['status'] == 'BLOCKED']
     if blocked:
         parts.append('<h4>待核验的主进程</h4><ul>')
@@ -139,7 +159,7 @@ def binding_html(data, integrity=None, plan=None, rankings=None):
         if len(blocked) > DISPLAY_LIMIT:
             parts.append('<p>显示前 %d / %d 个待核验 PID。完整清单见 report_data.json。</p>'
                          % (DISPLAY_LIMIT, len(blocked)))
-    elif not commands:
+    elif not entries:
         parts.append('<p>未确认占卡主 PID。可查看 <a href="#sec-2">NPU 任务与 NUMA 亲和性</a>和'
                      '<a href="#core-problems">核心问题与数据说明</a>。</p>')
     parts += ['<h3>AI 进程与线程清单</h3>', '<p>%s</p>' % escape(plan.get('note', '根据已采集的NPU、进程和线程关系整理。'))]

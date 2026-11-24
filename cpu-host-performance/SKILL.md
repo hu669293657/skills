@@ -13,20 +13,22 @@ description: "Use when 需要检查 Linux 服务器 CPU 高性能模式或是否
 
 ## 固定交付
 
-诊断交付物为 `<output-dir>/hostbound_report.html`、`report_data.json` 和 `bind_cpu.sh`。HTML直接从指标生成，单文件、离线可打开、中文；不生成Markdown报告。默认仅诊断/规划；`bind_cpu.sh` 默认只读预检/预览，显式执行委托同一 journal 执行器。闭环实验另保存 `plan.json`、`state.json`、前后业务指标及 `verification.json`。实际绑核与自动回滚须在用户已授权的范围内，不能把本地优化 skill 的请求当作对生产主机的执行授权。
+分析器生成离线中文报告 `hostbound_report.html`、`report_data.json`、`cpu_binder_simple.py` 和 `bind_design.json`。分析器和客户生成器都逐字节复制同一份 `templates/cpu_binder_simple.py`，仅在 JSON 中写入该客户的具体绑定对象和 CPU。没有可核验目标时，报告配置为 `{"custom_bind":[]}`，并说明缺项。生成文件是离线操作。现场执行前在原宿主机核对 PID/TID、IRQ、CPU、cpuset 与变更授权。
 
-## 绑核闭环入口
+## 生成客户绑核方案
 
 **定制方案优先分支**：用户要求根据服务器实际负载分核、区分推理/训练、给网卡预留CPU或处理客户其他服务时，先读 [定制CPU/NPU/NIC规划](references/custom_binding.md)。在既有采集上补齐网卡/队列/IRQ证据，按完整物理核组建立客户、系统、网络、各NPU与余量预算；核数依据实测活跃并行需求，不按总线程数或固定百分比分配。用 `scripts/plan_custom_binding.py` 输出审阅用 `binding_proposal.json`。缺数据给缺项，超额给容量冲突，不生成重叠且声称隔离的方案。推理/训练共用此skill，按业务分支选择容量与验收指标。
 
-**用户要现场专用绑核脚本时**，不要止于提案，也不要手写 `taskset -a`：读[从采集生成客户脚本](references/customer_script.md)，先用 `scripts/generate_customer_binding.py --hostbound <解包后的hostbound目录> --inspect` 盘点真实占卡 PID、全线程和非目标热点。按模板和实测预算生成 `bind_customer.sh` 和配套 `.pyz`；每 TID 默认 1 个逻辑 CPU，同一业务 PID 的全部目标合计最多 2 个，同卡多 PID 共享卡池。客户线程及设备 IRQ 只移动已核实、列入清单的对象。无真实采集只给采集方法和待填模板，不交付带假 PID/IRQ 的生产脚本。
+需要按负载交付客户配置时，先用 `scripts/generate_customer_binding.py --hostbound <解包后的hostbound目录> --inspect` 盘点占卡 PID、全线程及其他热点。使用实测预算生成 `bind_design.json`。分析器按占卡主 PID 输出整线程组条目，定制生成器则按 TID 与已审核的 IRQ 逐项生成。定制配置每 TID 默认 1 个逻辑 CPU，同一业务 PID 的全部目标合计最多 2 个，同卡多 PID 共享卡池。客户线程及设备 IRQ 按已核实的清单纳入。无真实采集时只给采集方法和待填输入。[客户脚本生成与运行](references/customer_script.md)
 
-定制建议与下面现有 `plan.json` 的执行契约不同：`locality/partition` 不会自动消费定制CPU池，现有执行器也不包含IRQ/RPS/客户服务迁移。先核对最终执行目标是否与建议一致；不能以旧 `bind_cpu.sh --apply` 重新规划的结果声称已执行定制方案。名称线索与身份分开，用户列出的vllm、ZMQbg、HCCL/HCCN/HCCP、监控/日志、python3、dev_*等按参考页识别角色，仍枚举已核验主进程的全部线程。
+两文件同目录，核对配置、权限与授权后，客户入口为 `python3 cpu_binder_simple.py -c bind_design.json`。此命令直接执行，模板没有预检、原值日志或回滚。IRQ 条目可能停止 irqbalance 并写中断亲和，开启 `mem_bind` 可能迁移内存页。只按名称匹配的线程不足以确认归属，应枚举已核验主进程的全部线程。
 
-涉及绑核优化、Rank、执行、性能验证或恢复时，先读 [闭环操作与数据契约](references/binding_workflow.md)。统一入口为 `python3 scripts/ascend_bind.py`，执行器要求 Linux 宿主机、完整 Skill 目录和 Python 3.8+。
+## 现场审计、A/B 与回滚
+
+需要现场发现 Rank、事务日志、读回或回滚时，在 Linux 宿主机使用完整 Skill 和 Python 3.8+，单独运行 `python3 scripts/ascend_bind.py`。该入口自行生成并使用 `plan.json`、`state.json`，只处理其 locality/partition 计划。客户模板执行过的配置没有对应的事务日志。[闭环操作与数据契约](references/binding_workflow.md)
 
 1. **Trace 诊断**：用原入口采集/分析稳定业务窗口，保留原包与 report_data.json；按下文证据规则区分 Host 风险与已确认 HostBound。诊断允许数据不足，执行计划不允许填补未知身份/拓扑。
-2. **识别与计划**：`plan --report-data ... --pid ROOT_PID --output plan.json` 只读发现占卡主 PID、白名单 Rank 标签及主进程的全部线程，逐 TID 核对 cpuset。预览脚本用 `--main-pid` 指定确切的占卡主 PID。LOCAL_RANK/visible devices 仅作标签，不推断全局 NPU；同进程多卡且池不同则阻断。名称仅作角色线索。输出 plan 后查看所有 workers/actions/pools/warnings。
+2. **识别与计划**：`plan --report-data ... --pid ROOT_PID --output plan.json` 只读发现占卡主 PID、白名单 Rank 标签及主进程的全部线程，逐 TID 核对 cpuset。可用 `--main-pid` 限定占卡主 PID。LOCAL_RANK/visible devices 仅作标签，不推断全局 NPU。同进程多卡且池不同则阻断。输出 plan 后查看 workers/actions/pools/warnings。
 3. **NUMA 分配**：默认 locality，保留合规窄掩码；显式 partition 仅为均分实验候选，按全部 NPU 和完整 SMT sibling 组分片，不以当前活跃卡数量扩大池。缺映射、跨 NUMA、空交集或冲突拒绝计划；不固定预留 Main/ACL/Release 核数。
 4. **执行**：先确认框架 binder 已关闭或不存在，记录 `--framework-binding disabled|absent`。`apply --plan ... --state ...` 只预检；授权后 `--execute` 全量预检、写入原掩码日志、按主 PID 执行 `taskset -apc`、逐线程读回和审计；失败尽力自动恢复。用户已经授权该实验时按范围继续，不逐命令重复确认。
 5. **性能验证**：同负载复采并由业务提供 before/after 指标（默认各至少3轮、每轮去热身后30样本），用 verify 比较主指标中位数和坏尾、核验 after Trace 的目标身份/affinity 及 plan_id。绑核读回只证明配置生效；无业务数据/样本不足/缺配置证据为 INCONCLUSIVE。保存实际调度、竞争和 NUMA 辅证。
@@ -45,7 +47,7 @@ description: "Use when 需要检查 Linux 服务器 CPU 高性能模式或是否
 - 按实际任务和同核同窗证据合并调度等待、竞争者和已对齐的设备时间窗。CPU 配额限制单列，因为检查和调整对象不同。
 - 中断以热点核的配对占用时间和本核来源解释。核实业务线程同核同期排队后，再考虑分开设备队列和业务线程。
 - 忙核所在组的整窗低频只作为线索。核验业务忙段是否低频，再查上限、温度和功耗。空闲节能只作为判断低频线索的背景。
-- CPU 许可范围、实际运行位置和内存页位置分别判断。安全绑核预检与命令集中在第3节对应主 PID。
+- CPU 许可范围、实际运行位置和内存页位置分别判断。第 3 节列出客户绑定配置、现场执行条件及阻塞原因。
 - 回看时段与样本量放到对应问题。设备事件与 Host 等待同期用于定位，业务影响靠同负载对照。按实际丢失、解析或打包记录决定如何补齐缺口。
 
 第二部分必须直接解释CPU平均利用率、单核最高利用率、全机上下文切换率、调度延迟P99、硬中断总占比、软中断总占比，并呈现根因判断/候选证据链，以及 NPU 任务与 NUMA 亲和性。HTML 按 NUMA 分组、每张 NPU 一张任务卡，列出主进程（按显存占用最高推定）、所有占卡宿主机 PID、线程数、NPU 亲和 CPU、当前线程 allowed CPU、ftrace 观测 CPU、PSR 最近运行核、“观测 NUMA → 亲和 NUMA”、CPU 绑定状态。2.3只展示当前亲和摘要，移除“依据、来源、内存与线程证据”展开区和“建议CPU / NUMA”字段；AI对象清单、目标CPU、缺项及执行命令统一放第三部分。根因不再单列尾部章节，具体优化动作统一放在第三部分。
@@ -106,18 +108,16 @@ python3 tools/tool_router.py --signals python,gil,irq,numa,device-gap
 4. 只按 [HostBound Diagnosis Rules](references/hostbound_diagnosis_rules.md) 输出 finding。每个 finding 必须含 Metric、Value、Threshold 或 Baseline、Evidence source、Time window、Confidence。
 5. 无至少两类独立证据时，输出 `INSUFFICIENT_EVIDENCE` 或“待验证假设”，不得声称根因。CPU 高、IRQ 多、GIL 事件多、Cache Miss 高均不能单独判定 HostBound。
 6. HostBound 的确认还必须有 Device 空泡/Host-Device overlap 失配，以及至少一项对应 Host 侧证据；没有 CANN/Device 时间线时只能表述为“Host 侧风险/疑似”。
-7. 涉及 NPU、NUMA 或绑核方案时，读取 [NPU/NUMA 判断与绑核规则](references/npu_numa_binding.md)。仅显式 CPU Affinity 字段建立 NPU→CPU 映射，HCCS、卡号、Logic/Physical ID 不表示 NUMA。CPU 所属节点、Mems_allowed 许可范围、numa_maps 实际页分布分别分析。共享 CPU 池有完整 Worker 运行/等待需求证据时才分配互斥 SMT 核心组；调度证据不足时，若显式原始亲和池一致、全部 CPU 归属同一 NUMA、宿主机身份及全 TID cpuset 允许完整在线池，给出共享本地亲和池的具体命令，标明共享而非隔离。映射/身份/cpuset 证据缺失时仍保留未知。已有合规线程保留原掩码。每个动作须满足稳定宿主机 PID/TID 身份及逐 TID 有效 cpuset；第二部分保留当前摘要，第三部分列出对象清单、可执行命令及逐对象缺项。
+7. Ascend 机型按 `cat /sys/class/dmi/id/product_name` 和 `npu-smi info -t product -i 0 -c 0` 采集的原文识别 A2/A3/A5。先用显式 CPU Affinity 确认硬件亲和。仅对确认 A3 且缺少显式亲和的设备，按逻辑 NPU ID 数值排序，在实际可用的 NUMA 节点间均衡轮转，节点按数值排序。标记为 A3 分配策略，硬件亲和保持未知。A2/A5/未知机型缺少映射时列缺项。HCCS、Logic/Physical ID 和卡号都不能证明硬件亲和。[NPU/NUMA 判断与绑核规则](references/npu_numa_binding.md)
 
 ## 优化与安全边界
 
 - 先保留原始采集包、affinity、IRQ 和 NUMA 快照，再提出优化方案。
-- `host_analyzer` 是可选的独立外部优化工具，不是诊断器。默认不执行系统变更；用户授权 CPU 绑核实验后使用上述 journal 执行器。`migratepages`、IRQ affinity 和 irqbalance 不随 CPU 实验自动执行。
+- `host_analyzer` 是独立外部优化工具。离线诊断只生成方案。逐项确认现场授权范围后再运行相应的执行工具。
 - 优化必须由用户确认，并以前后相同负载、同一窗口的复采结果验证；无收益或副作用须给出回滚方案。
-- 第三节先展示可复制的绑核命令和脚本，再列出待核验的主 PID 和进程线程清单。每个已核验的占卡主进程给一条具体的 `taskset -apc CPU_LIST PID`。该命令作用于指定 PID 的全部现有线程。启动器、未占卡子进程及辅助线程仅作清单展示。
+- 第三节展示固定模板和本次 JSON，列出待核验的主 PID、线程清单及原因。仅当 `custom_bind` 有目标时展示客户执行命令。
 - AI 进程与线程清单按名称汇总。CPU 运行时长和跨进程抢占切入各按进程名、线程名展示前十位，保留 PID/TID 供核查。进程时长汇总已观测线程的 CPU·秒。跨进程抢占切入仅统计同一次 `sched_switch` 中 `prev_state=R+` 且两端 TGID 已知并不同的记录，计给切入方。用等待时间和业务延迟核查影响。没有可归属样本时明确标注，完整排名数据见 `metrics.ai_rankings`。
-- 先核对主进程的宿主机身份、NPU 本地 CPU 范围和全线程的有效 cpuset。从 NPU 本地在线 CPU 与所有线程许可范围的交集选择统一目标。线程许可范围可以不同。公共目标为空或会改变需保留的本地线程掩码时，在命令区标出主 PID 和原因。
-- `bind_cpu.sh` 默认 Bash 预检和预览。`--apply` 委托现场执行器重新发现主进程和线程，先保存原 affinity，再按主 PID 调用 `taskset -apc` 并读回。恢复时按日志逐线程恢复原掩码。完整操作见闭环契约。
-- 离线生成命令无需申请执行权限；实际绑核仍需用户授权。执行器在任何变更前主动保存当前真实 affinity 和稳定身份用于恢复，不能仅依赖较旧采集快照。`taskset` 不迁移既有内存页。
+- 对报告计划核对宿主机身份、NPU 映射来源、在线 CPU 和各 TID 有效 cpuset。统一目标取各许可范围的交集。公共目标为空或会覆盖需保留的窄掩码时，列出受阻主 PID 和原因。
 - 纯拓扑偏离只能是潜在配置风险。提高 NUMA 性能风险需相互关联的跨节点运行迁移、实际内存位置/远端访问、明显等待与性能证据；页分布本身不能证明远端访存流量。不机械建议修改全局调度参数。复采根据 Manifest 的原因和可解决性判断，常规完整入口不再依赖额外开关。
 
 ## 离线分析
@@ -138,7 +138,7 @@ CPU 分析器自动读取采集包内的原生 Dump，也接受任意文件名�
 
 采集与数据契约需要核对时读取 [v2分析说明](references/analysis_v2.md)。全量显式使用`--full`，默认低开销sysfs轮询1秒，可用`--frequency-interval 2`调整（最小0.2秒）；`--minimal`仅sched_switch，仍保留sysfs频率，不支持完整wakeup延迟。重复采集自动生成独立时间目录，不覆盖旧数据。私有trace instance不受支持时安全停止全局采集，可由客户提供已有trace或已保留的只读快照。
 
-分析后查看`hostbound_report.html`，并保留`report_data.json`（包含`metrics.binding_plan.tasks/actions/commands/script`，schema_version=2，时间秒/延迟ms/频率MHz/比例百分比；新增字段向后兼容）。HTML 每类明细最多展示100条，标明总数；长表默认收缩，搜索/排序作用于展示的前100条。全部指标、进程/线程和证据仍保留在 JSON，不因展示限制截断分析。2.3不展示逐PID全线程原始证据表，只保留判断摘要与来源。第5节直接展示 CPU 时间占比、调度活动和 CPU Frequency 三组全核图，各组默认显示全部指标，缺失项标为 N/A，核心明细表默认收起。频率/空闲时序、线程排名和所有候选竞争重叠窗口见 JSON。
+分析后查看 `hostbound_report.html`，保留 `report_data.json`。其中 `metrics.binding_plan.design` 对应客户执行配置，schema_version=2。时间单位为秒、延迟为 ms、频率为 MHz、比例为百分比。HTML 每类明细最多展示100条，标明总数；长表默认收缩，搜索/排序作用于展示的前100条。全部指标、进程/线程和证据仍保留在 JSON，不因展示限制截断分析。2.3不展示逐PID全线程原始证据表，只保留判断摘要与来源。第5节直接展示 CPU 时间占比、调度活动和 CPU Frequency 三组全核图，各组默认显示全部指标，缺失项标为 N/A，核心明细表默认收起。频率/空闲时序、线程排名和所有候选竞争重叠窗口见 JSON。
 
 - 缺少cpu_frequency事件时先查看主状态与事件子状态：区分TRACE_AVAILABLE、SYSFS_AVAILABLE、STATIC_ONLY、NO_TRANSITION、UNSUPPORTED、COLLECTION_FAILED，以及NOT_REQUESTED/UNKNOWN。有效sysfs数据不能因为trace没有转换而被否定。NO_TRANSITION不表示降频，缺失不显示0MHz。
 - 频率按related_cpus策略域去重；标准接口kHz显式转MHz；时间加权平均只覆盖已知样本持续区间。低频比例仅使用cpuinfo_max_freq参考；驱动请求频率不是已经验证的实际频率。PMU未获平台语义/权限验证时保持NOT_VALIDATED，不运行或输出估算频率。
@@ -152,4 +152,4 @@ CPU 分析器自动读取采集包内的原生 Dump，也接受任意文件名�
 
 ## 旧包绑核兼容
 
-报告和预览以 metrics.binding_plan 为准。旧包已确认宿主机身份、主进程 starttime、显式 NPU 映射和完整线程掩码时，可生成待现场核验的主进程命令。缺逐线程 cpuset 时，以该线程当前 allowed 与 NPU 本地在线 CPU 的交集为边界。执行前用新 plan.json 核验现场线程，使用 state.json 恢复。身份冲突、未知 NPU 映射、缺少安全公共目标或同一 PID 使用不同 NPU CPU 池时，在命令区标出主 PID 与具体阻碍。
+旧包若能确认宿主机身份、主进程 starttime、NPU 映射和完整线程掩码，可生成待现场核验的配置。缺逐线程 cpuset 时，以当前 allowed 与候选在线 CPU 的交集为边界。身份冲突、硬件映射未知且不适用 A3 策略、缺少安全公共目标或同一 PID 使用不同 CPU 池时，在报告中标明主 PID 与原因。

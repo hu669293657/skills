@@ -1,10 +1,10 @@
 # CPU Host 性能分析 Skill
 
-按服务器负载定制CPU/NPU/网卡方案时，使用 [定制规划分支](references/custom_binding.md)：区分推理/训练，保护客户服务，按完整物理核与实测网络处理需求分配。新增 `collect_network_evidence.py` 补充只读NIC/IRQ快照，`plan_custom_binding.py` 生成审阅建议。建议JSON与下述执行计划不同，现有执行器不会自动应用定制池或IRQ/RPS设置。
+按服务器负载定制CPU/NPU/网卡方案时，使用 [定制规划分支](references/custom_binding.md)：区分推理/训练，保护客户服务，按完整物理核与实测网络处理需求分配。新增 `collect_network_evidence.py` 补充只读NIC/IRQ快照，`plan_custom_binding.py` 生成审阅建议。`binding_proposal.json` 用于评审容量；定制配置的生成步骤见[客户脚本指南](references/customer_script.md)。
 
-新增统一绑核闭环：`python3 scripts/ascend_bind.py --help`。流程为 Trace 诊断 → 现场 NPU/Rank 标签/子进程线程识别 → NUMA 计划 → journal 执行与读回 → 同负载业务 A/B + Trace 验证 → 回滚。默认只读；实际执行需显式 `--execute`。完整命令、指标 JSON 格式、状态和限制见 [绑核闭环操作说明](references/binding_workflow.md)。
+需要现场事务日志、逐项读回、业务 A/B 与回滚时，可在完整 Skill 目录使用 `python3 scripts/ascend_bind.py --help`。此工具生成自己的现场计划与状态文件，显式 `--execute` 才修改配置。[绑核闭环操作说明](references/binding_workflow.md)
 
-`bind_cpu.sh` 现在默认仅预检/预览；其 `--apply` / `--rollback` 委托同一个 Python 执行器，需要完整 Skill 目录和 Python 3.8+。新进程/线程或 affinity 漂移会要求重新规划，不自动追随重启 Rank；不默认改变 IRQ 或迁移内存页。
+客户执行统一使用 `cpu_binder_simple.py` 与 `bind_design.json`。离线分析器和客户生成器都原样复制 `templates/cpu_binder_simple.py`，客户差异全部写入配置。到原 Linux 宿主机核对当前 PID/TID、IRQ、目标 CPU、cpuset 和权限，获准后运行 `python3 cpu_binder_simple.py -c bind_design.json`。该命令直接生效，模板没有预检或回滚。[配置字段与执行影响](references/customer_script.md)
 
 面向 openEuler / Kunpeng / Ascend 训练与推理的只读采集、离线分析与证据报告。升级保留原有入口、离线报告、NPU/NUMA亲和性与安全绑核建议，增加频率多源降级、进程线程发现、竞争候选与全核交互图。
 
@@ -71,7 +71,7 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 支持 tar.gz、zip、目录、ftrace/trace-cmd 文本、Chrome/Perfetto JSON 和 msprechecker 原生 Ascend Dump JSON。直接分析原生 JSON 时，报告展示环境信息，并标明调度证据缺失。分析输出如下。
 
 - `hostbound_report.html`：固定入口，单文件离线打开，无CDN/外部JS。
-- `bind_cpu.sh`：默认 Bash/awk 身份与CPU预检/预览；显式执行委托 Python 3.8+ journal 执行器（完整 Skill 目录）。
+- `cpu_binder_simple.py` 和 `bind_design.json` 为配套文件。配置位于 `report_data.json` 的 `metrics.binding_plan.design`。缺少已核验目标时 `custom_bind` 为空，报告说明原因。
 - `report_data.json`：schema_version=2，包含单位、任务身份、指标、原始快照、等待/运行区间、候选证据和诊断。
 
 也允许分析只有频率/进程sidecar的目录：生成明确缺失调度数据的降级报告。解压累计默认上限512MiB；较大可信采集包请先解压到新的专用目录，再以目录分析。归档路径穿越、链接和设备成员被拒绝。
@@ -88,7 +88,7 @@ Windows控制台/管道若默认使用GBK，可用 `python -X utf8 -m analyzer a
 
 第三节的清单按名称汇总 CPU 运行时长和跨进程抢占切入，进程和线程各显示前十名。抢占次数来自 `sched_switch` 的 `R+` 标记及两端已知且不同的 TGID。用 PID/TID 核对同名实例，完整汇总见 `metrics.ai_rankings`。
 
-HTML每类明细最多展示100条，并保留总记录数；长表默认收缩，搜索/排序仅作用于当前展示记录，完整数据在report_data.json中。2.3只保留当前亲和摘要，删除“依据、来源、内存与线程证据”和“建议CPU / NUMA”区块。第三节先展示可复制的 taskset 命令与脚本下载，再列待核验主 PID 和 AI 进程线程清单。Idle 由进入/退出事件持续时间计算，`-1` 和无符号退出值不作为状态编号；未知区间显示 N/A。频率按策略域展示来源、接口失败和可靠性。查看 `frequency.status` 与 `event_status`：
+HTML每类明细最多展示100条，并保留总记录数；长表默认收缩，搜索/排序仅作用于当前展示记录，完整数据在report_data.json中。2.3 展示当前亲和摘要。第三节展示脚本与配置、绑定目标和待核验原因，并列出 AI 进程线程清单。Idle 由进入/退出事件持续时间计算，`-1` 和无符号退出值不作为状态编号；未知区间显示 N/A。频率按策略域展示来源、接口失败和可靠性。查看 `frequency.status` 与 `event_status`：
 
 | 状态 | 含义 |
 |---|---|
@@ -105,7 +105,7 @@ HTML每类明细最多展示100条，并保留总记录数；长表默认收缩�
 
 线程分析在摘要中聚焦受影响的业务线程与主要同核竞争者。TID→TGID→PPID→cgroup→NPU 的关联附 HIGH/MEDIUM/LOW 置信度；名称只作线索。完整线程身份、运行/等待、Affinity、全部竞争重叠窗口和原始快照保留在 JSON。
 
-CPU→NUMA 基于本机 sysfs/lscpu/numactl，NPU→CPU 只接受明确 CPU Affinity 列；`info -m` 的 Logic/Physical ID 和 HCCS 拓扑不能推导 NUMA。CPU 节点、允许内存节点和实际页分布分别列出。缺少运行/等待证据时不均分共享 CPU 池；若共同的完整在线本地亲和池、宿主机身份和全TID cpuset均已核验，则生成共享池taskset命令（不承诺隔离）；每个执行方案校验身份和CPU范围；互斥分区仍需完整负载/SMT证据。第三部分仅对已核验的占卡主进程生成 `taskset -apc CPU_LIST PID`，每个 PID 一条。启动器和未占卡子进程仅展示。线程 cpuset 不同且存在安全公共范围时，使用交集。若需保留不同的本地掩码或无法共用目标，在命令区标出该 PID 和原因。缺逐线程 cpuset 时使用当前 allowed 作为安全边界。下载脚本默认预检与预览，显式执行在现场重建计划、记录原掩码、按主 PID 执行并读回。
+机型识别使用 `cat /sys/class/dmi/id/product_name` 和 `npu-smi info -t product -i 0 -c 0` 的采集输出。CPU→NUMA 取自本机 sysfs/lscpu/numactl。明确的 NPU CPU Affinity 优先。确认 A3 且缺少亲和时，按排序的逻辑 NPU ID 在实际可用的 NUMA 节点间均衡分配，节点按编号排序。报告分别标明硬件证据和策略分配；A2、A5 或未知机型无亲和时保留未知。在线 CPU、线程身份、各 TID cpuset 和原有窄掩码仍约束最终配置。[NPU/NUMA 规则](references/npu_numa_binding.md)
 
 
 竞争候选必须有可运行等待与同核运行时间重叠，Affinity只作旁证。NPU直接归属与父子关联不同；单纯Python名称、CPU高、共享Affinity、R/R+都不能认定根因。没有同域Device窗口时仅报告Host侧风险。详见 [数据契约、算法与限制](references/analysis_v2.md)。
@@ -127,18 +127,18 @@ python3 -m unittest discover -s tests -v
 python3 examples/generate_synthetic.py --output /tmp/cpu-synthetic-demo
 ```
 
-示例包含256核、8NUMA、8NPU的明确合成数据，以及 Manifest、Idle、局部饱和、Worker等待、后台线程重叠、频率策略域和 cgroup 节流。示例既展示已合规进程，也展示带身份预检的推荐方案；虚构 boot_id 会阻止它在真实机器执行。它用于功能验证，不代表真实机器测量。可直接打开 examples/sample_report.html 查看生成结果。
+示例含256核、8NUMA、8NPU的合成数据，以及 Manifest、Idle、局部饱和、Worker等待、后台线程重叠、频率策略域和 cgroup 节流。示例配置使用虚构 ID，仅用于离线阅读；模板按数字 ID 直接操作。可打开 [合成报告](examples/sample_report.html)。
 
 当前本地验证基于Windows/Python3.14、Git Bash和模拟/proc/sysfs/tracefs；目标openEuler22.03SP4/Kunpeng920/Ascend910B4未连接。真实事件支持、npu-smi版本、时钟对齐、驱动频率语义和采集开销仍需现场验证。
 
 ## 安全与兼容性
 
-要交付一台具体服务器的脚本（而非通用 locality 建议），使用[客户脚本生成指南](references/customer_script.md)。生成器读取采集包、容量评估和审核清单，输出可独立分发的 `bind_customer.sh` + `bind_customer.pyz`、逐线程计划与参考 JSON；不需要客户另装 Skill。旧 `bind_cpu.sh` 的行为不变。
+`scripts/generate_customer_binding.py` 读取采集包、容量评估和审核清单，生成相同的客户模板文件与 `bind_design.json`，另存 `customer_plan.json` 供审阅。模板通过 `taskset` 设置 CPU。纳入 IRQ 时可能停止 irqbalance 并写入 IRQ 亲和；开启内存迁移须另行核对依赖、目标 NUMA 和授权。[客户脚本生成指南](references/customer_script.md)
 
-默认只读 /proc、sysfs、cgroup 和 npu-smi，诊断/plan/preview 不改 affinity。显式授权 --execute 才执行逐 TID CPU 亲和变更，并保存 journal、读回和恢复结果；IRQ、Governor、内存策略不随 CPU 实验修改，不启动训练/推理/PMU。
+采集及离线规划只读取证据。现场审计工具 `scripts/ascend_bind.py` 独立管理自身操作的 journal、读回和恢复。
 
 /proc 前后快照并非原子，短命任务可能只有生命周期而无TGID；无clone证据时保留未知，PID复用和命名空间不明时阻止跨身份关联。丢失 trace 只报告已观测下界。Affinity 成对比较按等待排序最多512个活跃关联线程，截断范围会明示；完整线程身份、Affinity 和竞争时间窗口仍保留在 JSON。内存页位置不等于实测远端访存流量，仅拓扑偏离不提升为 P1。
 
 保留官方msprof、GIL、function_monitor、host_analyzer的独立工具边界，参阅 [官方工具适配](references/official_tool_integration.md)、[诊断规则](references/hostbound_diagnosis_rules.md)、[NPU/NUMA规则](references/npu_numa_binding.md)。
 
-HTML直接由metrics/diagnosis渲染，不经过Markdown。取消report.md的生成和写入，避免额外的渲染/编码/文件错误；完整证据保留JSON。复用输出目录时仅清理可识别为本生成器产物的旧report.md。
+HTML直接由metrics/diagnosis渲染，不经过Markdown。取消report.md的生成和写入，避免额外的渲染/编码/文件错误；完整证据保留JSON。复用输出目录时保留原始证据。

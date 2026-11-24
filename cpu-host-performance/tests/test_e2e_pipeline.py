@@ -65,7 +65,7 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(target <= cpus(row['affinity']))
             self.assertFalse(used & target)
             used.update(target)
-            self.assertIn('taskset -apc %s %d' % (row['target'], row['pid']), self.data['metrics']['npu_affinity']['commands'])
+            self.assertIn(dict(pid=row['pid'], target=row['target']), self.data['metrics']['npu_affinity']['candidate_bindings'])
         self.assertTrue(any(r['state'] == 'LOCAL' for r in rows))
 
     def test_zip_and_directory_preserve_evidence_and_results(self):
@@ -80,10 +80,11 @@ class PipelineTests(unittest.TestCase):
             run_analysis(str(source), str(out), quiet=True)
             metrics = json.loads((out / 'report_data.json').read_text(encoding='utf-8'))['metrics']
             self.assertEqual(metrics['topology'], self.data['metrics']['topology'])
-            self.assertEqual(metrics['npu_affinity']['commands'], self.data['metrics']['npu_affinity']['commands'])
+            self.assertEqual(metrics['binding_plan']['design'], self.data['metrics']['binding_plan']['design'])
             self.assertEqual(metrics['collection_integrity']['manifest_status'], 'COLLECTED')
             self.assertFalse((out / 'report.md').exists())
-            self.assertTrue((out / 'bind_cpu.sh').is_file())
+            self.assertTrue((out / 'cpu_binder_simple.py').is_file())
+            self.assertEqual(json.loads((out / 'bind_design.json').read_bytes()), metrics['binding_plan']['design'])
 
 
 if __name__ == '__main__':

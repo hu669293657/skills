@@ -151,10 +151,13 @@ def _mapping(text, topology=False):
         if npu is None:
             continue
         affinity = _cpulist(values.get('cpu_affinity', '')) if affinity_labelled else ''
+        raw_affinity = values.get('cpu_affinity', '').strip()
+        unavailable = raw_affinity.upper() in ('', '-', '--', 'N/A', 'NA', 'NONE', 'UNKNOWN', 'NOT SUPPORTED')
         devices.append({'npu': npu, 'chip': _integer(values.get('chip', '')),
                         'device_id': _integer(values.get('device_id', '')),
                         'physical_id': _integer(values.get('physical_id', '')),
-                        'cpu_affinity': affinity, 'numa_id': _integer(values.get('numa_id', '')),
+                        'cpu_affinity': affinity, 'invalid_affinity': not affinity and not unavailable,
+                        'numa_id': _integer(values.get('numa_id', '')),
                         'source_line': number})
         if values.get('cpu_affinity') and not affinity:
             errors.append('Line %d: CPU affinity is unavailable or not a numeric cpulist' % number)
@@ -169,3 +172,35 @@ def parse_npu_mapping(text):
 
 def parse_npu_topology(text):
     return _mapping(text, topology=True)
+
+
+def logic_map(raw_map):
+    """Map observed (physical card, chip) pairs into the labelled logic ID space."""
+    if not re.search(r'Chip\s+Logic\s+ID', raw_map, re.I):
+        return {}
+    rows = parse_npu_mapping(raw_map)['devices']
+    if not rows and re.search(r'^\s*NPU\s+ID\s+Chip\s+ID\s+Chip\s+Logic\s+ID(?:\s|$)', raw_map, re.I | re.M):
+        rows = [dict(npu=int(m[1]), chip=int(m[2]), device_id=int(m[3])) for line in raw_map.splitlines()
+                for m in [re.match(r'^\s*(\d+)\s+(\d+)\s+(\d+)(?:\s|$)', line)] if m]
+    result = {}
+    for row in rows:
+        pair, logic = (row['npu'], row['chip']), row['device_id']
+        if None in pair or logic is None or (pair in result and result[pair] != logic):
+            raise ValueError('Incomplete/conflicting NPU card/chip to logic ID map')
+        result[pair] = logic
+    if not result or len(set(result.values())) != len(result):
+        raise ValueError('Missing or non-unique NPU logic IDs')
+    return result
+
+
+def device_id(row, ids):
+    if not ids:
+        return row['npu']
+    pair = (row['npu'], row['chip'])
+    if pair[1] is None:
+        candidates = [key for key in ids if key[0] == pair[0]]
+        if len(candidates) == 1:
+            pair = candidates[0]
+    if pair not in ids:
+        raise ValueError('Unresolved physical NPU card/chip in logic ID map')
+    return ids[pair]

@@ -6,7 +6,7 @@
 
 1. `cpu_trace_collect.sh` 每次原子创建带时间及随机后缀的独立采集目录，再保留只读快照、创建私有 trace instance；tar.gz与目录同名。
 2. Bash/awk 函数逐命令和接口记录状态，标准化 sysfs、proc、cgroup 和身份。默认原生 Dump 由同一 sh 内置的原版 Python 采集器生成。
-3. NPU 三个原始命令保存在 `hostbound/npu_smi_info{_start,}.txt`、`npu_smi_map.txt`、`npu_smi_topology.txt`，离线分析时由 `analyzer/npu_parser.py` 解析，采集端保留原文与返回码，不依赖 Python 生成 NPU 规范化副本。显式保留解析错误，不能把格式变化解释成没有任务。
+3. `hostbound/npu_smi_info{_start,}.txt`、`npu_smi_map.txt`、`npu_smi_topology.txt` 保存设备状态、映射和拓扑原文。机型另取 `cat /sys/class/dmi/id/product_name` 和 `npu-smi info -t product -i 0 -c 0` 两项原文，分别保存在 `hostbound/dmi_product_name.txt`、`hostbound/npu_smi_product.txt`。核对产品字段识别 A2/A3/A5，未知和冲突保留在报告中。解析错误与没有活动任务应分别记录。
 4. `hostbound/numa_topology.json` 与 `hostbound/sysfs/node/nodeN/{cpulist,distance,meminfo}` 保存 NUMA 降级证据；lscpu、lscpu 扩展/可解析输出、numactl、numastat 保留原文。
 5. `process_start/end.json` 保留所有可读进程与线程；所有进程保留 NUMA 页汇总，指定目标另保存 NUMA 原始文件与 numastat -p。`frequency_start/end.json`、`frequency_samples.jsonl` 和 `idle_start/end.json` 是各自的 sysfs 来源。
 6. 资源原始快照位于 `hostbound/resource_start/end.json` 及 `resource_samples.jsonl`，包含boottime时间和 `/proc/stat/loadavg/meminfo/vmstat/diskstats/pressure/{cpu,memory,io}` 等原文及缺失状态。`hostbound/resources/df_blocks.txt`、`df_inodes.txt`、`lsblk.txt` 保留容量/inode/块设备原文。进程 cgroup 快照另含memory/pids限制；资源分析不依赖ftrace完整性。
@@ -66,10 +66,10 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 ## 拓扑、身份与诊断约束
 
 - CPU→NUMA 使用本次 sysfs/lscpu/numactl；节点可稀疏编号，不能用 CPU 数量或卡号补造。距离矩阵保留列对应节点；MemFree 和 MemAvailable 分开。
-- NPU→CPU 需要明确 CPU Affinity 字段。只有 HCCS/PCIe 或 Logic/Physical ID 时映射未知；不输出猜测命令。
+- NPU 硬件亲和只由显式 CPU Affinity 字段确认。仅确认 A3 且缺亲和时允许按排序的逻辑 NPU ID 在排序的可用 NUMA 节点间均衡轮转，并单列为分配策略。HCCS/PCIe 和 Logic/Physical ID 均不能证明本地性。
 - 调度字段是 TID；TGID 来自 proc 或可证明的 clone 关系。使用 boot_id、starttime、进程/线程前后快照及生命周期隔离 PID 复用。未确认宿主机命名空间时不生成可执行方案。
 - 当前 CPU、allowed CPUs、有效 cpuset、Mems_allowed 与实际 numa_maps 页分布有不同语义。各 TID 的 cgroup 可能不同，需要逐线程核对。
-- 绑核计划只使用在线 CPU 与所有相关 TID 有效 cpuset 的交集，保留 SMT 完整组和 Worker 分区互斥。共享池没有完整运行/等待需求证据时不平均分配。若显式原始池完全一致、全部CPU归同一NUMA且全TID cpuset允许完整在线池，可给共享本地亲和池命令；不缩成随意子集、不声称隔离。任务已合规则保留掩码。报告只给占卡主进程的 taskset -apc 命令，执行时应确认身份、线程集合与 cpuset 仍与快照一致；直接命令本身不包含自动预检或回滚。
+- 计划使用在线 CPU 与相关 TID 有效 cpuset 的交集，保留既有窄掩码。共享池缺少负载证据时只做可核验的本地性建议。只有完整物理核组、互斥分区及负载证据均可核验时才讨论隔离。现场逐项复核对象与权限后使用配套客户配置。
 - CPU 绑定不迁移现有内存页。启动命令 `numactl --physcpubind=... --membind=... COMMAND` 仅在有独立内存策略证据时讨论，不作为运行 PID 的迁移命令。
 - 允许跨节点、单次 PSR 或页分布偏离只是潜在风险。已分配页不等于远端访问流量；风险升级需要关联迁移、实际内存访问、等待及性能退化证据。建议不直接修改全局调度参数。
 - AI HIGH 置信度来自稳定 NPU PID 归属；父子/cgroup/命令等关联分别标注 MEDIUM/LOW。高CPU或名称匹配不能单独认定 AI/竞争。竞争候选需要 AI 可运行等待与其他任务同 CPU 执行窗口交集，因果标记保持 UNPROVEN。
@@ -83,7 +83,8 @@ Manifest schema_version=1，`entries` 每条包含：`category`、`requested`、
 
 展示契约：HTML每类明细最多100条，完整指标和原始证据保留于report_data.json。截断只发生在渲染层；2.3不生成逐PID全部线程亲和证据表。第4节用一张图展示最可能影响任务的资源占用与压力。资源速率依赖同钟不同时间点与非回退计数，缺失显示N/A；MemAvailable不能用MemFree替代，磁盘分区与整盘不累加，短窗口及磁盘busy%本身不证明资源瓶颈。
 
-HTML与JSON/绑核脚本直接生成，不再生成MD报告。2.3不展示逐卡原始证据展开区或建议CPU/NUMA占位。第三节metrics.binding_plan包含完整AI对象清单、命令、待核验原因和Bash脚本；展示最多100条，完整脚本/JSON不截断。
+HTML、报告 JSON 和客户模板/配置直接生成。2.3 展示当前摘要。第三节按 `metrics.binding_plan` 展示 AI 对象清单、`design` 配置与待核验原因，JSON 文件保留完整配置。
+
 ## 定制绑核的补充网络证据
 
 涉及NIC/IRQ隔离时读取 [custom_binding.md](custom_binding.md)。`python3 scripts/collect_network_evidence.py --interval 5 --output network-window.json` 为完整skill目录下的只读补充采集，不改变原单文件采集器和旧包Manifest契约。保留NIC前后拓扑、PCI/NUMA/队列/MSI IRQ、requested/effective affinity、RPS/XPS、两次中断/softirq/softnet/netdev计数及读取时间、ethtool和irqbalance状态。缺失项写入该JSON的errors/status；该补充JSON需单独随原包交付，不声称已经自动进入原tar.gz或HTML。多窗口与归因/物理核校准要求见参考页。

@@ -34,7 +34,7 @@ CPU Host HTML 报告内容提纲（本文件不是MD交付物）
 
 {列出缺失、不完整或状态未知的类别、项目或原始路径、状态和原因。使用 Manifest 对账、ftrace 能力记录和资源快照。按选项跳过和无活动进程的状态见采集记录。}
 
-完整的绑核预检与可复制命令见第 3 节。原始指标与技术记录见 report_data.json。
+本次绑核配置、文件及执行条件见第 3 节。原始指标与技术记录见 report_data.json。
 
 ## 2. 问题证据总表与根因判断
 
@@ -59,15 +59,15 @@ CPU Host HTML 报告内容提纲（本文件不是MD交付物）
 
 > 证据来源与时间窗：{topo、进程表、status、全线程 affinity、cpuset、ftrace 的文件/采样时点}。
 > allowed 是许可范围，PSR 是最近运行核；配置偏离不自动等于性能根因。CPU 亲和与内存页 NUMA 分布分别核验。
-> 2.3只显示当前摘要，不生成证据详情展开区或建议CPU/NUMA占位；AI对象清单、具体命令、逐对象缺项统一放第三部分。
+> 显式 CPU Affinity 与 A3 均衡分配策略须分别标注。第 2.3 节显示当前摘要，第 3 节给出配置与逐对象缺项。
 
 ## 3. 优化建议
 
-### 具体绑核命令与脚本（仅在采集宿主机执行）
+### 客户绑核配置与模板
 
-{每个已核验的占卡主进程一条 taskset -apc CPU_LIST PID。关联进程和线程只列清单。目标掩码取全线程许可范围与 NPU 本地在线 CPU 的安全交集。不能统一时在命令区标出主 PID 和原因。提供 bind_cpu.sh 下载。}
+{展示已采集的机型证据与识别结果，区分显式亲和和 A3 策略的目标。提供固定 cpu_binder_simple.py 与本次 bind_design.json。按 metrics.binding_plan.design 展示配置并列出待核验的主 PID。custom_bind 有目标时说明先在原宿主机核对当前身份、CPU、IRQ、cpuset、权限与变更授权，再运行 python3 cpu_binder_simple.py -c bind_design.json；没有目标时只解释原因。}
 
-{同 PID 多卡、线程证据缺失或 cpuset 不允许时，给出具体阻塞和 Manifest 驱动的处理，不生成猜测命令。原文存在优先修解析/打包；工具/权限问题说明条件；无活动任务不机械复采。taskset 不递归覆盖已有子进程、不迁移内存页。}
+{同 PID 多卡归属冲突、线程证据缺失或 cpuset 无公共目标时说明原因。模板无预检或回滚。说明 CPU 条目是否覆盖整个线程组，IRQ 条目可能停止 irqbalance，mem_bind 开启时可能迁移内存页。原文存在时优先查解析/打包。}
 
 ### AI进程与线程清单
 

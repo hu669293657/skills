@@ -355,7 +355,7 @@ def diagnose(m):
               'time_window': window}],
             '配置可能引入跨节点运行或共享 CPU 争用；未关联 Device 空泡/性能差异，不能确认 HostBound 根因',
             '已识别 NPU 对应进程的调度许可范围未收敛，或观测到非亲和 CPU；内存页位置仍待核验',
-            ['按 NPU/PID/TID 对照核验当前与建议范围；仅证据完整的方案提供宿主机预检、逐 TID 备份和回滚',
+            ['按 NPU/PID/TID 对照核验当前与建议范围；执行前在原宿主机核验身份并保存逐 TID 原掩码',
              '同负载复采验证吞吐与延迟；taskset 不迁移内存页，不越过有效 cpuset'])
 
     # ============ 7. CPU_IDLE_EXCESSIVE / HOST_NOT_BOTTLENECK ============

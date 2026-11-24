@@ -1,12 +1,9 @@
 import json
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from hostbind.customer import build, inspect, render
-from hostbind.customer_runtime import apply, rollback
 
 
 def fixture(folder):
@@ -151,11 +148,27 @@ class CustomerScriptTests(unittest.TestCase):
         plan=self.plan(); self.assertEqual(plan['workers'][0]['physical_cores'],1)
         self.assertEqual({row['target'][0] for row in plan['actions']},{0,8})
 
-    def test_portable_artifact_preview(self):
+    def test_portable_artifact_executes_reviewed_thread_targets(self):
+        import importlib.util
+        from unittest.mock import patch
+        from hostbind.delivery import TEMPLATE
+        plan = self.plan()
         bundle = self.folder / 'deliver'
-        render(self.plan(), bundle)
-        result = subprocess.run([sys.executable,str(bundle/'bind_customer.pyz'),'show'],capture_output=True,check=True)
-        self.assertEqual(json.loads(result.stdout)['actions'],self.plan()['actions'])
+        render(plan, bundle)
+        executor = bundle / 'cpu_binder_simple.py'
+        self.assertEqual(executor.read_bytes(), TEMPLATE.read_bytes())
+        self.assertEqual({p.name for p in bundle.iterdir()},
+                         {'customer_plan.json', 'cpu_binder_simple.py', 'bind_design.json'})
+        spec = importlib.util.spec_from_file_location('exported_binder', executor)
+        binder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(binder)
+        design = json.loads((bundle / 'bind_design.json').read_bytes())
+        with patch.object(binder, 'execute_command', return_value=('', 0)) as command:
+            for item in binder.load_custom_bind(design):
+                item.bind('', {})
+        expected = [(['taskset', '-cp', ','.join(map(str, row['target'])), str(row['tid'])],)
+                    for row in plan['actions']]
+        self.assertEqual([call.args for call in command.call_args_list], expected)
 
     def test_inspect_separates_device_owner_unknown_thread_and_customer(self):
         report=inspect(self.folder)
@@ -183,21 +196,8 @@ class CustomerScriptTests(unittest.TestCase):
         self.policy['irqs']=[dict(pci_bdf='0000:00:01.0',irq=90,reason='confirmed frequently firing storage queue')]
         plan=build(self.folder,self.assessment,self.policy,network)
         self.assertIn(plan['irq_actions'][0]['target'][0],plan['nodes'][0]['system_cpus'])
-
-    def test_write_failure_restores_only_matching_tasks(self):
-        plan=self.plan(); state=self.folder/'state.json'; first,second=plan['actions'][:2]
-        class MockTargets:
-            def __init__(self): self.values={row['tid']:row['original'] for row in plan['actions']}
-            def inventory(self): pass
-            def context(self): pass
-            def masks(self,row): return [self.values[row['tid']]]
-            def write(self,row,value):
-                if row==second and value==second['target']: raise OSError('denied')
-                self.values[row['tid']]=value
-        targets=MockTargets()
-        with self.assertRaises(OSError): apply(plan,targets,state)
-        self.assertEqual(targets.values[first['tid']],first['original'])
-        self.assertEqual(json.loads(state.read_text())['status'],'RESTORED')
-        journal=json.loads(state.read_text()); journal['pending']=[0]; targets.values[first['tid']]=[15]
-        with self.assertRaises(RuntimeError): rollback(plan,targets,state,journal)
-        self.assertEqual(targets.values[first['tid']],[15])
+        bundle = self.folder / 'irq_output'
+        render(plan, bundle)
+        irq_entries = [entry for entry in json.loads((bundle / 'bind_design.json').read_bytes())['custom_bind']
+                       if 'irq_id' in entry]
+        self.assertEqual(irq_entries, [dict(irq_id=[90], cpu_list=[str(plan['irq_actions'][0]['target'][0])])])

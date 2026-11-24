@@ -1,5 +1,7 @@
 # 升级最终验证
 
+以下为 2026-11-05 及之前版本的历史测试记录。当前分析器和客户生成器交付固定的 `cpu_binder_simple.py` 与客户配置 `bind_design.json`。旧版报告脚本与预检的测试结论仅适用于当时版本。[当前交付和执行说明](../references/customer_script.md)
+
 ## 2026-11-05 用户确认后的HTML布局取舍
 
 按用户选择完成：删除第10节旧版运行时间/迁移Top两张重复小表，保留新版排名与JSON指标；第13节指标/事件术语字典合并到一个默认收起、无JS也可展开的帮助区；资源风险概览及详细判断集中到第5节，第1/2/4节只保留必要跳转引用，移除第2.4重复展示。
@@ -9,7 +11,7 @@
 
 ## 2026-11-05 HTML精简与AI绑核脚本
 
-全量 `python -X utf8 -m unittest discover -s tests -v`：190项通过（109.785秒）。最终HTML/脚本及离线浏览器复测11项通过（5.844秒）。删除2.3每PID证据展开区、建议CPU/NUMA占位及对应CSS；第三部分按metrics.binding_plan展示AI父/子进程和Python/ACL/数据加载等线程，再给实际taskset命令和可下载bind_cpu.sh。
+全量 `python -X utf8 -m unittest discover -s tests -v`：190项通过（109.785秒）。最终HTML/脚本及离线浏览器复测11项通过（5.844秒）。删除2.3每PID证据展开区、建议CPU/NUMA占位及对应CSS；第三部分按metrics.binding_plan展示AI父/子进程和Python/ACL/数据加载等线程，当时由报告提供逐项命令与 Bash 脚本。
 
 新绑定回归覆盖旧raw包、缺cpuset时逐线程allowed保守子集、保持合规窄掩码、缺TGID行、进程复用/命名空间冲突传播、多卡不同CPU池阻断、部分TID出生时间缺失、完整脚本全部预检前置。Bash语法及全mock执行验证通过；身份、CPU、PID命名空间不匹配时0次模拟taskset。未执行真实绑核。
 

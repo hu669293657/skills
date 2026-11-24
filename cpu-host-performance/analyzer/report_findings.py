@@ -19,7 +19,7 @@ class Finding:
     def html(self, severity, severity_label):
         action = escape(self.action)
         if self.binding_preflight:
-            action += ' <a href="#sec-3">查看绑核预检</a>'
+            action += ' <a href="#sec-3">查看绑核配置</a>'
         return ('<article class="card diagnosis-item"><h4><span class="diagnosis-status diagnosis-%s">%s · %s</span> %s</h4>'
                 '<p>%s</p><p><b>先做什么</b> %s</p><p><b>如何复测</b> %s</p></article>'
                 % (escape(severity.lower()), escape(severity_label), escape(self.status), escape(self.title),
@@ -168,7 +168,7 @@ def _numa_finding(m):
         if row.get('numa_locality') == 'LOCAL_OBSERVED':
             evidence += '采集期间仍观测到它在 NPU 就近节点运行。'
     ready = any(item.get('pid') == row['pid'] for item in m.get('binding_plan', {}).get('actions', []))
-    action = ('先核对实际运行位置和业务等待。若需要试验，按第 3 节对应进程的预检和操作说明小范围验证。'
+    action = ('先核对实际运行位置和业务等待。若需要试验，按第 3 节对应进程的配置和操作说明小范围验证。'
               if ready else '先核对第 3 节列出的进程身份、允许使用的 CPU 和 NPU 就近范围，再判断是否具备绑核试验条件。')
     return Finding(('NUMA_RISK',), '待验证', '业务任务的 CPU 运行范围需要核对', evidence, action,
                    '若开展绑核试验，用相同负载比较任务等待时间与业务吞吐。', binding_preflight=ready)

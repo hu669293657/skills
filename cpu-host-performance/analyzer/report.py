@@ -6,6 +6,7 @@ import os
 import io
 import json
 from .report_html import render_html
+from hostbind.delivery import write_delivery
 
 SEV_COLOR = {"CRITICAL": "#d64545", "WARNING": "#d98f00", "INFO": "#6b7280", "OK": "#2e9e5b"}
 SEV_CN = {"CRITICAL": "严重", "WARNING": "警告", "INFO": "提示", "OK": "健康"}
@@ -101,10 +102,15 @@ def generate_reports(m, diag, out_dir):
         stream.write(html)
     with io.open(os.path.join(out_dir, 'report_data.json'), 'w', encoding='utf-8') as stream:
         json.dump({'schema_version':2,'units':{'time':'s','latency':'ms','frequency':'MHz','ratio':'percent','rate':'events/s'},'metrics':m,'diagnosis':diag},stream,ensure_ascii=False,indent=2,allow_nan=False,default=lambda x:sorted(x) if isinstance(x,set) else str(x))
-    script = m.get('binding_plan', {}).get('script')
-    if script:
-        with io.open(os.path.join(out_dir, 'bind_cpu.sh'), 'w', encoding='utf-8', newline='\n') as stream:
-            stream.write(script)
+    write_delivery(out_dir, m.get('binding_plan', {}).get('design', {'custom_bind': []}))
+    # Retire only the generated preview if this directory was used by an older release.
+    legacy = os.path.join(out_dir, 'bind_cpu.sh')
+    if os.path.isfile(legacy):
+        with io.open(legacy, encoding='utf-8', errors='replace') as stream:
+            header = [stream.readline().rstrip() for _ in range(3)]
+        if header == ['#!/usr/bin/env bash', 'set -euo pipefail',
+                      '# 默认只读预检/预览；执行与回滚委托给带 journal 的闭环入口。']:
+            os.remove(legacy)
     # Remove only a recognizable report from this generator when reusing an old output directory.
     old_md = os.path.join(out_dir, 'report.md')
     if os.path.isfile(old_md):

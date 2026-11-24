@@ -1,0 +1,74 @@
+{
+  "custom_bind": [
+    {
+      "pid": [
+        4001
+      ],
+      "cpu_list": [
+        "32-63"
+      ],
+      "bind_sub_process": true,
+      "mem_bind": false
+    },
+    {
+      "pid": [
+        4002
+      ],
+      "cpu_list": [
+        "64-95"
+      ],
+      "bind_sub_process": true,
+      "mem_bind": false
+    },
+    {
+      "pid": [
+        4003
+      ],
+      "cpu_list": [
+        "96-127"
+      ],
+      "bind_sub_process": true,
+      "mem_bind": false
+    },
+    {
+      "pid": [
+        4004
+      ],
+      "cpu_list": [
+        "128-159"
+      ],
+      "bind_sub_process": true,
+      "mem_bind": false
+    },
+    {
+      "pid": [
+        4005
+      ],
+      "cpu_list": [
+        "160-191"
+      ],
+      "bind_sub_process": true,
+      "mem_bind": false
+    },
+    {
+      "pid": [
+        4006
+      ],
+      "cpu_list": [
+        "192-223"
+      ],
+      "bind_sub_process": true,
+      "mem_bind": false
+    },
+    {
+      "pid": [
+        4007
+      ],
+      "cpu_list": [
+        "224-255"
+      ],
+      "bind_sub_process": true,
+      "mem_bind": false
+    }
+  ]
+}

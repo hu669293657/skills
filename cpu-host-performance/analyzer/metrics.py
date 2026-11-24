@@ -129,6 +129,7 @@ def compute_metrics(td):
     from .npu_affinity import analyze_npu_affinity
     from .evidence import read_json, optional_tools
     from .process_analysis import analyze_processes, resolve_task
+    from .product_identity import detect_product
     from .scheduling import analyze_scheduling
     from .interrupt_analysis import analyze_interrupts
     from .frequency_analysis import analyze_frequency, legacy_frequency
@@ -164,6 +165,7 @@ def compute_metrics(td):
     if over: m['warnings'].append('trace buffer丢失/溢出 %d 条：时间线与分位数仅表示已观测样本'%over)
     if not m['events_ok']: m['warnings'].append('事件流缺失或解析失败，数据不完整')
     m['optional_tools']=optional_tools(td.snapshot)
+    m['product_identity']=detect_product(td.snapshot)
     m['process_analysis']=analyze_processes(m,events)
     analyze_scheduling(m,events)
     analyze_interrupts(m,events)

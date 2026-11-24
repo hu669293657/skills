@@ -89,8 +89,7 @@ class NpuAffinityTests(unittest.TestCase):
         self.assertEqual(result['rows'][0]['state'], 'REMOTE_OBSERVED')
         self.assertEqual(result['rows'][0]['observed'], '30')
         self.assertEqual(result['rows'][0]['numa'], [3])
-        self.assertIn('taskset -apc 144-155 4115', result['commands'])
-        self.assertTrue(all(line.startswith('taskset ') for line in result['commands'].splitlines()))
+        self.assertIn(dict(pid=4115, target='144-155'), result['candidate_bindings'])
 
     def test_local_last_cpu_does_not_prove_affinity_is_confined(self):
         s = snapshots()
@@ -114,10 +113,10 @@ class NpuAffinityTests(unittest.TestCase):
             result = self.analyze(s)
             row = result['rows'][0]
             self.assertTrue(row['blockers'])
-            self.assertNotRegex(result['commands'], r'taskset -acp [^\n]* 4115(?:\s|$)')
+            self.assertNotIn(4115, [entry['pid'] for entry in result['candidate_bindings']])
         s = snapshots()
         s['hostbound/host_context.txt'] = 'execution_context=container\n'
-        self.assertEqual(self.analyze(s)['commands'], '')
+        self.assertFalse(self.analyze(s)['candidate_bindings'])
 
     def test_cpuset_is_a_hard_boundary(self):
         s = snapshots()
@@ -125,14 +124,14 @@ class NpuAffinityTests(unittest.TestCase):
         result = self.analyze(s)
         self.assertEqual(result['rows'][0]['target'], '')
         self.assertTrue(result['rows'][0]['blockers'])
-        self.assertNotRegex(result['commands'], r'taskset -acp [^\n]* 4115(?:\s|$)')
+        self.assertNotIn(4115, [entry['pid'] for entry in result['candidate_bindings']])
 
     def test_same_pid_on_multiple_npus_is_not_bound_twice(self):
         s = snapshots()
         s['hostbound/npu_smi_info.txt'] = s['hostbound/npu_smi_info.txt'].replace('| 4117 |', '| 4115 |')
         result = self.analyze(s)
         self.assertTrue(all(r['blockers'] for r in result['rows'] if r['pid'] == 4115))
-        self.assertNotRegex(result['commands'], r'taskset -acp [^\n]* 4115(?:\s|$)')
+        self.assertNotIn(4115, [entry['pid'] for entry in result['candidate_bindings']])
 
     def test_smt_siblings_stay_in_one_partition(self):
         s = snapshots()
@@ -147,7 +146,7 @@ class NpuAffinityTests(unittest.TestCase):
         s['hostbound/lscpu_parse.txt'] = '# CPU,Core,Socket,Node,Online\n' + '\n'.join('%d,%d,0,%d,Y' % (c, (c%48)//24*12+c%12, c//48) for c in range(192))
         result = self.analyze(s, measured=True)
         self.assertTrue(all(r['blockers'] for r in result['rows'] if r['npu'] in (1, 3)))
-        self.assertNotRegex(result['commands'], r'taskset -acp [^\n]* 411[68](?:\s|$)')
+        self.assertFalse({4116, 4118} & {entry['pid'] for entry in result['candidate_bindings']})
 
     def test_ftrace_observations_include_threads_outside_top_eight(self):
         s = snapshots()
@@ -169,7 +168,7 @@ class NpuAffinityTests(unittest.TestCase):
         del s['hostbound/lscpu_parse.txt']
         result = self.analyze(s)
         self.assertEqual(result['rows'][0]['numa'], [])
-        self.assertEqual(result['commands'], '')
+        self.assertFalse(result['candidate_bindings'])
 
     def test_multiline_npu_process_table_and_empty_card(self):
         s = snapshots()
@@ -185,7 +184,7 @@ class NpuAffinityTests(unittest.TestCase):
         s = snapshots()
         s['hostbound/pid_4115_thread_affinity.txt'] = "pid 4115's current affinity list: 144-146\npid 14115's current affinity list: 150-151\n"
         result = self.analyze(s)
-        self.assertNotRegex(result['commands'], r'taskset -acp [^\n]* 4115(?:\s|$)')
+        self.assertNotIn(4115, [entry['pid'] for entry in result['candidate_bindings']])
 
     def test_process_memory_is_aggregated_without_losing_chip_ids(self):
         s = snapshots()
@@ -206,7 +205,7 @@ class NpuAffinityTests(unittest.TestCase):
         self.assertIn('采集环境',sections[5][1])
         self.assertIn('4115',html)
         self.assertIn('144-155',html)
-        self.assertIn('taskset -apc 144-155 4115',html)
+        self.assertIn('python3 cpu_binder_simple.py -c bind_design.json',html)
         self.assertIn('宿主机',html)
 
     def test_npu_mismatch_is_a_configuration_risk_in_diagnosis(self):
@@ -242,7 +241,7 @@ class NpuAffinityTests(unittest.TestCase):
                     td = load_input(str(source))
                     try:
                         self.assertIn('hostbound/pid_4115_thread_affinity.txt', td.snapshot)
-                        self.assertIn('taskset -apc 144-155 4115', compute_metrics(td)['npu_affinity']['commands'])
+                        self.assertIn(dict(pid=4115, target='144-155'), compute_metrics(td)['npu_affinity']['candidate_bindings'])
                     finally:
                         cleanup_temp(td)
 

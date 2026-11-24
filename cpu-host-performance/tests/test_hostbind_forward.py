@@ -3,10 +3,7 @@ import contextlib
 import copy
 import io
 import json
-import os
 from pathlib import Path
-import shutil
-import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -136,43 +133,4 @@ class CliForwardTests(unittest.TestCase):
         self.assertEqual(json.loads((self.base/'state.json').read_text())['status'],'RESTORE_INCOMPLETE')
 
 
-class GeneratedShellForwardTests(unittest.TestCase):
-    def test_apply_and_restore_delegate_without_running_taskset(self):
-        from analyzer.binding_plan import render_binding_script
-        bash=shutil.which('bash') or 'C:/Program Files/Git/bin/bash.exe'
-        if not Path(bash).exists():self.skipTest('Bash unavailable')
-        action=dict(pid=100,tid=100,target='0-3',scope='process',
-                    process_starttime='1000',thread_starttime='1000',command='taskset -apc 0-3 100')
-        with tempfile.TemporaryDirectory() as directory:
-            base=Path(directory);binary=base/'bin';binary.mkdir()
-            log=base/'calls.txt'
-            runner=binary/'python3'
-            runner.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$BIND_FORWARD_LOG"\n',
-                              encoding='utf-8',newline='\n')
-            runner.chmod(0o755)
-            script=base/'bind_cpu.sh'
-            script.write_text(render_binding_script([action],{'boot_id':'synthetic-boot'}),
-                              encoding='utf-8',newline='\n')
-            (base/'report_data.json').write_text('{}')
-            # Invoke via a Bash wrapper so Git Bash's native PATH conversion is explicit.
-            bindir=binary.as_posix()
-            if os.name=='nt':bindir='/'+binary.drive[0].lower()+bindir[2:]
-            wrapper=base/'run.sh'
-            wrapper.write_text('export PATH="'+bindir+':$PATH"\nexport BIND_FORWARD_LOG="'+
-                log.as_posix()+'"\nchmod +x "'+bindir+'/python3"\nbash "'+script.as_posix()+
-                '" "$@"\n',encoding='utf-8',newline='\n')
-            result=subprocess.run([bash,str(wrapper),'--apply','/synthetic-skill','/synthetic-state','disabled'],
-                capture_output=True,text=True,timeout=20)
-            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-            calls=log.read_text().splitlines()
-            self.assertEqual(len(calls),2)
-            self.assertIn('/scripts/ascend_bind.py plan --report-data',calls[0])
-            self.assertIn('--main-pid 100 --framework-binding disabled',calls[0])
-            self.assertIn('apply --plan /synthetic-state.plan.json --state /synthetic-state --execute',calls[1])
-            result=subprocess.run([bash,str(wrapper),'--rollback','/synthetic-skill','/synthetic-state'],
-                capture_output=True,text=True,timeout=20)
-            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-            self.assertIn('rollback --state /synthetic-state --execute',log.read_text().splitlines()[-1])
-
-
-if __name__=='__main__':unittest.main()
+if __name__ == '__main__': unittest.main()

@@ -1,9 +1,11 @@
-"""Concrete AI task inventory and a guarded Bash affinity script."""
+"""Build a customer configuration from the observed AI task inventory."""
 import re
 from collections import defaultdict
 from .npu_affinity import _pid_evidence, cpus, cpu_list, _get, _topology
 from .process_evidence import process_batch
 from hostbind.planner import process_target
+from hostbind.placement import A3_POLICY, EXPLICIT, node_order, supports_balancing
+from hostbind.delivery import RUN_COMMAND, TEMPLATE, task_entry
 
 
 def _role(name, process, tid, pid, direct):
@@ -40,6 +42,50 @@ def _legacy_threads(snapshot, pid, ev):
             rows.append(dict(tid=tid, tgid=pid, name=' '.join(fields[5:]), last_cpu=int(fields[2]),
                              allowed_cpus=sorted(ev['allowed'].get(tid, set())), starttime=None))
     return rows
+
+
+def _balance_missing(roots, nodes, online):
+    by_device = defaultdict(list)
+    fixed = defaultdict(set)
+    blocked_devices = set()
+    for root in roots.values():
+        if root['source'] == A3_POLICY:
+            by_device[root['npu_ids'][0]].append(root)
+        elif root['reason']:
+            blocked_devices.update(root['npu_ids'])
+        else:
+            for node, values in nodes.items():
+                if values & root['pool']:
+                    fixed[node].update(root['npu_ids'])
+    counts = {node: len(devices) for node, devices in fixed.items()}
+    for npu, owners in sorted(by_device.items()):
+        if npu in blocked_devices:
+            for root in owners:
+                root['reason'] = '同一 NPU 的其他占卡进程身份或 CPU 范围未核实'
+            continue
+        candidates = {}
+        for node, values in nodes.items():
+            targets = []
+            for root in owners:
+                ev = root['evidence']
+                available = values & online
+                for tid in ev['tids']:
+                    available &= ev['allowed'][tid] & ev['thread_cpuset'][tid]
+                if ev['cpuset']:
+                    available &= ev['cpuset']
+                if not available:
+                    break
+                targets.append(available)
+            if len(targets) == len(owners):
+                candidates[node] = targets
+        if not candidates:
+            for root in owners:
+                root['reason'] = 'A3 均衡策略找不到所有占卡进程均可用的 NUMA；需核验在线 CPU、线程掩码和 cpuset'
+            continue
+        node = node_order(candidates, counts)[0]
+        counts[node] = counts.get(node, 0) + 1
+        for root, target in zip(owners, candidates[node]):
+            root['pool'] = target
 
 
 def build_binding_plan(m):
@@ -83,7 +129,20 @@ def build_binding_plan(m):
         pool &= online
         if len(rows) == 1 and rows[0].get('target') and not rows[0].get('blockers'):
             pool = cpus(rows[0]['target'])
-        roots[pid] = dict(pool=pool, evidence=ev, reason=reason,
+        source = EXPLICIT if all(mapped) else None
+        if any(r.get('ownership_error') for r in rows):
+            reason = next(r['ownership_error'] for r in rows if r.get('ownership_error'))
+        elif any(r.get('mapping_status') == 'CONFLICT' for r in rows):
+            reason = 'NPU 显式亲和数据冲突或无效，不能使用策略覆盖'
+        elif not all(mapped) and supports_balancing(m.get('product_identity', {})):
+            if len(rows) != 1 or len(rows[0].get('chips', [])) > 1:
+                reason = '同一 PID 涉及多个设备，缺少可核验的共同池或 TID/rank 分工'
+            elif (ev['identity_status'] != 'VERIFIED' or not ev['complete'] or pid not in ev['tids']
+                  or not all(ev['thread_cpuset'].get(t) and ev['thread_starttime'].get(t) for t in ev['tids'])):
+                reason = 'A3 策略需要稳定占卡 PID、完整 TID 身份及逐线程有效 cpuset'
+            else:
+                source, reason = A3_POLICY, ''
+        roots[pid] = dict(pool=pool, evidence=ev, reason=reason, source=source,
                           npu_ids=sorted({r['npu'] for r in rows}))
         if pid not in processes:
             processes[pid] = dict(tgid=pid, name=rows[0].get('name'), ppid=int(ev['status'].get('PPid', '0')) if str(ev['status'].get('PPid', '0')).isdigit() else None)
@@ -92,6 +151,8 @@ def build_binding_plan(m):
         if not raw_threads[pid]:
             raw_threads[pid] = [dict(tid=pid, tgid=pid, name=processes[pid].get('name'),
                                     allowed_cpus=sorted(ev['allowed'].get(pid, set())), starttime=None)]
+
+    _balance_missing(roots, nodes, online)
 
     # Relate descendants and AI ancestors through observed, stable parent links.
     associations = defaultdict(set)
@@ -153,7 +214,7 @@ def build_binding_plan(m):
         elif ev['status'].get('Pid') != str(pid) or ev['status'].get('Tgid') != str(pid):
             problem = '宿主机 PID/TGID 对应关系不一致'
         elif not ev['starttime'] or not str(ev['starttime']).isdigit():
-            problem = '缺少可供脚本核验的进程 starttime'
+            problem = '缺少用于现场核对进程身份的 starttime'
         tids = raw_threads.get(pid, [])
         if not tids:
             tids = [dict(tid=pid, tgid=pid, name=p.get('name'), allowed_cpus=[], starttime=None)]
@@ -172,12 +233,11 @@ def build_binding_plan(m):
             target = process_target(affinities, desired)
             if not target:
                 problem = '没有可统一使用的本地 CPU 掩码，或现有本地线程掩码不同、需保留'
-        command = ''
+        source = roots[pid]['source'] if pid in roots else None
         if target:
-            command = 'taskset -apc %s %d' % (cpu_list(target), pid)
             actions.append(dict(pid=pid, tid=pid, target=cpu_list(target), scope='process',
-                                process_starttime=ev['starttime'], thread_starttime=ev['starttime'],
-                                command=command))
+                                placement_source=source, npu_ids=roots[pid]['npu_ids'],
+                                process_starttime=ev['starttime'], thread_starttime=ev['starttime']))
         npu_ids = sorted({npu for root in root_ids for npu in roots[root]['npu_ids']})
         for t, allowed in sorted(zip(tids, masks), key=lambda pair: (pair[0]['tid'] != pid, pair[0]['tid'])):
             tid = t['tid']
@@ -189,108 +249,12 @@ def build_binding_plan(m):
                 rank_note='环境标签；子进程可能继承，不用于推断全局 NPU ID',
                 role=_role(t.get('name'), p, tid, pid, pid in roots),
                 object_type='NPU 主进程' if tid == pid and pid in roots else ('AI 线程' if tid != pid else ('AI 启动/父进程' if pid in ancestors else ('AI 子进程' if root_ids else 'AI 关联进程'))),
-                npu_ids=npu_ids, current_cpu=cpu_list(allowed), target_cpu=cpu_list(target),
+                npu_ids=npu_ids, placement_source=source, current_cpu=cpu_list(allowed), target_cpu=cpu_list(target),
                 numa=sorted(n for n, values in nodes.items() if values & target),
-                command=command if tid == pid else '',
                 status=('BLOCKED' if pid in roots else 'OBSERVED') if problem else 'RUNTIME_CHECK_REQUIRED',
-                reason=problem or '由主进程统一绑定，执行前核验当前全部线程'))
-    commands = '\n'.join(dict.fromkeys(a['command'] for a in actions))
-    return dict(tasks=inventory, actions=actions, commands=commands,
-                script=render_binding_script(actions, context),
-                note='绑核以已核验的占卡主进程为单位，关联进程与线程仅作清单展示。')
-
-
-_SCRIPT_HELPERS = r'''
-fail(){ printf '%s\n' "$*" >&2; exit 1; }
-starttime(){ local s; s=$(cat "/proc/$1/stat") || return 1; s=${s##*) }; set -- $s; printf '%s' "${20}"; }
-check_process(){ [[ "$(starttime "$1")" == "$2" ]] || fail "PID $1 已退出或被复用，请重新采集"; }
-effective_cpus(){
-  awk -v pid="$1" '
-  function readfile(p, s,x,r){s="";found=0;while((r=(getline x < p))>0){s=s (found?"\n":"") x;found=1}close(p);ok=r>=0;return s}
-  function decode(s){gsub(/\\040/," ",s);gsub(/\\011/,"\t",s);gsub(/\\134/,"\\",s);return s}
-  BEGIN{
-    n=split(readfile("/proc/" pid "/cgroup"),cg,"\n");mi=readfile("/proc/self/mountinfo");nm=split(mi,mounts,"\n")
-    for(i=1;i<=n;i++){
-      split(cg[i],a,":");v=(a[1]=="0"?2:1);if(v==1 && ("," a[2] ",")!~/,cpuset,/)continue
-      rel=substr(cg[i],length(a[1])+length(a[2])+3);best=-1;root="";path=""
-      for(j=1;j<=nm;j++){
-        split(mounts[j],f," ");k=7;while(k<=length(f)&&f[k]!="-")k++
-        if(v==2&&f[k+1]!="cgroup2")continue
-        if(v==1&&(f[k+1]!="cgroup"||("," f[k+3] ",")!~/,cpuset,/))continue
-        r=decode(f[4]);if(r!="/"&&rel!=r&&index(rel,r "/")!=1)continue
-        if(length(r)>best){best=length(r);root=decode(f[5]);tail=(r=="/"?rel:substr(rel,length(r)+1));path=root (tail=="/"?"":tail)}
-      }
-      if(root=="")continue
-      while(1){
-        value=readfile(path "/cpuset.cpus.effective");if(ok&&value!=""){print value;exit}
-        value=readfile(path "/cpuset.effective_cpus");if(ok&&value!=""){print value;exit}
-        if(v==1){value=readfile(path "/cpuset.cpus");if(!ok)exit;if(value!=""){print value;exit}}
-        else{value=readfile(path "/cgroup.controllers");if(!ok||(" " value " ")~/ cpuset /)exit}
-        if(path==root)break;sub(/\/[^/]+$/,"",path)
-      }
-    }
-  }'
-}
-subset(){
-  awk -v want="$1" -v have="$2" 'function expand(s,a, t,n,i,r,c){gsub(/,/," ",s);n=split(s,t," ");for(i=1;i<=n;i++){split(t[i],r,"-");for(c=r[1]+0;c<=(r[2]==""?r[1]:r[2]);c++)a[c]=1}} BEGIN{expand(want,w);expand(have,h);n=0;for(c in w){n++;if(!(c in h))exit 1}exit(n?0:1)}'
-}
-check_thread(){
-  local pid=$1 tid=$2 target=$3 group ceiling current
-  group=$(awk '/^Tgid:/ {print $2}' "/proc/$pid/task/$tid/status") || fail "TID $tid 已退出"
-  [[ "$group" == "$pid" ]] || fail "TID $tid 不再属于 PID $pid"
-  subset "$target" "$(cat /sys/devices/system/cpu/online)" || fail "目标 CPU 已离线"
-  ceiling=$(effective_cpus "$tid")
-  current=$(awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/task/$tid/status")
-  [[ -n "$ceiling" ]] || ceiling=$current
-  subset "$target" "$ceiling" || fail "TID $tid 当前 cpuset/亲和范围不允许目标 CPU"
-  if subset "$current" "$target" && ! subset "$target" "$current"; then
-    fail "TID $tid 当前窄掩码需保留，请重新分析"
-  fi
-}
-'''
-
-
-def render_binding_script(actions, context):
-    lines = ['#!/usr/bin/env bash', 'set -euo pipefail', '# 默认只读预检/预览；执行与回滚委托给带 journal 的闭环入口。']
-    if not actions:
-        return '\n'.join(lines + ['echo "未获得可执行绑核项，请查看 HTML 中逐对象的原因。"', 'exit 1']) + '\n'
-    pids=','.join(str(p) for p in sorted({int(a['pid']) for a in actions}))
-    lines += [r'''usage(){
-  echo 'Preview: bash bind_cpu.sh'
-  echo 'Apply: bash bind_cpu.sh --apply /path/cpu-host-performance /tmp/unique-state.json disabled|absent'
-  echo 'Rollback: bash bind_cpu.sh --rollback /path/cpu-host-performance /tmp/unique-state.json'
-}
-case "${1:-}" in
-  --help|-h) usage; exit 0;;
-  --rollback)
-    [[ $# == 3 ]] || { usage; exit 2; }
-    exec python3 "$2/scripts/ascend_bind.py" rollback --state "$3" --execute;;
-  --apply)
-    [[ $# == 4 ]] || { usage; exit 2; }
-    [[ "$4" == disabled || "$4" == absent ]] || { usage; exit 2; }
-    skill=$2; state=$3
-    here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-    [[ -f "$here/report_data.json" ]] || { echo 'Keep report_data.json next to this script' >&2; exit 2; }
-    python3 "$skill/scripts/ascend_bind.py" plan --report-data "$here/report_data.json" \
-      --main-pid __HOSTBIND_PIDS__ --framework-binding "$4" --output "$state.plan.json"
-    exec python3 "$skill/scripts/ascend_bind.py" apply --plan "$state.plan.json" --state "$state" --execute;;
-  '') ;;
-  *) usage; exit 2;;
-esac'''.replace('__HOSTBIND_PIDS__',pids)]
-    boot = str(context.get('boot_id', '')).replace("'", "'\"'\"'")
-    lines += [_SCRIPT_HELPERS.strip(),
-              '[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ] || fail "请在宿主机执行"',
-              'if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; then fail "请在宿主机执行"; fi',
-              "[[ \"$(cat /proc/sys/kernel/random/boot_id)\" == '%s' ]] || fail '宿主机或启动周期已变化'" % boot]
-    for key, path in [('pid_namespace', '/proc/self/ns/pid'), ('init_pid_namespace', '/proc/1/ns/pid')]:
-        if context.get(key):
-            expected = str(context[key]).replace("'", "'\"'\"'")
-            lines.append("[[ \"$(readlink %s)\" == '%s' ]] || fail 'PID 命名空间不匹配'" % (path, expected))
-    for action in actions:
-        pid = action['pid']
-        lines += ['check_process %d %s' % (pid, action['process_starttime']),
-                  'for task in /proc/%d/task/[0-9]*; do' % pid,
-                  '  check_thread %d "${task##*/}" %s' % (pid, action['target']), 'done']
-    lines += ['echo "PREVIEW: no affinity changes; use --apply for journaled execution."',
-              "cat <<'HOSTBIND_PLAN'"] + list(dict.fromkeys(a['command'] for a in actions)) + ['HOSTBIND_PLAN']
-    return '\n'.join(lines) + '\n'
+                reason=problem or ('A3 缺少硬件 CPU Affinity；按占卡任务在可用 NUMA 间均衡放置'
+                                   if source == A3_POLICY else '依据显式 NPU CPU Affinity')))
+    design = {'custom_bind': [task_entry(a['pid'], a['target'], all_threads=True) for a in actions]}
+    return dict(tasks=inventory, actions=actions, design=design,
+                commands=RUN_COMMAND if actions else '', script=TEMPLATE.read_bytes().decode('utf-8'),
+                note='配置按占卡主 PID 覆盖其当前线程组；关联进程在清单中单列。')

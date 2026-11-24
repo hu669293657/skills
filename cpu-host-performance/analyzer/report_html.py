@@ -131,7 +131,7 @@ window.addEventListener('resize',upd);upd();
 })();
 function copyBinding(button){
 var text=button.parentNode.querySelector('code').textContent;
-function done(){button.textContent='已复制';setTimeout(function(){button.textContent='复制绑核命令'},1800)}
+function done(){button.textContent='已复制';setTimeout(function(){button.textContent='复制执行命令'},1800)}
 function fallback(){var a=document.createElement('textarea');a.value=text;document.body.appendChild(a);a.select();
 try{if(document.execCommand('copy'))done();else button.textContent='请手动选择代码复制'}finally{a.remove()}}
 if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(done,fallback);else fallback();
@@ -228,7 +228,7 @@ def render_html(m, diag, bar_fn, line_fn, esc, sev_color, sev_cn, status_cn):
     # ---------- 3. 建议 ----------
     A("<h2>3. 优化建议</h2>")
     A(binding_html(m.get("npu_affinity", {}), m.get("collection_integrity", {}),
-                   m.get("binding_plan", {}), rankings=m.get("ai_rankings")))
+                   m.get("binding_plan", {}), rankings=m.get("ai_rankings"), product=m.get("product_identity")))
     # ---------- 4. 总体状态 ----------
     A("<h2>4. 机器资源与 CPU 总体状态</h2>")
     A(resource_section(m, True))

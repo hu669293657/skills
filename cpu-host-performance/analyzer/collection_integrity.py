@@ -6,7 +6,7 @@ actually received; a parser or packaging bug never becomes a blind recapture.
 import json
 import re
 from collections import Counter
-from .evidence import capabilities, read_json
+from .evidence import capabilities, read_json, read_manifest
 
 from .npu_affinity import _topology
 from .npu_parser import parse_npu_info, parse_npu_mapping, parse_npu_topology
@@ -28,21 +28,6 @@ def evidence_path(path):
     if 'cpu_trace' in parts:
         return '/'.join(parts[parts.index('cpu_trace')+1:])
     return value
-
-
-def _manifest(snapshot):
-    raw = snapshot.get('collection_manifest.json', snapshot.get('hostbound/collection_manifest.json'))
-    if raw is None:
-        return {}, 'LEGACY_NOT_PROVIDED'
-    try:
-        obj = json.loads(raw)
-        if not isinstance(obj, dict) or ('entries' in obj and not isinstance(obj['entries'], list)):
-            raise ValueError('invalid manifest shape')
-        if any(not isinstance(row, dict) for row in obj.get('entries', [])):
-            raise ValueError('invalid entry shape')
-        return obj, 'COLLECTED' if 'entries' in obj else 'LEGACY_NOT_PROVIDED'
-    except (ValueError, TypeError):
-        return {}, 'PARSE_FAILED'
 
 
 def _validate(category, path, raw, m):
@@ -230,7 +215,7 @@ def _collection_gaps(snapshot, entries, actions):
 
 def analyze_collection_integrity(m, source_files=None):
     snapshot = m.get('snapshot', {})
-    manifest, manifest_status = _manifest(snapshot)
+    manifest, manifest_status = read_manifest(snapshot)
     inputs = manifest.get('entries', []) if manifest_status == 'COLLECTED' else _legacy_entries(snapshot)
     if NATIVE_DUMP_PATH in snapshot and not any(row.get('category') == NATIVE_DUMP_CATEGORY for row in inputs):
         inputs = inputs + [{'category': NATIVE_DUMP_CATEGORY, 'status': 'COLLECTED',

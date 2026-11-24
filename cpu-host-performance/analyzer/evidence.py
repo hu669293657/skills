@@ -2,6 +2,21 @@
 import json
 
 
+def read_manifest(snapshot):
+    raw = snapshot.get('collection_manifest.json', snapshot.get('hostbound/collection_manifest.json'))
+    if raw is None:
+        return {}, 'LEGACY_NOT_PROVIDED'
+    try:
+        obj = json.loads(raw)
+        if not isinstance(obj, dict) or ('entries' in obj and not isinstance(obj['entries'], list)):
+            raise ValueError('invalid manifest shape')
+        if any(not isinstance(row, dict) for row in obj.get('entries', [])):
+            raise ValueError('invalid entry shape')
+        return obj, 'COLLECTED' if 'entries' in obj else 'LEGACY_NOT_PROVIDED'
+    except (ValueError, TypeError):
+        return {}, 'PARSE_FAILED'
+
+
 def read_json(snapshot, name, default=None):
     raw = snapshot.get('hostbound/' + name, snapshot.get(name, ''))
     try:

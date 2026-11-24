@@ -10,13 +10,15 @@ class UpgradeTests(unittest.TestCase):
         from analyzer.npu_report import affinity_html,binding_html
         from tests.test_npu_affinity import metrics,snapshots
         row=metrics(snapshots())['npu_affinity']['rows'][0]
-        data={'rows':[dict(deepcopy(row),npu=i) for i in range(130)],'commands':'\n'.join('taskset -apc 32-63 %d'%pid for pid in range(4001,4131))}
-        html=affinity_html(data)
-        self.assertEqual(html.count('class="npu-process-entry '),100)
-        self.assertIn('130',html)
-        self.assertEqual(binding_html(data).count('taskset -apc 32-63'),100)
-        self.assertEqual(len(data['rows']),130)
-        self.assertEqual(len(data['commands'].splitlines()),130)
+        from hostbind.delivery import task_entry
+        data = {'rows': [dict(deepcopy(row), npu=i) for i in range(130)]}
+        entries = [task_entry(pid, '32-63', True) for pid in range(4001, 4131)]
+        plan = {'design': {'custom_bind': entries}, 'script': 'fixture'}
+        html = affinity_html(data)
+        self.assertEqual(html.count('class="npu-process-entry '), 100)
+        self.assertIn('130', html)
+        self.assertEqual(binding_html(data, plan=plan).count('<td>32-63</td>'), 100)
+        self.assertEqual(len(plan['design']['custom_bind']), 130)
 
     def test_inventory_only_and_malformed_resources_do_not_break_report(self):
         from analyzer.resource_analysis import analyze_resources
@@ -66,7 +68,7 @@ class UpgradeTests(unittest.TestCase):
                 for row in result['rows']:
                     if row['pid'] in (4115,4117):
                         self.assertTrue(row['blockers'])
-                        self.assertNotIn(' %d'%row['pid'],result['commands'])
+                        self.assertNotIn(row['pid'], [entry['pid'] for entry in result['candidate_bindings']])
 
     def test_missing_or_reset_resource_counters_are_not_zero_rates(self):
         from analyzer.resource_analysis import analyze_resources
@@ -86,7 +88,7 @@ class UpgradeTests(unittest.TestCase):
             self.assertEqual(row['target'],row['affinity'])
             self.assertEqual(row['allocation_mode'],'SHARED_LOCALITY')
             self.assertTrue(row['recommended_numa'])
-            self.assertIn('taskset -apc %s %d' % (row['affinity'],row['pid']),result['commands'])
+            self.assertIn(dict(target=row['affinity'], pid=row['pid']), result['candidate_bindings'])
         self.assertEqual(result['rows'][0]['target'],result['rows'][2]['target'])
 
     def test_per_table_display_limit_is_100_with_all_metrics_preserved(self):

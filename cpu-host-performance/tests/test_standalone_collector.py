@@ -331,6 +331,7 @@ hb_manifest
             put(template,'per_cpu/cpu32/trace','a-4001 [032] d..2 20.000000: sched_switch: prev_comm=swapper prev_pid=0 prev_state=S next_comm=worker next_pid=4001\na-4001 [032] d..2 21.000000: sched_switch: prev_comm=worker prev_pid=4001 prev_state=S next_comm=swapper next_pid=0\n')
             put(template,'per_cpu/cpu32/stats','entries: 2\noverrun: 0\ndropped events: 0\n')
             put(proc,'sys/kernel/random/boot_id','fixture-boot')
+            put(sys, 'class/dmi/id/product_name', 'Atlas 800T A2\n')
             tools=base/'bin'
             for name in ('python','jq'):
                 put(tools,name,'#!/bin/bash\ntouch "%s"\nexit 99\n' % (base/'forbidden-runtime').as_posix())
@@ -338,6 +339,7 @@ hb_manifest
             put(tools,'npu-smi','''#!/bin/bash
 if [[ "$*" == 'info -t topo' ]]; then printf 'NPU CPU Affinity\nNPU0 X 32-63\n'
 elif [[ "$*" == 'info -m' ]]; then printf 'NPU ID Physical ID\n0 0\n'
+elif [[ "$*" == 'info -t product -i 0 -c 0' ]]; then printf 'Product Type: Atlas 800T A2\n'
 else printf '| NPU Chip | Process id | Process name | Process memory(MB) |\n| 0 0 | 4001 | worker | 100 |\n';fi
 ''')
             put(tools,'lscpu','#!/bin/bash\nif [[ "$1" == -p=* ]]; then\n'+''.join('echo %d,%d,0,0,Y\n' % (c,c) for c in range(64))+'fi\n')
@@ -367,6 +369,10 @@ rmdir(){ :; }
             self.assertEqual([r for r in manifest['entries'] if r['category']=='trace'][-1]['status'],'COLLECTED')
             dump_entry = next(row for row in manifest['entries'] if row['category'] == 'environment_dump')
             self.assertEqual(dump_entry['status'], 'COLLECTED')
+            products = [entry for entry in manifest['entries'] if entry['category'] == 'product_identity']
+            self.assertEqual([entry['status'] for entry in products], ['COLLECTED', 'COLLECTED'])
+            self.assertEqual(products[0]['command'], ['cat', (sys/'class/dmi/id/product_name').as_posix()])
+            self.assertEqual(products[1]['command'], 'npu-smi info -t product -i 0 -c 0'.split())
             self.assertTrue((capture/'hostbound/process_end.json').exists())
             self.assertTrue((capture/'hostbound/resource_end.json').exists())
             self.assertTrue((capture/'hostbound/resource_samples.jsonl').exists())
@@ -393,6 +399,8 @@ rmdir(){ :; }
             run_analysis(str(archive),str(base/'report'),quiet=True)
             metrics=json.loads((base/'report/report_data.json').read_text(encoding='utf-8'))['metrics']
             self.assertEqual(metrics['environment']['native_dump']['capture_status'], 'COLLECTED')
-            self.assertIn('taskset -apc 32-63 4001',metrics['npu_affinity']['commands'],str(metrics['npu_affinity']))
-            self.assertNotIn(' 4002',metrics['npu_affinity']['commands'])
-            self.assertEqual(metrics['binding_plan']['commands'],'taskset -apc 32-63 4001')
+            self.assertEqual(metrics['product_identity']['generation'], 'A2')
+            self.assertEqual(len(metrics['product_identity']['evidence']), 2)
+            self.assertIn(dict(pid=4001, target='32-63'), metrics['npu_affinity']['candidate_bindings'])
+            self.assertNotIn(4002, [row['pid'] for row in metrics['npu_affinity']['candidate_bindings']])
+            self.assertEqual(metrics['binding_plan']['design']['custom_bind'], [dict(pid=[4001], cpu_list=['32-63'], bind_sub_process=True, mem_bind=False)])

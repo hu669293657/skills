@@ -40,7 +40,7 @@ class NpuSafetyTests(unittest.TestCase):
 
     def test_no_runtime_evidence_does_not_equally_partition_shared_pool(self):
         result = metrics(snapshots())['npu_affinity']
-        self.assertEqual(result['commands'], '')
+        self.assertFalse(result['candidate_bindings'])
         self.assertTrue(all(not r['target'] for r in result['rows']))
 
     def test_mapping_table_is_used_when_topology_missing(self):
@@ -172,7 +172,7 @@ class NpuSafetyTests(unittest.TestCase):
         row = result['rows'][0]
         self.assertEqual(row['recommendation_status'], 'PRESERVE')
         self.assertEqual(row['recommended_cpu'], '144-146,150-151')
-        self.assertNotRegex(result['commands'], r'taskset -pc [^\n]+ (?:4115|14115)(?:\s|$)')
+        self.assertFalse({4115,14115} & {entry['pid'] for entry in result['candidate_bindings']})
 
     def test_config_only_numa_risk_does_not_become_p1(self):
         from analyzer.diagnosis import diagnose
@@ -180,12 +180,15 @@ class NpuSafetyTests(unittest.TestCase):
         self.assertTrue(risks)
         self.assertTrue(all(f['priority'] == 'P2' and f['evidence_state'] == 'POTENTIAL' for f in risks))
 
-    def test_report_commands_only_contain_concrete_taskset_settings(self):
-        import re
-        commands = metrics(snapshots(), measured=True)['npu_affinity']['commands']
-        self.assertTrue(commands)
-        self.assertTrue(all(re.fullmatch(r'taskset -apc [0-9,-]+ [1-9][0-9]*', line)
-                            for line in commands.splitlines()))
+    def test_report_configuration_only_targets_identified_owners(self):
+        result = metrics(snapshots(), measured=True)
+        entries = result['binding_plan']['design']['custom_bind']
+        owners = {row['pid'] for row in result['npu_affinity']['rows'] if row['pid']}
+        self.assertTrue(entries)
+        for entry in entries:
+            self.assertTrue(set(entry['pid']) <= owners)
+            self.assertTrue(entry['bind_sub_process'])
+            self.assertFalse(entry['mem_bind'])
 
 
 if __name__ == '__main__':

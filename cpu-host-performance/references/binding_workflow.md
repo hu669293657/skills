@@ -1,6 +1,6 @@
 # Trace → Rank/线程 → NUMA → 执行 → 验证 → 回滚
 
-需要按负载、客户服务与网卡联合分配时，先走 [定制规划分支](custom_binding.md)。需要实际客户脚本时走[独立生成与执行入口](customer_script.md)。下面的实时 `plan/apply` 仍只支持 locality/partition 与主进程事务；三种格式（容量提案、冻结的客户计划、旧执行计划）不能互换。
+本页说明完整 Skill 中的现场审计 CLI。它在目标主机发现对象，为 locality/partition 单独生成 `plan.json`，记录自身变更并验证业务指标。按服务器预算生成客户专用 `cpu_binder_simple.py` 与 `bind_design.json` 时，使用[客户生成指南](customer_script.md)。定制容量预算另见[规划分支](custom_binding.md)。
 
 ## 入口与环境
 
@@ -56,7 +56,7 @@ python3 "$SKILL_DIR/scripts/ascend_bind.py" rollback --state "$CASE_DIR/state.js
 
 以上业务样本 `before.json` / `after.json` 是业务测试程序导出的输入，不会由 Trace 或本工具凭空生成。先获得真实业务指标，再执行 verify。无业务样本时可运行 `audit --plan ...` 证明当前配置生效，性能结论保持待验证。
 
-报告旁的 `bind_cpu.sh` 是便捷入口：默认仅 Bash 预检和打印具体 taskset 建议；`--apply SKILL_DIR STATE_FILE disabled|absent` 调用上述同一 Python planner / executor，使用 `--main-pid` 限定为预览列出的 PID，要求 `report_data.json` 与 shell 文件同目录。执行时生成的实时计划可能与旧报告建议不同；新计划和 state 是本次实际执行的依据。`--rollback SKILL_DIR STATE_FILE` 委托同一恢复器。不再直接连续运行未经 journal 保护的 taskset。HTML 中的具体 taskset 命令仍可审阅；直接复制执行会绕过 journal，闭环实验应使用统一入口。
+报告和客户生成器提供相同的 Python 模板，以及描述本次目标的 `bind_design.json`。模板在 `python3 cpu_binder_simple.py -c bind_design.json` 时直接执行，须先现场核对对象、权限和授权。它不调用本页 CLI，也不创建可供本页 rollback 使用的 state 文件。
 
 ## Rank、设备与线程发现
 

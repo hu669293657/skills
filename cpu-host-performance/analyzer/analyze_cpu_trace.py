@@ -14,7 +14,7 @@
   - Chrome/Perfetto JSON (traceEvents)
   - msprechecker 原生 Ascend Dump JSON（仅环境分析）
 
-输出：<输出目录>/hostbound_report.html、report_data.json 与 bind_cpu.sh。
+输出：<输出目录>/hostbound_report.html、report_data.json、cpu_binder_simple.py 与 bind_design.json。
 仅依赖 Python 标准库。
 """
 import argparse
@@ -85,7 +85,8 @@ def run_analysis(input_path, out_dir=None, quiet=False):
         say("报告已生成：")
         say("  HTML    : %s" % html_path)
         say("  JSON    : %s" % os.path.join(out_dir,"report_data.json"))
-        say("  绑核脚本: %s" % os.path.join(out_dir,"bind_cpu.sh"))
+        say("  绑核脚本: %s" % os.path.join(out_dir,"cpu_binder_simple.py"))
+        say("  现场配置: %s" % os.path.join(out_dir,"bind_design.json"))
         return diag, out_dir
     finally:
         cleanup_temp(td)

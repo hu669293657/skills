@@ -4,7 +4,7 @@ import re
 import math
 from collections import defaultdict
 from .evidence import read_json
-from .npu_parser import parse_npu_info, parse_npu_mapping, parse_npu_topology
+from .npu_parser import device_id, logic_map, parse_npu_info, parse_npu_mapping, parse_npu_topology
 from .process_evidence import process_batch
 
 
@@ -98,6 +98,12 @@ def _topology(snapshot):
 
 def _device_mapping(snapshot):
     by_npu, errors, sources = {}, [], []
+    identity_error = ''
+    try:
+        ids = logic_map(_get(snapshot, 'npu_smi_map.txt'))
+    except ValueError as exc:
+        ids, identity_error = {}, str(exc)
+        errors.append(identity_error)
     for name, parser in [('npu_smi_topology.txt', parse_npu_topology), ('npu_smi_map.txt', parse_npu_mapping)]:
         text = _get(snapshot, name)
         if not text:
@@ -105,8 +111,15 @@ def _device_mapping(snapshot):
         sources.append('hostbound/' + name)
         parsed = parser(text)
         errors.extend(parsed['errors'])
+        if not parsed['devices'] and re.search(r'CPU\s+Affinity', text, re.I):
+            identity_error = '无法可靠解析标注了 CPU Affinity 的设备表'
         for row in parsed['devices']:
-            item = by_npu.setdefault(row['npu'], {'cpus': set(), 'sources': [], 'conflict': False})
+            npu = row['device_id'] if name == 'npu_smi_map.txt' and ids else row['npu']
+            if ids and npu not in ids.values():
+                identity_error = 'NPU 拓扑行与已采集的逻辑 ID 不匹配'
+            item = by_npu.setdefault(npu, {'cpus': set(), 'sources': [], 'conflict': False})
+            if row.get('invalid_affinity'):
+                item['conflict'] = True
             values = cpus(row['cpu_affinity'])
             item['sources'].append('hostbound/%s:%d' % (name, row['source_line']))
             if values:
@@ -117,14 +130,14 @@ def _device_mapping(snapshot):
         if item['conflict']:
             item['cpus'] = set()
             errors.append('NPU%d explicit CPU mappings conflict; no mapping selected' % npu)
-    return {'by_npu': by_npu, 'errors': errors, 'sources': sources,
+    return {'by_npu': by_npu, 'logic_ids': ids, 'identity_error': identity_error, 'errors': errors, 'sources': sources,
             'status': 'AVAILABLE' if any(r['cpus'] for r in by_npu.values()) else ('PARSE_FAILED' if errors else 'UNAVAILABLE')}
 
 
-def _processes(text):
+def _processes(text, logic_ids=None):
     result = defaultdict(dict)
     for row in parse_npu_info(text)['processes']:
-        npu, chip, pid = row['npu'], row['chip'], row['pid']
+        npu, chip, pid = device_id(row, logic_ids), row['chip'], row['pid']
         proc = result[npu].setdefault(pid, {'pid': pid, 'name': row['name'], 'memory': None,
             'chip': chip, 'chips': [], 'memory_by_chip': {}, 'pid_namespace': row['pid_namespace'], 'source_lines': []})
         proc['source_lines'].append(row['source_line'])
@@ -275,16 +288,30 @@ def analyze_npu_affinity(m):
     mapping = _device_mapping(snapshot)
     affinity, nodes, cores = _topology(snapshot)
     parsed_info = parse_npu_info(_get(snapshot, 'npu_smi_info.txt'))
-    processes = _processes(_get(snapshot, 'npu_smi_info.txt'))
+    info = _get(snapshot, 'npu_smi_info.txt')
+    ownership_error = mapping['identity_error'] or '; '.join(parsed_info['errors'])
+    changed_owners = set()
+    try:
+        processes = _processes(info, mapping['logic_ids'])
+        start_info = _get(snapshot, 'npu_smi_info_start.txt')
+        if start_info.strip():
+            previous = _processes(start_info, mapping['logic_ids'])
+            for device in previous.keys() | processes.keys():
+                changed_owners.update(previous.get(device, {}).keys() ^ processes.get(device, {}).keys())
+    except ValueError as exc:
+        ownership_error = str(exc)
+        processes = _processes(info)
     online = cpus(_get(snapshot, 'cpu_online.txt'))
     context = dict(re.findall(r'^([a-z_]+)=(.*)$', _get(snapshot, 'host_context.txt'), re.M))
     rows, notes = [], []
-    for npu in sorted(set(affinity) | set(processes) | set(parsed_info['devices'])):
+    inventory_ids = mapping['logic_ids'].values() if mapping['logic_ids'] else parsed_info['devices']
+    for npu in sorted(set(affinity) | set(processes) | set(inventory_ids)):
         pool = affinity.get(npu, set())
         local_nodes = sorted(n for n, values in nodes.items() if pool & values)
         procs = sorted(processes.get(npu, {}).values(), key=lambda p: (-(p['memory'] or 0), p['pid']))
         for i, proc in enumerate(procs or [{'pid': None, 'name': '—', 'memory': None, 'chip': None}]):
             pid = proc['pid']
+            owner_issue = ownership_error or ('采集前后 PID 的 NPU 归属发生变化' if pid in changed_owners else '')
             ev = _pid_evidence(snapshot, pid, m) if pid else {}
             permitted = set().union(*ev.get('allowed', {}).values()) if ev else set()
             observed = ev.get('trace', set()) | ev.get('psr', set())
@@ -306,6 +333,9 @@ def analyze_npu_affinity(m):
             blockers = []
             candidate = pool & online & nodes.get(local_nodes[0], set()) if len(local_nodes) == 1 else set()
             if pid:
+                if owner_issue:
+                    blockers.append(owner_issue)
+                    candidate = set()
                 if context.get('execution_context') != 'host':
                     blockers.append('未确认在物理机/宿主机采集')
                 if not ev['complete']:
@@ -337,7 +367,8 @@ def analyze_npu_affinity(m):
                        psr=cpu_list(ev.get('psr', set())), state=state, target='', blockers=blockers,
                        threads=len(ev.get('tids', [])), evidence=ev, sources=sources,
                        identity_status=ev.get('identity_status', 'UNAVAILABLE'),
-                       mapping_status='AVAILABLE' if pool else 'UNKNOWN',
+                       mapping_status=('CONFLICT' if mapping['by_npu'].get(npu, {}).get('conflict') else
+                                       ('AVAILABLE' if pool else 'UNKNOWN')), ownership_error=owner_issue,
                        current_cpu=cpu_list(permitted), current_numa=observed_numa,
                        recommended_cpu='', recommended_numa=[], recommendation_status='INSUFFICIENT_EVIDENCE',
                        reasons=[], risks=['调整 affinity 会改变调度资源；需同负载灰度验证，收益尚未测量。',
@@ -463,26 +494,24 @@ def analyze_npu_affinity(m):
             actions.append(row)
         if not row['reasons']:
             row['reasons'] = ['当前证据不足以提出安全的具体 CPU 掩码。']
-    notes.append('不按卡数或 NUMA 节点等分 CPU；不默认预留系统核。完整运行/等待证据支持互斥核心组；调度证据不足时仅在拓扑、身份和 cpuset 均已核验后给共享本地亲和池方案，不承诺隔离或性能收益。')
+    notes.append('显式硬件亲和用于判断本地性。缺少该字段的 A3 设备可在绑核计划中按可用 NUMA 均衡放置。完整运行/等待证据支持互斥核心组；调度证据不足时仅在拓扑、身份和 cpuset 均已核验后给共享本地亲和池方案，不承诺隔离或性能收益。')
     _, child_evidence = _child_binding_actions(rows, m, online) if context.get('execution_context') == 'host' else ([], [])
     return {'rows': rows, 'notes': notes, 'host_context': context,
             'children': child_evidence,
-            'commands': _binding_script(actions, context) if actions else '',
-            'mapping': {k: v for k, v in mapping.items() if k != 'by_npu'},
+            'candidate_bindings': _binding_candidates(actions),
+            'mapping': {k: v for k, v in mapping.items() if k not in ('by_npu','logic_ids')},
             'process_parser': {k: v for k, v in parsed_info.items() if k != 'processes'},
             'coverage': '显式 NPU CPU 映射/宿主机进程身份/全线程 affinity 与 cpuset/实际 NUMA 页分布/运行与等待证据'}
 
-def _binding_script(actions, context):
-    """Emit one process-wide command when it preserves existing local masks."""
-    lines = []
+def _binding_candidates(actions):
+    """Return observed process targets that preserve existing narrow masks."""
+    targets = {}
     for row in actions:
-        pid, target = row['pid'], row['target']
-        target_set = cpus(target)
+        target = cpus(row['target'])
         masks = row.get('evidence', {}).get('allowed', {}).values()
-        if any(mask and mask < target_set for mask in masks):
-            continue
-        lines.append('taskset -apc %s %d' % (target, pid))
-    return '\n'.join(dict.fromkeys(lines))
+        if not any(mask and mask < target for mask in masks):
+            targets[row['pid']] = row['target']
+    return [{'pid': pid, 'target': target} for pid, target in targets.items()]
 
 
 def _child_binding_actions(rows, m, online):

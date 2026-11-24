@@ -1,10 +1,8 @@
 """HTML-only output and concrete AI task binding plans on synthetic inputs."""
 import json
 import tempfile
-import os
-import shutil
-import subprocess
 import unittest
+from hostbind.delivery import RUN_COMMAND, TEMPLATE, task_entry
 from pathlib import Path
 
 
@@ -89,11 +87,9 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
             m['snapshot'][key] = json.dumps(batch)
         m['npu_affinity'] = analyze_npu_affinity(m)
         plan = build_binding_plan(m)
-        command = 'taskset -apc 33-34 4001'
-        self.assertEqual(plan['commands'], command)
-        self.assertIn(command, plan['script'])
+        self.assertEqual(plan['design']['custom_bind'], [task_entry(4001, '33-34', True)])
         report = binding_html(m['npu_affinity'], plan=plan)
-        self.assertLess(report.index(command), report.index('AI 进程与线程清单'))
+        self.assertLess(report.index(RUN_COMMAND), report.index('AI 进程与线程清单'))
 
     def test_blocked_pid_is_visible_next_to_commands(self):
         from analyzer.npu_report import binding_html
@@ -102,7 +98,7 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
         summary = report.split('AI 进程与线程清单', 1)[0]
         self.assertIn('PID 4001', summary)
         self.assertIn('掩码', summary)
-        self.assertNotIn('复制绑核命令', report)
+        self.assertNotIn('复制执行命令', report)
 
     def test_unrelated_thread_without_tgid_is_not_a_report_error(self):
         from analyzer.parser import TraceData,Event
@@ -152,45 +148,18 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
         self.assertFalse(plan['commands'])
         self.assertTrue(any('掩码不同' in row['reason'] for row in plan['tasks']))
 
-    def test_script_checks_all_identities_before_any_taskset(self):
-        bash=shutil.which('bash') or 'C:/Program Files/Git/bin/bash.exe'
-        m=fixture();plan=m['binding_plan']
-        with tempfile.TemporaryDirectory() as d:
-            base=Path(d);proc=base/'proc';sys=base/'sys';log=base/'taskset.log'
-            def put(path,text):
-                path.parent.mkdir(parents=True,exist_ok=True);path.write_text(text,encoding='utf-8')
-            put(proc/'sys/kernel/random/boot_id','fixture-boot\n')
-            put(sys/'devices/system/cpu/online','0-63\n')
-            for action in plan['actions']:
-                pid,tid=action['pid'],action['tid']
-                for ident,birth in ((pid,action['process_starttime']),(tid,action['thread_starttime'])):
-                    fields=['0']*40;fields[0]='S';fields[19]=str(birth)
-                    put(proc/str(ident)/'stat','%d (worker) '%ident+' '.join(fields))
-                put(proc/str(pid)/'task'/str(tid)/'status','Tgid:\t%d\nCpus_allowed_list:\t0-63\n'%pid)
-            put(proc/'4001/task/4002/status','Tgid:\t4001\nCpus_allowed_list:\t0-63\n')
-            bindir=base/'bin';put(bindir/'taskset','#!/bin/bash\nprintf "%s\\n" "$*" >> "$BIND_TEST_LOG"\n')
-            put(bindir/'systemd-detect-virt','#!/bin/bash\nexit 1\n')
-            path=('/'+bindir.drive[0].lower()+bindir.as_posix()[2:]) if os.name=='nt' else bindir.as_posix()
-            script=plan['script'].replace('/proc/',proc.as_posix()+'/').replace('/sys/devices/',sys.as_posix()+'/devices/')
-            script=script.replace('[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ]','true')
-            wrapper='export PATH="%s:$PATH"\nexport BIND_TEST_LOG="%s"\nchmod +x "%s/"*\n'%(path,log.as_posix(),path)
-            file=base/'bind.sh';file.write_text(wrapper+script,encoding='utf-8',newline='\n')
-            result=subprocess.run([bash,str(file)],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=30)
-            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-            self.assertIn('taskset -apc 32-35 4001',result.stdout)
-            self.assertFalse(log.exists(),'default preview must never change affinity')
-            put(proc/'4001/task/4002/status','Tgid:\t4001\nCpus_allowed_list:\t32\n')
-            result=subprocess.run([bash,str(file)],capture_output=True,text=True,timeout=30)
-            self.assertNotEqual(result.returncode,0)
-            self.assertFalse(log.exists(),'all prechecks must precede any affinity change')
-            # A matching boot is insufficient when the execution namespace differs.
-            from analyzer.binding_plan import render_binding_script
-            script=render_binding_script(plan['actions'],{'boot_id':'fixture-boot','pid_namespace':'pid:[expected]','init_pid_namespace':'pid:[expected]'})
-            script=script.replace('/proc/',proc.as_posix()+'/').replace('/sys/devices/',sys.as_posix()+'/devices/').replace('[ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ]','true')
-            file.write_text(wrapper+'\nreadlink(){ echo "pid:[wrong]"; }\n'+script,encoding='utf-8',newline='\n')
-            result=subprocess.run([bash,str(file)],capture_output=True,text=True,timeout=30)
-            self.assertNotEqual(result.returncode,0)
-            self.assertFalse(log.exists())
+    def test_html_downloads_match_the_offline_config_and_original_script(self):
+        import re
+        from urllib.parse import unquote_to_bytes
+        from analyzer.npu_report import binding_html
+        from hostbind.delivery import design_text
+        plan = fixture()['binding_plan']
+        downloads = dict((name, unquote_to_bytes(encoded)) for name, encoded in
+                         re.findall(r'download="([^"]+)" href="data:[^,]+,([^"]+)"',
+                                    binding_html({}, plan=plan)))
+        self.assertEqual(downloads['cpu_binder_simple.py'], TEMPLATE.read_bytes())
+        self.assertEqual(downloads['bind_design.json'], design_text(plan['design']).encode('utf-8'))
+        self.assertEqual(plan['design']['custom_bind'], [task_entry(4001, '32-35', True)])
 
     def test_section_two_only_shows_affinity_summary(self):
         from analyzer.npu_report import affinity_html
@@ -206,13 +175,13 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
         tids={r['tid'] for r in plan['tasks']}
         self.assertTrue({3900,4001,4002,4101}<=tids)
         self.assertNotIn(9001,tids)
-        self.assertEqual(plan['commands'],'taskset -apc 32-35 4001')
+        self.assertEqual(plan['design']['custom_bind'], [task_entry(4001, '32-35', True)])
         from analyzer.npu_report import binding_html
         html=binding_html(m['npu_affinity'],plan=m['binding_plan'])
         self.assertIn('AI 进程与线程清单',html)
         self.assertIn('下发',html)
         self.assertIn('数据加载',html)
-        self.assertIn('bind_cpu.sh',html)
+        self.assertIn('cpu_binder_simple.py',html)
 
     def test_missing_cpuset_uses_existing_thread_affinity_as_a_lower_bound(self):
         from analyzer.npu_affinity import analyze_npu_affinity
@@ -224,15 +193,13 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
             m['snapshot'][key]=json.dumps(batch)
         m['npu_affinity']=analyze_npu_affinity(m)
         plan=build_binding_plan(m)
-        self.assertEqual(plan['commands'],'taskset -apc 32-35 4001')
+        self.assertEqual(plan['design']['custom_bind'], [task_entry(4001, '32-35', True)])
 
     def test_legacy_raw_snapshot_produces_guarded_process_commands(self):
         from tests.test_npu_affinity import metrics,snapshots
         m=metrics(snapshots());plan=m.get('binding_plan',{})
-        self.assertIn('taskset -apc 144-167 4115',plan.get('commands',''))
-        self.assertIn('4115',plan.get('script',''))
-        self.assertIn('check_process',plan.get('script',''))
-        self.assertIn('test-boot',plan.get('script',''))
+        self.assertIn(task_entry(4115, '144-167', True), plan['design']['custom_bind'])
+        self.assertEqual(plan['script'].encode('utf-8'), TEMPLATE.read_bytes())
 
     def test_output_is_html_json_and_binding_script_without_markdown(self):
         from analyzer.report import generate_reports
@@ -241,5 +208,5 @@ class HtmlBindingWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             generate_reports(m,diagnose(m),d)
             names={p.name for p in Path(d).iterdir()}
-            self.assertEqual(names,{'hostbound_report.html','report_data.json','bind_cpu.sh'})
-            self.assertIn('taskset -apc 32-35 4001',(Path(d)/'bind_cpu.sh').read_text(encoding='utf-8'))
+            self.assertEqual(names,{'hostbound_report.html','report_data.json','cpu_binder_simple.py','bind_design.json'})
+            self.assertEqual(json.loads((Path(d)/'bind_design.json').read_bytes()), m['binding_plan']['design'])

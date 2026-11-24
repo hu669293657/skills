@@ -1187,6 +1187,7 @@ hb_phase(){
   done
   if [[ "$phase" == start ]];then
     for name in cpuinfo loadavg meminfo vmstat cmdline;do rel="$name.txt";[[ "$name" == cmdline ]] && rel=hostbound/kernel_cmdline.txt;hb_file host_context "$HB_PROC/$name" "$rel";done
+    hb_command product_identity hostbound/dmi_product_name.txt cat "$HB_SYS/class/dmi/id/product_name"
     hb_file cpu_topology "$HB_SYS/devices/system/cpu/online" hostbound/cpu_online.txt
     hb_data topology cpu_topology hostbound/numa_topology.json
     for p in "$HB_SYS"/devices/system/node/online "$HB_SYS"/devices/system/node/node[0-9]*/{cpulist,distance,meminfo}; do
@@ -1233,6 +1234,7 @@ hb_phase(){
     if [[ "$phase" == start ]];then
       hb_command npu_mapping hostbound/npu_smi_map.txt npu-smi info -m
       hb_command npu_topology hostbound/npu_smi_topology.txt npu-smi info -t topo
+      hb_command product_identity hostbound/npu_smi_product.txt npu-smi info -t product -i 0 -c 0
     fi
     # All processes (including NPU workers and descendants) have NUMA page summaries
     # in process_*.json. Explicit roots additionally retain complete raw maps.
@@ -1245,6 +1247,9 @@ hb_phase(){
       hb_command processes "hostbound/pid_${pid}_affinity_${phase}.txt" taskset -pc "$pid"
     done
   else
+    if [[ "$phase" == start ]];then
+      hb_entry product_identity NOT_REQUESTED hostbound/npu_smi_product.txt disabled_by_no_hostbound null null null false
+    fi
     for p in processes npu_info npu_mapping npu_topology numa_process;do hb_entry "$p" NOT_REQUESTED "" disabled_by_no_hostbound null null null false;done
   fi
   hb_manifest

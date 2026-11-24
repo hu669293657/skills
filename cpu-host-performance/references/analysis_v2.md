@@ -96,4 +96,4 @@ comm可能截断且会重名；角色分类结合关系、NPU、命令行和comm
 
 默认采集3秒，每次使用独立时间目录。新增resources指标来自原始proc前后/周期快照、df、lsblk和cgroup memory/pids。第4节用一张图展示主要资源占用与压力；窗口与trace分开声明，旧包缺失不填0。HTML每张明细表最多100条，完整CPU曲线和report_data.json保留全部指标。
 
-报告改为HTML直接渲染，保留JSON和bind_cpu.sh，不生成MD。第三节先列AI对象，再提供逐线程/进程的实际命令与可下载脚本，2.3仅显示当前亲和摘要。
+报告直接渲染成离线 HTML，保留 `report_data.json`。第 2.3 节展示当前亲和摘要，第 3 节提供固定 `cpu_binder_simple.py` 和本次 `bind_design.json`，并列出 AI 对象及待核验原因。

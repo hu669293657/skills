@@ -2,13 +2,13 @@
 
 按实测需求定制、网卡预留、训练/推理区别与其他客户服务预算见 [custom_binding.md](custom_binding.md)。下述既有Analyzer建议可能使用全部available核；定制方案先扣除客户/系统/网络预算并检查容量守恒，不能直接把旧建议称为完整隔离方案。
 
-实际执行、业务性能判定与恢复统一使用 [绑核闭环操作说明](binding_workflow.md) 的 `scripts/ascend_bind.py`。本页下述 taskset 为可审阅建议；报告 `bind_cpu.sh` 默认只读预览，显式执行委托 journal 入口，不再直接依次 taskset。执行器保存当前原掩码和稳定身份，失败尽力恢复；恢复不完整会明确报出。
+离线报告和定制生成器都复制同一份客户模板，只在 `bind_design.json` 中描述本次目标。需要现场 CPU 审计、业务 A/B 和 journal 恢复时，在完整 Skill 中使用独立的 `scripts/ascend_bind.py`。[客户模板与配置](customer_script.md) · [现场审计](binding_workflow.md)
 
 实现：`analyzer/npu_parser.py`、`npu_affinity.py`、`topology.py`；展示：`npu_report.py`。采集/Manifest 缺失处理统一见 [采集契约](collection_contract.md)。
 
 ## 证据语义
 
-默认保留 `npu-smi info`、`info -m`、`info -t topo` 原文并标准化。进程表支持不同列、组合/拆分 NPU/Chip、续行、空任务和显存单位；无法解析的非空数据是 PARSE_FAILED。只有明确标注的 CPU Affinity 列才能提供 NPU→CPU。HCCS/PCIe、卡号、Logic/Physical ID 不提供 CPU/NUMA 位置。
+保留 `npu-smi info`、`info -m`、`info -t topo` 原文。进程表支持不同列、组合/拆分 NPU/Chip、续行、空任务和显存单位；无法解析的非空数据标为 PARSE_FAILED。硬件亲和以明确标注的 CPU Affinity 列为据。HCCS/PCIe、卡号、Logic/Physical ID 不提供 CPU/NUMA 位置。
 
 CPU→NUMA 来自本机 sysfs cpulist、标准化 NUMA JSON、numactl、lscpu。稀疏节点、冲突与缺失保持显式。NPU→PID→TGID→TID 需要原始身份与父子/线程证据；容器数字 PID 未经映射不能直接关联宿主机进程。显存占用最高者只是角色提示，不得漏掉其他 PID。
 
@@ -27,24 +27,30 @@ CPU→NUMA 来自本机 sysfs cpulist、标准化 NUMA JSON、numactl、lscpu。
 
 NPU 亲和 CPU 可能只是某节点的一部分，超出该范围仍可能处于同一 NUMA。此时只能说偏离公布 CPU 范围，不能自动声称远端 NUMA。
 
+## 机型与 A3 分配策略
+
+用 `cat /sys/class/dmi/id/product_name` 和 `npu-smi info -t product -i 0 -c 0` 保留整机与设备产品原文。有效来源中出现可识别且一致的产品代际时可确认 A2、A3 或 A5。来源相互冲突或均无法识别时保留未知。
+
+显式亲和优先。仅当确认为 A3 且某设备没有显式 CPU Affinity 时，按数值排序占卡任务的逻辑 NPU ID。将已有显式分配计入节点占用，在每个同卡目标都能使用至少一个在线逻辑 CPU 的节点中，优先选已分配设备较少者；并列时选节点编号较小者。同卡多个进程作为一组。报告按可用逻辑 CPU 分配，定制容量预算进一步要求可用的完整物理核组。例：若两个可用节点为 2 和 7，四张卡均可使用两节点且均无显式亲和，依次分到 2、7、2、7。节点编号可以不连续。计划中的 `placement_source` 用 `A3_BALANCED_POLICY` 标示策略结果，用 `EXPLICIT_AFFINITY` 标示设备公布的亲和。策略结果只用作绑定建议，不能由此判定设备物理本地性、远端运行或性能根因。其余机型缺亲和时保留未知。
+
 ## 计划生成
 
 1. 使用本次真实 PID/TID、boot_id、starttime 核对前后身份。PID复用、namespace未确认、同 PID 多卡但线程职责未知时阻止执行方案。
-2. 候选集 = 显式 NPU CPU Affinity ∩ 真实节点 CPU ∩ online CPU ∩ 全部目标 TID 有效 cpuset。各线程可能具有不同 cgroup，需要分别核对。自定义挂载未能解析时保持未知，不放宽边界。
+2. 候选 CPU 取设备公布的范围，或 A3 策略选定节点的核；再与本机节点 CPU、在线 CPU 和各目标 TID 的有效 cpuset 求交。各线程可能有不同的 cgroup，需单独核对。
 3. 当前各线程掩码已合规且无冲突时保留，避免覆盖业务关键线程细分。CPU绑定不等于独占，仍核对其他业务和IRQ的运行/等待重叠。
 4. 共享候选池必须有完整 Worker 运行/等待需求及可靠性证据，才按观测需求分配完整 `(socket,node,core)` SMT 组。证据不足不均分；部分重叠/物理核心冲突而无法安全分配时报告阻塞。
 5. 预留系统 CPU、改配额或搬移 IRQ 需要具体负载/干扰证据，不使用固定预留数。运行/等待只是需求代理，方案须同负载实测，不能承诺收益。
-6. 行记录保留当前/建议 CPU 和 NUMA、原因、原始来源、运行/等待/IRQ/cgroup证据、风险、预期方向、执行/验证/回滚。没有可信 NPU→CPU 映射时不输出猜测命令。
+6. 保留当前/建议 CPU 和 NUMA、映射来源（硬件字段或 A3 策略）、运行/等待/IRQ/cgroup 依据、风险和复测条件。身份、节点或 CPU 范围不足时记录具体阻塞。
 
 ## 执行与内存
 
-报告第三部分为每个已核验的占卡主进程生成一条 `taskset -apc CPU_LIST PID`。CPU 列表和宿主机 PID 取自本次采集。
+报告第三节提供 `cpu_binder_simple.py` 与 `bind_design.json`。配置记录本次可核验的对象和 CPU 范围。无可核验目标时交付空 `custom_bind` 列表、说明阻塞原因。
 
-`-a` 覆盖目标进程现有线程。启动器、未占卡子进程和各线程用于清单展示；有独立 NPU 归属的进程按自己的主 PID 评估。各线程的有效 cpuset 可以不同，统一目标使用公共许可范围。交集为空或会改变已配置的本地线程掩码时，在命令区标出该主 PID。
+CPU 条目使用 `pid` 和 `cpu_list`。批量设置进程现有线程时还需核实每个现有线程的许可范围、保留的窄掩码和线程集合。模板的 `bind_sub_process=true` 只作用于同一线程组，子进程须以自身身份独立评估。
 
-命令由用户授权后在原宿主机执行；直接命令不包含自动身份预检、原子线程集合锁定、失败回滚或未来任务的持续约束。执行前确认 PID/TID、cpuset 与采集窗口未变。采集快照保留原 affinity；实际闭环执行仍主动记录变更前的实时 affinity，恢复统一使用 state.json，不以旧快照覆盖现场较新的策略。
+模板按数字 ID 直接设置。执行前在原宿主机确认身份、线程集合、cpuset、IRQ、CPU 和权限，保存各对象实时原值并获得授权后，在两文件所在目录运行 `python3 cpu_binder_simple.py -c bind_design.json`。模板没有自动预检或回滚。
 
-taskset 不迁移已分配内存、不改变内存策略、不提供重启持久化。`numactl --physcpubind=... --membind=... COMMAND` 仅是新任务启动策略，需要独立内存证据，不是现有 PID 的迁移命令。
+默认 `mem_bind=false`。开启后，模板只尝试向目标 CPU 所在的单一 NUMA 节点迁移已分配页。IRQ 条目可能停止运行中的 irqbalance 并写中断亲和。[模板字段、依赖与操作影响](customer_script.md)
 
 ## 风险等级与缺口
 
@@ -58,4 +64,4 @@ taskset 不迁移已分配内存、不改变内存策略、不提供重启持久
 
 ## HTML第三部分与脚本交付
 
-2.3 展示当前 NPU/NUMA 摘要。第三节和脚本以 metrics.binding_plan 为准。旧包只要具备完整线程掩码、主进程身份、宿主机上下文与显式 NPU 映射，即可输出待现场核验的主进程命令。缺逐线程 cpuset 时，以各自的 allowed 作为安全边界。
+2.3 展示当前 NPU/NUMA 的观测和来源。第 3 节的配置对应 `metrics.binding_plan.design`。旧包能核对宿主机身份、完整线程掩码和显式 NPU 映射时仍可规划。缺逐线程 cpuset 时以各自的当前 allowed 作为安全边界。

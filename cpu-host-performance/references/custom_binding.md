@@ -1,6 +1,6 @@
 # 按实测负载定制 CPU / NPU / NIC 方案
 
-用户需要按服务器情况分核、推理/训练区别、网卡预留或其他服务隔离时读取本页。先完成证据和容量表，再产出具体方案。**要交付脚本，接着按[客户脚本生成方法](customer_script.md)编译并核验，而不是运行旧 `bind_cpu.sh`**。本页的 `plan_custom_binding.py` 仍只做容量建议，不会执行。
+用户需要按服务器实际负载分核、区分推理与训练、给网卡预留核或隔离其他服务时读取本页。`plan_custom_binding.py` 输出容量建议。需要客户可执行文件时，用实测预算生成 `bind_design.json` 并附固定模板。[客户脚本生成方法](customer_script.md)
 
 ## 1. 识别作业与所有权
 
@@ -27,7 +27,7 @@
 | 证据 | 用途 |
 |---|---|
 | CPU online、NUMA cpulist、socket/core/thread_siblings、每 TID cpuset/affinity/quota | 可调度物理核组、硬边界、既有细分策略；核数足够也可能受quota限制 |
-| NPU全局逻辑ID/物理映射、占卡PID、显式CPU Affinity | 设备本地范围；不从卡序号或LOCAL_RANK猜NUMA |
+| NPU 全局逻辑 ID/物理映射、占卡 PID、机型、显式 CPU Affinity | 设备公布的本地范围。确认 A3 且缺亲和时可启用均衡策略，记录建议节点及策略来源 |
 | 每线程窗口CPU时间、running/runnable并发分布、等待P95/P99、迁移、进程树 | 每卡需求、关键线程和是否被挤压 |
 | 全机非目标线程的同期运行、等待、CPU许可、cgroup与服务标识 | 客户服务/其他作业/系统保留预算；top/ps累计CPU%仅线索 |
 | NIC→PCI BDF→NUMA/local_cpulist、MSI IRQ、队列、RSS/RPS/RFS/XPS、irqbalance | 网络处理路径和本地隔离候选 |
@@ -78,7 +78,7 @@ SMT逻辑CPU秒不是独立物理核吞吐，输入工具前应按每核单线�
 | 训练 | Rank主线程、通信、DataLoader和CPU预处理、pin-memory；按慢Rank和数据供应测量，不照搬推理小池 | 同batch/序列/并行/数据集的step time、吞吐、通信与数据等待，检查点另取窗口 |
 | 混部 | 按作业标签各算预算，整节点汇总；共享daemon单计 | 每个作业都满足指标，不能只改善一个牺牲另一个 |
 
-按完整在线 `(socket,node,core)` sibling组分配；跨隔离池不能拆SMT兄弟。每个worker候选范围取NPU显式亲和∩online∩各TID有效cpuset，并保护其他作业/已有本地窄掩码。空交集、未知SMT、多NUMA、部分核心组不可用时停止具体分配。
+按完整在线 `(socket,node,core)` sibling 组分配。候选范围以显式 NPU 亲和为先。仅当确认 A3 且缺少亲和时，按逻辑 NPU ID 数值顺序在可用节点间均衡分配，优先分到已分配数量较少的节点，同数时按节点编号。逐个核验节点预算、在线 CPU、线程有效 cpuset、既有窄掩码及其他作业保护核。证据未知或没有可用完整物理核组时，记录阻塞原因。[NPU/NUMA 规则](npu_numa_binding.md)
 
 容量守恒：`客户保护 + 系统 + 网络 + 各worker + 剩余 = 可调度物理核`。各池互斥才可称规划上分离；真正独占还需其他作业/cgroup/IRQ遵守边界，taskset本身不提供独占。剩余池用于已获授权的后台服务方案和突发余量，不扫描后搬迁全机所有未知进程。
 
@@ -99,15 +99,15 @@ python3 scripts/plan_custom_binding.py --input assessment.json --output binding_
 
 返回 `PROPOSAL`、`INSUFFICIENT_EVIDENCE` 或 `BLOCKED`；后两者无部分CPU方案。成功输出客户/系统/网络/worker/剩余池、每节点网卡物理核数与比例、IRQ候选。确定性贪心先放受限worker再从弹性余量留网络/系统，最终检查总预算；复杂交叠候选可能需要人工重排，工具失败不证明全局无解。
 
-**`binding_proposal.json` 是审阅建议，不是 `ascend_bind.py apply` 的 plan.json。** 不改其schema或手工伪造plan_id。当前执行器locality/partition不会消费建议CPU池，也不执行IRQ/RPS/客户服务迁移。用户要执行定制方案时，先把具体PID/TID、设备IRQ、原值、目标、前置核验、验证和回滚准备成可审阅执行方案；只有现有事务已支持的动作才能声称有该事务保护。运行旧bind_cpu.sh可能重新生成不同的locality目标，不能用它声称已应用本方案。
+`binding_proposal.json` 用于审阅容量。客户生成器从采集、assessment、policy 和所需的网络证据生成客户配置与固定模板。现场审计 CLI 自行生成 locality/partition 的 `plan.json`；其 journal 只记录经过该 CLI 的 CPU 操作。
 
 ## 6. 方案交付与验收
 
-保留原诊断HTML/JSON/shell交付，并为本分支补充 `assessment.json`、`binding_proposal.json`、网络原始证据；在给用户的方案中列出按NUMA的预算表、每卡所有PID及线程归属、每NIC/IRQ/队列目标、未知项、其他服务处理、执行能力边界。现有HTML不会自动渲染新建议；不要称已集成该展示。
+保留诊断 HTML、report_data.json 及配套的客户模板、配置。本分支还产出 `assessment.json`、`binding_proposal.json` 和网络证据。在方案中列出各 NUMA 预算、每卡全部 PID 与 TID、各 NIC/IRQ/队列的目标、未决项及其他服务的处理。
 
 执行前记录每TID原掩码与身份、IRQ对应PCI设备/队列与requested/effective值、RPS/XPS/RSS与irqbalance状态。先读回再观察实际分布；CPU/IRQ/设备重建或新线程出现时重新核验，旧IRQ号和PID不可盲目复用。内存迁移/NUMA内存策略另外评估，不由绑核隐式触发。
 
-同负载A/B/A或交叉实验，保留业务主指标和坏尾、客户服务指标、网络drops/time_squeeze、队列偏斜与IRQ实际CPU、任务实际运行CPU/等待。仅读回成功不证明性能改善；既要验证改动，也要确认其他服务未退化。回滚按身份及当前值核验后恢复原值，IRQ重建/驱动不支持/外部更改要明确恢复不完整。
+同负载A/B/A或交叉实验，保留业务主指标和坏尾、客户服务指标、网络drops/time_squeeze、队列偏斜与IRQ实际CPU、任务实际运行CPU/等待。仅读回成功不证明性能改善；既要验证改动，也要确认其他服务未退化。现场人员需按预先保存的原值手工恢复客户模板的更改，恢复前核验对象身份和当前值。IRQ重建/驱动不支持/外部更改要明确恢复不完整。
 
 ## 官方依据
 
