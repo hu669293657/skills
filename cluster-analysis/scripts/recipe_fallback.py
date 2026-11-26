@@ -39,6 +39,7 @@ from collections import defaultdict
 
 from lib.common import is_junk, read_csv_rows, read_json, to_f
 from lib.config import AGG_ROWS, COMM_NAME_PATTERN
+from lib.rank_timing import legacy_zero_fields
 
 
 class Ctx:
@@ -67,14 +68,14 @@ def q(cur, sql, args=()):
 def recipe_cluster_time_summary(ctx):
     """Per (step, rank): time decomposition. Step dimension preserved."""
     rows = q(ctx.cur, 'SELECT step, "index", computing, communication_not_overlapped, '
-                      'communication, free, stage, bubble, preparing, dp_index, pp_index, tp_index '
+                      'communication, overlapped, free, stage, bubble, preparing, dp_index, pp_index, tp_index '
                       'FROM ClusterStepTraceTime WHERE type = \'rank\' ORDER BY CAST(step AS INTEGER), "index"')
     out = []
-    for step, rank, comp, comm_no, comm, free, stage, bubble, prep, dp, pp, tp in rows:
+    for step, rank, comp, comm_no, comm, overlap, free, stage, bubble, prep, dp, pp, tp in rows:
         out.append({
             'step': step, 'rank': int(rank), 'computing(us)': round(comp, 1),
             'communication_not_overlapped(us)': round(comm_no, 1),
-            'communication(us)': round(comm, 1), 'free(us)': round(free, 1),
+            'communication(us)': comm, 'overlapped(us)': overlap, 'free(us)': round(free, 1),
             'stage(us)': round(stage, 1), 'bubble(us)': round(bubble, 1),
             'preparing(us)': round(prep, 1),
             'dp_index': dp, 'pp_index': pp, 'tp_index': tp,
@@ -763,10 +764,10 @@ def main():
 
     status = {}   # name -> {'status': 'done'|'unsupported', 'rows': N, 'reason': str}
     data = {}     # name -> rows (for summary json)
-    missing = q(cur, "SELECT value FROM ClusterBaseInfo WHERE key='missing_required_metrics'")
-    missing = json.loads(missing[0][0]) if missing else {}
-    unknown = q(cur, "SELECT value FROM ClusterBaseInfo WHERE key='unknown_summary_metrics'")
-    unknown = json.loads(unknown[0][0]) if unknown else {}
+    quality = dict(q(cur, 'SELECT key, value FROM ClusterBaseInfo WHERE key IN '
+                          "('missing_required_metrics', 'unknown_summary_metrics', 'optional_step_values')"))
+    missing = json.loads(quality.get('missing_required_metrics', '{}'))
+    unknown = json.loads(quality.get('unknown_summary_metrics', '{}'))
     summary_recipes = {'cluster_time_summary', 'cluster_time_compare_summary',
                        'computational_op_masking', 'free_analysis', 'pp_chart'}
 
@@ -831,6 +832,7 @@ def main():
                                 if s['status'] == 'unsupported'},
         'recipes_failed': {n: s.get('reason') for n, s in status.items() if s['status'] == 'failed'},
         'time_summary': data.get('cluster_time_summary', []),
+        'legacy_zero_fields': legacy_zero_fields(quality),
         'slow_rank': (data.get('slow_rank') or [])[:5],
         'top_bottleneck_ops': (data.get('communication_bottleneck') or [])[:10],
         'free_analysis': data.get('free_analysis', []),

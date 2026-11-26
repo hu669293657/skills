@@ -260,6 +260,7 @@ def build_cluster_db(conn, cards):
         ('gen_by', 'npu-perf-analyzer cluster_fallback'),
         ('step_time_unit', 'us'),
         ('communication_time_unit', 'ms'),
+        ('optional_step_values', 'null'),
     ]
     # 数据来源与语义标记（派生产物必须可追溯；wN 标签 = 采集窗，不是训练 step）
     step_sources = sorted({c.get('step_source') or 'none' for c in cards})
@@ -325,8 +326,8 @@ def build_cluster_db(conn, cards):
                 (step, 'rank', c['rank'],
                  to_f(r.get('Computing')),
                  to_f(r.get('Communication(Not Overlapped)')),
-                 to_f(r.get('Overlapped')),
-                 to_f(r.get('Communication')),
+                 to_f(r.get('Overlapped'), None),
+                 to_f(r.get('Communication'), None),
                  to_f(r.get('Free')),
                  to_f(r.get('Stage')),
                  to_f(r.get('Bubble')),

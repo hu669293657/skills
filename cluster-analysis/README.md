@@ -4,7 +4,17 @@
 
 无分步时，TEXT 空 Step 与 DB NULL-step 统一将整个 prof 作为每卡一个汇总 step（`prof`）分析；真实 step 保留原编号。原始文件不改写。规则与来源/边界说明见 `references/whole_prof_step.md`。
 
-本次演进保持原有完整流程、功能和默认输出 `performance_report.html`。新增 P6a 定位器，把通信、计算、Free 的关键瓶颈直接嵌入原报告“结论与建议”章节；其余集群总览、专家建议、进阶分析、双卡比对、泳道统计、子报告和附录保留。新增 `insight_bottlenecks.{json,md,html}` 是配套证据和摘要，不能代替完整报告。使用方式仍是原 `scripts/run_workflow.py`，无需新增必填参数。
+默认输出为 `performance_report.html`。P6a 将通信、计算和 Free 的定位结果写入「结论与建议」，`insight_bottlenecks.{json,md,html}` 提供配套证据和摘要。双卡比对子报告由本 skill 内置的 `scripts/prof_compare/` 生成。
+
+## 独立运行
+
+分享完整的 `cluster-analysis/` 目录。接收者只需准备 Python，并把同一次采集的各 rank 目录放在同一个输入根目录下。内置流程可离线生成 HTML、Excel、JSON 和 CSV。
+
+```powershell
+python scripts/run_workflow.py --input "<多卡 Prof 根目录>" --base-rank 0 --compare-rank 1 --no-native
+```
+
+省略两个 rank 参数时，流程以通信占比最小的卡为基线，比较通信占比最大的卡。总报告为 `cluster_analysis_mw/performance_report.html`，双卡明细和中文 xlsx 位于同目录的 `reports/` 下。使用 `--no-native` 时走内置流程。
 
 ## 应用场景
 
@@ -15,14 +25,14 @@
 - Host 侧下发瓶颈：CANN API 汇总、Device 侧大块空闲时间归因（free_analysis）。
 - 出正式报告：训练/推理性能调优后需要一份可直接汇报的 HTML/MD 性能分析报告。
 - 数据已有 `cluster_analysis_output`：直接复用并做进阶分析与报告生成，不重复解析。
-- 数据**仅有** `cluster_analysis_output`（无任何卡目录）：走独立报告模式，只调用 vendor cluster-output-analysis 生成独立集群分析报告，不生成完整 HTML 总报告。
+- 分析需提供卡级 Prof 采集目录。已有 `cluster_analysis_output` 可随卡目录一同提供。
 
 ## 解决什么问题
 
 - **不知道从哪分析起**：输入检测（P0）自动识别数据形态并给出建议步骤清单，随后全量执行五大类 23 个 recipe，不遗漏任何维度。
-- **msprof-analyze 未安装/版本不匹配**：TEXT 产物或 DB-only 数据（`analysis.db` 有 step/window 摘要）满足前置条件时使用内置 fallback；两者皆缺时尝试从可读事件与有效起止生成整段 step；仍无时间证据时明确失败。xlsx/子报告需要相应 Python 依赖，缺失时记录不可用原因。
+- **msprof-analyze 未安装/版本不匹配**：TEXT 产物或 DB-only 数据（`analysis.db` 有 step/window 摘要）满足前置条件时使用内置 fallback；两者皆缺时尝试从可读事件与有效起止生成整段 step；仍无时间证据时明确失败。内置流程直接生成比对工作簿和子报告。
 - **多卡数据量庞大、逐卡分析太慢**：按"波次（Wave）"调度并行子 agent，advisor/集群输出件/泳道统计多路并行，泳道分析逐卡拆分，trace_view.json（数百 MB）用流式解析。
-- **分析结论碎片化**：所有中间产物（advisor、recipe CSV、比对 xlsx、泳道 md、vendor 子报告）统一汇总进最终 HTML 报告，信息概览在前、结论建议随后、详情可折叠展开。
+- **分析结论碎片化**：所有中间产物（advisor、recipe CSV、比对 xlsx、泳道 md、prof-compare 子报告）统一汇总进最终 HTML 报告，信息概览在前、结论建议随后、详情可折叠展开。
 - **对比对象选择困难**：多卡时自动选取**通信占比最大**与**最小**的两张卡做性能比对，直击快慢卡差异。
 
 ## 需要什么输入（如何获取）
@@ -71,10 +81,9 @@
     ├── detect_result.json                  # P0：模式、rank→目录映射、建议步骤
     ├── advisor/advisor.md + .json          # P1：全卡聚合专家建议（计算/通信/调度占比与优先级）
     ├── compare/                            # P4：performance_comparison_result_{max}_{min}.xlsx、CSV 镜像
-    ├── reports/                            # P5：cluster_analysis_report.html、
-    │                                       #   compare_analysis_report.html、chinese_xlsx/
+    ├── reports/                            # P5：compare_analysis_report.html、chinese_xlsx/
     ├── swimlane/                           # P6：swimlane_rank<N>.md/.json（逐卡）、swimlane_compare.md（跨卡）
-    └── performance_report.html             # P7：最终 HTML 报告（iframe 内嵌 vendor 子报告）
+    └── performance_report.html             # P7：最终 HTML 报告（按需嵌入 prof-compare 子报告）
 ```
 
 核心交付物解读：
@@ -82,8 +91,8 @@
 - **advisor.md**：总体判定（计算/通信/调度占比与主导因素）+ 按优先级排序的调优建议，多卡为全卡聚合视角。
 - **23 个注册 recipe 结果**：拆解对比类（迭代耗时拆解、module 层级、NPU/GPU 校准）、计算类（算子汇总、频率、MoE 负载、MFU）、通信类（通信域/耗时/矩阵/带宽、HCCL TopN、PP 流水图、慢卡/慢链路归因）、Host 下发类（CANN API、空闲分析）、其他（导出/MSTX/P2P 配对）；另有扩展 recipe `communication_bandwidth_sum` 随全量执行、产出 csv，不计入五大类矩阵。
 - **泳道统计**：按 Thread/Stream/Communication（非 Plane）泳道输出最长算子 + 全部算子七列表（ms），多卡跨卡比对；最终报告按 Process/Ascend Hardware/Communication 三类汇总。
-- **慢卡比对**：通信占比最大 vs 最小两张卡的整体指标/算子/通信/内存/API 多维对比，vendor 产出 HTML + 中文 xlsx。
-- **最终 HTML 报告**：信息概览 → 结论与建议 → 可折叠详情分区（默认全展开）→ vendor 子报告内嵌；集群总览按 Step 区分并附计算/通信/free 三部分 × Step 差异柱状图。
+- **慢卡比对**：通信占比最大 vs 最小两张卡的整体指标/算子/通信/内存/API 多维对比，内置 prof-compare 生成 HTML 和中文 xlsx。原始明细可用时，附上 Host 算子、Kernel Top 15 和单次执行数据。
+- **最终 HTML 报告**：信息概览 → 结论与建议 → 可折叠详情分区（默认全展开）→ prof-compare 子报告（比对成功时）。Rank 耗时走势支持多 Step 叠加、按指标排序、缩放和定位卡号。通信算子按类型各列耗时 Top 10。
 
 ## 流程图
 
@@ -96,7 +105,7 @@ flowchart TD
     C --> C2[P2 生成 cluster_analysis_output<br/>cluster_fallback.py 缺失时]
     C --> C3[P4 比对数据 xlsx<br/>compare_fallback.py 通信最大 vs 最小卡]
     C2 --> E[Wave 2 并行]
-    C3 --> F[Wave 2: P5 vendor prof-compare<br/>HTML + 中文 xlsx]
+    C3 --> F[Wave 2: P5 prof-compare<br/>HTML + 中文 xlsx]
     A -->|单卡数据| G[P6 泳道统计 swimlane_analyzer.py<br/>逐卡·可多子 agent 并行]
     E --> E1[P3 进阶分析 23 recipe 全量<br/>recipe_fallback.py]
     E --> G
@@ -105,8 +114,7 @@ flowchart TD
     E1 --> H
     G --> H
     F --> H
-    H --> H1[P5 vendor cluster-output-analysis<br/>集群 HTML 子报告]
-    H --> I[Wave 4: P7 最终 HTML 汇总报告<br/>report_generator.py 概览→结论→可折叠详情<br/>内嵌 vendor 子报告]
+    H --> I[Wave 4: P7 最终 HTML 汇总报告<br/>report_generator.py 概览→结论→可折叠详情<br/>按需嵌入 prof-compare 子报告]
 ```
 
 并行调度要点：每波最多 3 个子 agent；P6 泳道统计逐卡独立、是最佳并行点；P3 依赖 P2 的集群输出件；P7 必须等 P1~P6 全部完成。也可用 `scripts/run_workflow.py` 一键串行编排（调试/兜底），各阶段支持 `--skip-*` 与 `--force`。
@@ -144,14 +152,6 @@ flowchart TD
 并做跨卡比对，找出耗时最异常的 rank。
 ```
 
-只有 cluster_analysis_output（独立报告模式）：
-
-```text
-这个目录 D:\prof_data\16p_output 里只有 cluster_analysis_output，
-请用 cluster-output-analysis 直接生成一份独立的集群分析报告即可，
-不需要完整 HTML 总报告。
-```
-
 一键脚本直跑（不经过 agent 调度）：
 
 ```text
@@ -161,7 +161,7 @@ flowchart TD
 
 ## 参考文档与约束
 
-- `references/pipeline.md` — P0~P7 各阶段输入/输出/验收标准、全局纪律、并行波次调度与 vendor 调用方式（唯一事实来源，必读）
+- `references/pipeline.md` — P0~P7 各阶段输入/输出/验收标准、全局纪律、并行波次调度与 prof-compare 调用方式（唯一事实来源，必读）
 - `references/recipes_catalog.md` — 23 个 recipe 五大类完整目录
 - `references/msprof_cli.md` — msprof-analyze 原生 CLI 与 fallback 能力对照
 - `references/html_template_spec.md` — 最终 HTML 报告模板规范（可折叠、ECharts 懒初始化等）

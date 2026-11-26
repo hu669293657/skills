@@ -20,18 +20,13 @@
               -> cluster_analysis_output/recipes/ + recipes_summary.{md,json}
   5 compare   多卡：自动选通信占比最大/最小两卡做性能比对
               -> compare/compare_analysis_result.json + performance_comparison_result_*.xlsx
-  6 vendor    桥接 vendor 子技能生成子报告（供总报告 iframe 内嵌）
-              -> reports/cluster_analysis_report.html（多卡）
-                 reports/compare_analysis_report.html（有 xlsx 时）
+  6 prof-compare  使用内置 prof-compare 生成双卡比对子报告
+              -> reports/compare_analysis_report.html（有 xlsx 时）
   7 swimlane  每张卡泳道 TopN 最长算子 + 全算子 7 列统计；多卡生成横向比对
               -> swimlane/swimlane_rank{N}.{md,json} + swimlane_compare.md
   8 report    生成总 HTML 报告（信息概览优先、左侧固定导航、章节可折叠、
-              vendor 子报告嵌入、无卡片清单）
+              按需嵌入 prof-compare、无卡片清单）
               -> performance_report.html（与全部中间件同目录）
-
-独立报告模式：输入仅含 cluster_analysis_output（无任何卡目录）时，跳过阶段 2-8，
-只调用 vendor/cluster-output-analysis 生成独立报告
-reports/cluster_analysis_report.html，不生成总报告 performance_report.html。
 """
 import argparse
 import glob
@@ -44,7 +39,7 @@ import time
 import signal
 
 from lib.common import read_json
-from lib.config import MW_NAME
+from lib.config import MW_NAME, PROF_COMPARE_REPORT, VENDOR_RC_SKIP
 from lib.workflow_state import WorkflowState, cache_key
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,7 +94,10 @@ def sh(cmd, cwd=None):
             print('  | ' + line)
     if STATE:
         if stage:
-            STATE.record(stage, 'done' if p.returncode == 0 else 'unsupported' if stage.startswith('vendor_bridge') and p.returncode == 2 else 'failed', out)
+            status = 'done' if p.returncode == 0 else 'failed'
+            if stage == 'vendor_bridge_compare' and p.returncode == VENDOR_RC_SKIP:
+                status = 'unsupported'
+            STATE.record(stage, status, out)
         elif p.returncode:
             STATE.data['warnings'].append(out[-1500:])
     return p.returncode, out
@@ -163,7 +161,7 @@ def pick_native_xlsx(out_dir):
 
 
 def native_compare(cli, root, cmp_dir, base_rank=None, compare_rank=None):
-    """原生 msprof-analyze compare：选卡 -> 原生比对 -> 归一化 xlsx 到 vendor 契约命名。
+    """原生 msprof-analyze compare：选卡 -> 原生比对 -> 归一化 xlsx 命名。
 
     返回 True 表示原生 xlsx 已就位；失败/产物缺失返回 False（调用方回退内置实现）。
     """
@@ -186,7 +184,7 @@ def native_compare(cli, root, cmp_dir, base_rank=None, compare_rank=None):
         return False
     dst = os.path.join(cmp_dir, f'performance_comparison_result_{tag}.xlsx')
     shutil.copyfile(src, dst)
-    # 清理历史遗留的其他命名 xlsx，保证 vendor_bridge glob 唯一命中当前比对
+    # 清理历史比对的 xlsx，只保留本次选卡结果
     for old in glob.glob(os.path.join(cmp_dir, 'performance_comparison_result_*.xlsx')):
         if os.path.abspath(old) != os.path.abspath(dst):
             try:
@@ -195,39 +193,6 @@ def native_compare(cli, root, cmp_dir, base_rank=None, compare_rank=None):
                 pass
     print(f'[compare] 原生 xlsx 已归一化：{dst}')
     return True
-
-
-def run_standalone(args, det, root, mw):
-    """cluster_output_only：输入仅含 cluster_analysis_output（无任何卡目录）。
-
-    只调用 vendor/cluster-output-analysis 子技能生成独立报告
-    reports/cluster_analysis_report.html，不生成总报告 performance_report.html。
-    返回码：0 成功；1 失败。
-    """
-    cl = det.get('cluster_output') or {}
-    cl_path = cl.get('path') or os.path.join(root, 'cluster_analysis_output')
-    if not os.path.isdir(cl_path):
-        cl_path = root
-    reports_dir = os.path.join(mw, 'reports')
-    os.makedirs(reports_dir, exist_ok=True)
-    out_html = os.path.join(reports_dir, 'cluster_analysis_report.html')
-    if not args.force and os.path.isfile(out_html):
-        print(f'[skip] 独立报告已存在：{out_html}')
-        return 0
-    print('[standalone] 输入仅含 cluster_analysis_output，'
-          '只调用 cluster-output-analysis 生成独立报告'
-          '（跳过 advisor/cluster/recipes/compare/swimlane/总报告）')
-    rc, _ = sh([sys.executable, script('vendor_bridge.py'), 'cluster',
-                '--data-dir', cl_path, '--reports-dir', reports_dir])
-    if rc == 0 and os.path.isfile(out_html):
-        print(f'\n完成（独立报告，未生成总报告 performance_report.html）：{out_html}')
-        return 0
-    if rc == 2:
-        print('ERROR: cluster_analysis_output 中未找到可用数据'
-              '（cluster_analysis.db / cluster.db / cluster_step_trace_time.csv）')
-        return 1
-    print('ERROR: cluster-output-analysis 独立报告生成失败')
-    return 1
 
 
 def execute_workflow():
@@ -321,13 +286,12 @@ def execute_workflow():
         return 1
     print(f'[detect] mode={mode} cards={len(cards)}')
     STATE.data['coverage'] = det.get('coverage', {})
-    if not cards and mode != 'cluster_output_only':
-        STATE.data['errors'].append('No usable profiling cards or cluster output')
+    if not cards:
+        message = det.get('error') or '找不到可用的卡级 Prof 采集目录。'
+        STATE.data['errors'].append(message)
+        print(f'ERROR: {message}')
         return 1
 
-    # ---------- cluster_output_only：输入仅含 cluster_analysis_output，只出独立报告 ----------
-    if mode == 'cluster_output_only':
-        return run_standalone(args, det, root, mw)
     root = det.get('cluster_root') or (cards[0]['dir'] if mode == 'single' else root)
     STATE.data['normalized_root'] = root
     # 分析级能力门槛（替代原"所有卡必须有 step CSV"的全局门槛）：
@@ -451,6 +415,7 @@ def execute_workflow():
     # ---------- 5 compare（多卡：通信占比最大/最小两卡） ----------
     cmp_json = os.path.join(mw, 'compare', 'compare_analysis_result.json')
     cmp_ok = False
+    compare_reused = False
     compare_data_available = True
     if mode == 'cluster' and not args.skip_compare:
         from compare_fallback import find_cards as find_comparable_cards
@@ -476,7 +441,7 @@ def execute_workflow():
                                            base_rank=args.base_rank,
                                            compare_rank=args.compare_rank)
             if native_ok:
-                # 原生 xlsx 已就位（vendor 契约），仅补产总报告契约所需中间件 JSON
+                # 原生 xlsx 已就位，仅补产总报告所需中间件 JSON
                 rc, _ = sh([sys.executable, script('compare_fallback.py'), '--root', root,
                             '--output', cmp_dir, '--json-only'] + rank_args)
                 if rc != 0 or not os.path.isfile(cmp_json):
@@ -492,43 +457,26 @@ def execute_workflow():
             cmp_ok = rc == 0 and os.path.isfile(cmp_json)
         else:
             cmp_ok = True
+            compare_reused = True
             print('[skip] compare 已存在')
             STATE.record('compare_fallback', 'reused')
     else:
         print('[skip] compare（缺少有效比较指标）' if not compare_data_available
               else '[skip] compare（单卡或已禁用）')
 
-    # ---------- 6 vendor 子报告 ----------
+    # ---------- 6 prof-compare 子报告 ----------
     reports_dir = os.path.join(mw, 'reports')
-    adv_data = read_json(os.path.join(mw, 'advisor', 'advisor.json')) or {}
-    unknown_summary = any(value.get('missing_required') for value in (adv_data.get('per_rank') or {}).values())
-    cluster_db = os.path.join(cl_path, 'cluster_analysis.db')
-    if mode == 'cluster' and os.path.isfile(cluster_db):
-        from contextlib import closing
-        from lib import prof_data
-        import sqlite3
-        try:
-            with closing(prof_data.open_ro(cluster_db)) as connection:
-                quality = connection.execute("SELECT value FROM ClusterBaseInfo WHERE key='unknown_summary_metrics'").fetchone()
-            if quality:
-                unknown_summary = unknown_summary or any(json.loads(quality[0]).values())
-        except (sqlite3.Error, ValueError, TypeError):
-            pass
-    if mode == 'cluster' and unknown_summary:
-        STATE.record('vendor_bridge_cluster', 'unsupported',
-                     'required summary metrics unknown; vendor cannot preserve their quality state')
-        print('[skip] vendor cluster：摘要指标未知，不生成可能将缺省数字当实测值的子报告')
-    if mode == 'cluster' and os.path.isdir(cl_path) and not unknown_summary:
-        rc, _ = sh([sys.executable, script('vendor_bridge.py'), 'cluster',
-                    '--data-dir', cl_path, '--reports-dir', reports_dir])
-        if rc not in (0, 2):
-            print('WARN: vendor cluster 子报告失败')
-    if cmp_ok:
+    compare_report = os.path.join(reports_dir, PROF_COMPARE_REPORT)
+    if cmp_ok and compare_reused and os.path.isfile(compare_report):
+        STATE.record('vendor_bridge_compare', 'reused')
+    elif cmp_ok:
         rc, _ = sh([sys.executable, script('vendor_bridge.py'), 'compare',
                     '--compare-dir', os.path.join(mw, 'compare'),
                     '--reports-dir', reports_dir])
-        if rc not in (0, 2):
-            print('WARN: vendor compare 子报告失败')
+        if rc not in (0, VENDOR_RC_SKIP):
+            print('WARN: prof-compare 子报告失败')
+    else:
+        STATE.record('vendor_bridge_compare', 'skipped')
 
     # ---------- 7 swimlane（每卡 TopN + 全算子统计；多卡横向比对） ----------
     if not args.skip_swimlane and cards:
@@ -583,11 +531,8 @@ def execute_workflow():
             print('ERROR: 总报告生成失败')
             return 1
         print(f'\n{"部分完成" if failures else "完成"}：{out_html}')
-        sub1 = os.path.join(reports_dir, 'cluster_analysis_report.html')
-        sub2 = os.path.join(reports_dir, 'compare_analysis_report.html')
-        for p in (sub1, sub2):
-            if os.path.isfile(p):
-                print(f'子报告：{p}')
+        if STATE.data['stages']['vendor_bridge_compare']['status'] in ('done', 'reused'):
+            print(f'子报告：{compare_report}')
     return 2 if failures else 0
 
 

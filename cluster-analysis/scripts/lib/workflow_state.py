@@ -32,10 +32,15 @@ def cache_key(root, mw, skill_dir, parameters):
             # Large traces use metadata; small metadata/config/data are content checked.
             if s.st_size <= 1024 * 1024:
                 digest.update(p.read_bytes())
-    for p in sorted(Path(skill_dir).rglob('*')):
-        if p.is_file() and '__pycache__' not in p.parts and 'tests' not in p.parts and p.suffix in ('.py', '.md', '.html', '.js', '.css'):
-            digest.update(str(p.relative_to(skill_dir)).encode('utf-8'))
-            digest.update(p.read_bytes())
+    code_dir = Path(skill_dir)
+    for p in sorted(code_dir.rglob('*')):
+        relative = p.relative_to(code_dir)
+        if p.suffix not in ('.py', '.md', '.html', '.js', '.css'):
+            continue
+        if '__pycache__' in relative.parts or 'tests' in relative.parts or not p.is_file():
+            continue
+        digest.update(str(relative).encode('utf-8'))
+        digest.update(p.read_bytes())
     return digest.hexdigest()
 
 

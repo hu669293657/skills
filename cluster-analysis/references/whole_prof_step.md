@@ -25,7 +25,7 @@
 - Whole-prof 数据运行共享内置流水线，避免原生 CLI 对空 step 的版本差异覆盖此规则；有真实 step 的原生优先策略不变。
 - P0 在独立中间件目录写 `analysis_scope_cache.json`，后续阶段复用同一分步结果。按源文件大小/修改时间（含 WAL）及小文件内容校验；源发生变化时重新识别。原始大 trace 保持流式读取，避免每个分析阶段再次扫描分步标记。
 - 报告明确显示“整个 prof 作为一个汇总 step”；可展示窗口计算、通信、Free 与热点，`prof` 不解释为一次训练迭代或一个推理请求。请求吞吐、TTFT 等需要额外请求/token 证据。
-- 缺少比较所需的 Stage/未掩盖通信时，compare 记 unsupported；关键指标未知时不生成无法保留 unknown 的 vendor 集群子报告。已有窗口/事件结果继续交付，主报告说明限制；依赖未知 Overlapped/Communication 的掩盖比例 recipe 也记 unsupported。
+- 缺少比较所需的 Stage/未掩盖通信时，compare 记 unsupported。已有窗口/事件结果继续交付，主报告说明限制；依赖未知 Overlapped/Communication 的掩盖比例 recipe 也记 unsupported。
 - Insight 将卡级事件归入整个 prof 的范围；无法确认范围的事件定位保持来源限制。所有精确时间仍按原有整数 ns 口径。
 
 ## 验证

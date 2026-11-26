@@ -102,6 +102,27 @@ class InsightLocatorTests(unittest.TestCase):
         self.assertIn('同形状',item['cause'])
         self.assertIn('3.000ms',item['impact'])
 
+    def test_hybrid_trace_supplies_free_only_from_overlap_and_uses_db_step(self):
+        data = self.fixture()
+        data['cards'] = data['cards'][:1]
+        apa = Path(data['cards'][0]['dir']) / 'ASCEND_PROFILER_OUTPUT'
+        db = sqlite3.connect(apa / 'ascend_pytorch_profiler_0.db')
+        db.execute('DROP TABLE OVERLAP_ANALYSIS')
+        db.commit()
+        db.close()
+        events = [
+            {'ph': 'C', 'name': 'padding', 'args': {'test': 'x' * (2 << 20)}},
+            {'ph': 'X', 'name': 'Free', 'pid': 42, 'ts': '1786000000099000.000', 'dur': 4000},
+            {'ph': 'X', 'name': 'Free', 'pid': 43, 'ts': '1786000000000000.000', 'dur': 50000},
+            {'ph': 'M', 'name': 'process_name', 'pid': 42, 'args': {'name': 'Overlap Analysis'}},
+            {'ph': 'C', 'name': 'padding', 'args': {'test': 'x' * (2 << 20)}},
+        ]
+        (apa / 'trace_view.json').write_text(json.dumps(events), encoding='utf-8')
+        timeline = self.locator().analyze(data)['free'][0]['evidence']['timeline']
+        self.assertEqual(timeline['source'], 'Trace Overlap Analysis')
+        self.assertEqual(timeline['end_ns'], 100_000_000)
+        self.assertEqual(timeline['free_intervals_ns'], [[99_000_000, 100_000_000]])
+
     def test_missing_profiles_are_supported_and_explained(self):
         data=self.locator().analyze({'cards':[{'rank':0,'dir':str(self.root),'usable':True}]})
         self.assertEqual(data['communication'],[])

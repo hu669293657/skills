@@ -6,6 +6,7 @@ turns a duration vote into a causal claim, and can report missing capabilities.
 """
 import argparse
 from collections import defaultdict
+from fractions import Fraction
 import json
 from pathlib import Path
 import re
@@ -22,6 +23,36 @@ def ms(value):
 def share(card, step, value):
     stage=card.stage_ns(step)
     return f'{value / stage * 100:.2f}%（同卡迭代 Stage 为 {ms(stage)}ms）' if stage else '占比不可计算（缺同卡迭代 Stage）'
+
+
+def severity(result):
+    """Normalize each category's largest measured candidate share of its own Stage."""
+    peaks = {}
+    for kind in ('compute', 'communication', 'free'):
+        best, index, duration, stage = Fraction(0), None, None, None
+        for i, finding in enumerate(result.get(kind) or []):
+            e = finding['evidence']
+            if kind == 'free':
+                value = e.get('duration_ns') if e.get('duration_ns') is not None else e.get('total_ns')
+            else:
+                value = e.get({'compute': 'matching_rank_excess_ns', 'communication': 'start_skew_ns'}[kind])
+            denominator = e.get('stage_ns')
+            if not isinstance(value, int) or not isinstance(denominator, int) or denominator <= 0 or value < 0:
+                continue
+            ratio = Fraction(value, denominator)
+            if index is None or ratio > best:
+                best, index, duration, stage = ratio, i, value, denominator
+        peaks[kind] = (best, index, duration, stage)
+    total = sum(peak[0] for peak in peaks.values())
+    scaled = {kind: peak[0] * 1000 / total for kind, peak in peaks.items()} if total else {}
+    tenths = {kind: int(value) for kind, value in scaled.items()}
+    if tenths:
+        remainder = sorted(scaled, key=lambda key: scaled[key] - tenths[key], reverse=True)
+        for kind in remainder[:1000 - sum(tenths.values())]:
+            tenths[kind] += 1
+    return {kind: {'tenths': tenths.get(kind), 'candidate_index': index,
+                   'duration_ns': duration, 'stage_ns': stage}
+            for kind, (_, index, duration, stage) in peaks.items()}
 
 
 def position(card, step, lane, start, end, name, origin):
@@ -67,6 +98,7 @@ def communication(cards, origin):
         impact+=f'结束跨度 {ms(end_spread)}ms；上界不等于可消除时间。'
         cause=[];machine={'step':step,'semantic_group':latest['semantic'],'operator_instance':latest['name'],
             'latest_observed_rank':latest['rank'],'start_skew_ns':skew,'end_spread_ns':end_spread,
+            'earliest_observed_rank':earliest['rank'],'stage_ns':waiting.stage_ns(step),
             'aligned_ranks':sorted(e['rank'] for e in events),'start_ns':latest['start'],'end_ns':latest['end'],
             'relative_start_ns':latest['start']-origin,'relative_end_ns':latest['end']-origin,
             'wait_ns_by_rank':{str(e['rank']):e['wait'] for e in events},
@@ -232,12 +264,12 @@ def compute(cards,origin):
             impact+=f'实例最长 {ms(item["largest"])}ms；累计不等于端到端可节省时间。'
         cause=[];issue='计算热点候选'
         if comparable:
-            cause.append(f'同迭代、同形状、同 dtype、同 core、同次数比较，{baseline["rank"]}卡累计 {ms(baseline["total"])}ms；{item["rank"]}卡多 {ms(excess)}ms。')
+            cause.append(f'同迭代、输入输出同形状/类型/格式、同 core/Block、同次数比较，{baseline["rank"]}卡累计 {ms(baseline["total"])}ms；{item["rank"]}卡多 {ms(excess)}ms。')
             if excess>=1_000_000:
                 issue='同配置计算耗时跨卡差异候选'
                 impact+=f'同配置跨卡超额 {ms(excess)}ms，占 {share(card,step,excess)}；不是已确认可节省时间。'
         else:
-            cause.append('缺少同迭代/同形状/同 dtype/同 core/同次数的可比卡；仅说明热点，不能确认性能劣化。')
+            cause.append('缺少同迭代、同输入输出配置、同 core/Block 及同次数的可比卡；仅说明热点，不能确认性能劣化。')
         ratios=[]
         active_metrics=('aiv_mte2_ratio','aiv_mte3_ratio','aiv_vec_ratio') if 'VECTOR' in item['core'] or 'AIV' in item['core'] else ('aic_mte2_ratio','aic_mac_ratio')
         labels={'aiv_mte2_ratio':'AIV 搬入占用','aiv_mte3_ratio':'AIV 搬出占用','aiv_vec_ratio':'向量计算占用',
@@ -262,12 +294,28 @@ def compute(cards,origin):
             'start_ns':item['start'],'relative_start_ns':item['start']-origin,'duration_ns':item['largest'],
             'total_ns':item['total'],'count':item['count'],'matching_rank':baseline['rank'] if comparable else None,
             'matching_rank_excess_ns':excess if comparable else None,'minimum_read_write_bytes':traffic,
+            'stage_ns':card.stage_ns(step),
+            'instances':[card.compute_instance(item)] + ([by_rank[baseline['rank']].compute_instance(baseline)] if comparable else []),
             'compute_source':card.compute_source,
             'pmu_units':{'kernel_details_csv_time':'us','TASK_PMU_INFO_time':'ns in verified Ascend schema; otherwise validate schema before conversion'},
             'pmu_csv':{k:v for k,v in row.items() if k.endswith(('_ratio','_time(us)','utilization(%)'))}}})
         if len(result)==3:
             break
     return result
+
+
+def free_timeline(card, step, selected, origin):
+    bounds = next((s for s in card.steps if s['id'] == str(step) and s['end'] > s['start']), None)
+    if not bounds:
+        return None
+    left, right = bounds['start'], bounds['end']
+    def relative(pairs):
+        return [[max(left, a) - origin, min(right, b) - origin]
+                for a, b in sorted(pairs) if b > left and a < right and b > a]
+    return {'start_ns': left - origin, 'end_ns': right - origin,
+            'source': getattr(card, 'free_source', None),
+            'free_intervals_ns': relative(card.frees.get(step, [])),
+            'selected_intervals_ns': relative(selected)}
 
 
 def free(cards,origin,communication_results=None):
@@ -312,7 +360,8 @@ def free(cards,origin,communication_results=None):
         result.append({'location':position(card,step,'Overlap Analysis / Free',start,end,'Free',origin),
             'issue':'最长 Device 空闲区间候选','impact':f'连续空闲 {ms(value)}ms，占 {share(card,step,value)}；Free 与计算/通信取互补口径。',
             'cause':card.free_cause(start,end),'evidence':{'rank':card.rank,'step':step,'start_ns':start,'end_ns':end,
-                'relative_start_ns':start-origin,'relative_end_ns':end-origin,'duration_ns':value}})
+                'relative_start_ns':start-origin,'relative_end_ns':end-origin,'duration_ns':value,
+                'stage_ns':card.stage_ns(step),'timeline':free_timeline(card,step,[(start,end)],origin)}})
     if paths:
         for total,card,step,path,other,peer in sorted(paths,key=lambda x:x[0],reverse=True):
             if any(step==row['evidence']['step'] and card.rank==row['evidence']['rank']
@@ -322,15 +371,18 @@ def free(cards,origin,communication_results=None):
             start,end=path['start_ns'],path['end_ns'];examples=path['free_examples_ns'][:3]
             location=position(card,step,'Overlap Analysis / Free',start,end,'Free 聚集窗口',origin)
             location+='；例段 '+'；'.join(f'{stamp(a-origin)}～{stamp(b-origin)}' for a,b in examples)
-            result.append({'location':location,'issue':f'通信前规律碎片 Free 候选（{path["free_interval_count"]} 段）',
+            affected = [(max(a,start),min(b,end)) for a,b in card.frees.get(step,[]) if a<end and b>start]
+            result.append({'location':location,'issue':f'通信前碎片 Free 候选（{path["free_interval_count"]} 段）',
                 'impact':f'窗口内 Free 合计 {ms(total)}ms，占 {share(card,step,total)}；对齐 {peer}卡为 {ms(other.get("free_ns",0))}ms，多 {ms(total-other.get("free_ns",0))}ms。',
                 'cause':f'同一通信锚点后的 Host 忙区并集多 {ms(path["python_busy_union_ns"]-other["python_busy_union_ns"])}ms，Device 计算为 {ms(path.get("computing_ns",0))} vs {ms(other.get("computing_ns",0))}ms；优先核查下发/tiling 路径，不能归因于单个长计算核。',
                 'evidence':{'rank':card.rank,'step':step,'start_ns':start,'end_ns':end,'total_ns':total,
+                    'relative_start_ns':start-origin,'relative_end_ns':end-origin,
                     'count':path['free_interval_count'],'example_intervals_ns':[[a-origin,b-origin] for a,b in examples],
-                    'aligned_rank':int(peer),'aligned_free_ns':other.get('free_ns',0),'basis':'communication host_path_comparison'}})
+                    'aligned_rank':int(peer),'aligned_free_ns':other.get('free_ns',0),'basis':'communication host_path_comparison',
+                    'stage_ns':card.stage_ns(step),'timeline':free_timeline(card,step,affected,origin)}})
             if len(result)==3:
                 break
-    elif regular:
+    if regular and not any('total_ns' in finding['evidence'] for finding in result):
         total,card,step,gaps=max(regular,key=lambda x:x[0])
         examples=sorted(gaps,key=lambda x:x[1]-x[0],reverse=True)[:3]
         intervals='；'.join(f'{stamp(a-origin)}～{stamp(b-origin)}' for a,b in examples)
@@ -339,7 +391,8 @@ def free(cards,origin,communication_results=None):
             'impact':f'本卡本迭代这些小 Free 合计 {ms(total)}ms，占 {share(card,step,total)}；与上方最大区间分开，例段只展示最多 3 段。',
             'cause':card.free_cause(*examples[0])+' 规律性仅指时长相近，需要逐段沿相邻下发/同步事件验证共同成因。',
             'evidence':{'rank':card.rank,'step':step,'count':len(gaps),'total_ns':total,
-                        'example_intervals_ns':[[a-origin,b-origin] for a,b in examples]}})
+                        'example_intervals_ns':[[a-origin,b-origin] for a,b in examples],
+                        'stage_ns':card.stage_ns(step),'timeline':free_timeline(card,step,gaps,origin)}})
     return result[:3]
 
 
@@ -393,6 +446,7 @@ def analyze(detect):
         comm=communication(cards,origin)
         result={'schema_version':1,'summary':'','coverage':coverage,'limitations':limitations,
                 'communication':comm,'compute':compute(cards,origin),'free':free(cards,origin,comm)}
+        result['severity'] = severity(result)
         reasons={'communication':'缺少可按同迭代、通信域、完整实例对齐的跨卡 Device 时间证据，或未见大于 1ms 的差异。',
                  'compute':'缺少可用的计算 kernel 明细与同配置证据，不能定位计算异常。',
                  'free':'缺少 OVERLAP_ANALYSIS 或 Trace Free 区间，不能准确定位 Device 空闲。'}
@@ -402,7 +456,7 @@ def analyze(detect):
         supported_paths=[item['evidence'].get('host_path_comparison') for item in comm]
         supported_paths=[path for path in supported_paths if path and path['python_busy_delta_ns']>1_000_000 and path['cann_count_delta']>0]
         if supported_paths:
-            result['summary']='主要候选是 Host 下发/路径差异形成的碎片 Free 与通信到达不齐；计算未见同等级的同配置跨卡劣化。结论限于已采集卡与迭代。'
+            result['summary']='Host 路径差异与通信到达不齐同时出现，可结合 Free 的区间和双卡时序核查下发路径。结论限于已采集卡与迭代。'
         else:
             result['summary']='已定位 '+ '、'.join(found)+'；结论限定于已采集卡与迭代，根因按证据强度表述为候选。' if found else '原始证据不足，当前不能给出可复现的 Insight 瓶颈定位。'
         if any(c.conn is None for c in cards):

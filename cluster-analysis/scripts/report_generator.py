@@ -12,9 +12,8 @@ sidebar navigation; the INFO OVERVIEW comes FIRST (section 1), followed by
 CONCLUSIONS & SUGGESTIONS (section 2); cluster overview keeps the step
 dimension (one rank may span multiple steps); advanced analysis is centralized
 in one section grouped by the five categories; every major section is wrapped
-in <details> so it can be folded; vendor sub-reports (cluster-analysis /
-prof-compare HTML) are embedded in a dedicated section. No "card list
-(cluster mode)" section is rendered.
+in <details> so it can be folded. The prof-compare report is embedded when
+available.
 
 Output: perf_report.html (dark theme, ECharts via CDN with table fallback).
 """
@@ -26,8 +25,13 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+from urllib.parse import quote
 
 from lib.common import read_json
+from lib.config import DIR_REPORTS, PROF_COMPARE_REPORT
+from lib.communication_top import communication_tops
+from lib.rank_timing import rank_timing_panel
 
 # ---------- 外置报告模板（scripts/report_assets/）----------
 # 模板/样式/图表脚本与代码解耦：改报告外观无需动 Python 逻辑。
@@ -47,9 +51,11 @@ def _asset(name):
 
 PAGE_CSS = _asset('page.css')
 PAGE_JS = _asset('page.js')
+BW_JS = _asset('bottleneck.js')
+BW_CSS = _asset('bottleneck.css')
 TEMPLATE = _asset('template.html')
 CLUSTER_CHART_JS = _asset('chart_cluster.js')
-RANK_DIFF_CHART_JS = _asset('chart_rank_diff.js')
+CHART_RENDER_JS = _asset('chart_render.js')
 
 
 def read_text(path):
@@ -146,6 +152,9 @@ def chinese_header(value):
 def html_table(header, rows, cls='tbl', max_rows=None):
     if not header:
         return ''
+    if not rows:
+        # 报告以图表为主，空数据时不再输出只有表头的表格
+        return ''
     shown = rows[:max_rows] if max_rows else rows
     out = [f'<div class="tw"><table class="{cls}"><thead><tr>']
     out += [f'<th>{esc(chinese_header(h))}</th>' for h in header]
@@ -209,6 +218,99 @@ def cluster_rel(mw):
     return 'cluster_analysis_output'
 
 
+_CHART_SEQ = [0]
+
+
+def _num(v):
+    """把展示用的单元格还原成 float；非数值返回 None。"""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(',', '').replace('μs', 'us')
+    if s.endswith('%'):
+        s = s[:-1]
+    return float(s) if re.fullmatch(r'-?\d+(?:\.\d+)?', s) else None
+
+
+def _text(v):
+    """单元格转纯文本（去掉 Raw 包装里的标签）。"""
+    s = str(v)
+    s = re.sub(r'<[^>]+>', '', s)
+    return s.strip()
+
+
+def chart_block(spec, height=320, note=''):
+    """输出一个由 JSON spec 驱动的 ECharts 容器（渲染逻辑见 chart_render.js）。"""
+    if not spec.get('cats'):
+        return ''
+    _CHART_SEQ[0] += 1
+    payload = json.dumps(spec, ensure_ascii=False).replace('&', '\\u0026').replace('<', '\\u003c')
+    head = f'<h4 class="sub-t">{esc(spec.get("title"))}</h4>' if spec.get('title') else ''
+    tail = f'<p class="chart-note">{note}</p>' if note else ''
+    return (f'{head}<div class="chart" id="spec-chart-{_CHART_SEQ[0]}" '
+            f'data-spec="{esc(payload)}" style="height:{height}px"></div>{tail}')
+
+
+def auto_chart(header, rows, kind='hbar', unit='', height=320, max_rows=24,
+               cat_name='', val_name='', wide=False, note='', title='', cat_col=0,
+               include=None, stacked=False):
+    """把表格自动转成图表：cat_col 列为分类，数值列各成一条 series。
+
+    include 给定时，仅保留表头包含其中任一子串的列作为 series。
+    数值列不足、或行数超过 max_rows 时返回空串，由调用方回退到表格。
+    """
+    if not header or not rows or len(rows) > max_rows:
+        return ''
+    cats, series, notes = [], [], []
+    num_cols = []
+    for i, h in enumerate(header):
+        if i == cat_col:
+            continue
+        if include and not any(k.lower() in str(h).lower() for k in include):
+            continue
+        vals = [_num(r[i]) if i < len(r) else None for r in rows]
+        if all(v is not None for v in vals) and any(v for v in vals):
+            num_cols.append(i)
+    if not num_cols:
+        return ''
+    for i in num_cols:
+        series.append({'name': chinese_header(header[i]),
+                       'data': [_num(r[i]) for r in rows]})
+    for r in rows:
+        cats.append(_text(r[cat_col]))
+        extra = [f'{chinese_header(header[i])} {_text(r[i])}'
+                 for i in range(len(header)) if i != cat_col and i not in num_cols and i < len(r)]
+        notes.append(' · '.join(extra))
+    spec = {'kind': 'stack' if (stacked and kind == 'bar') else kind,
+            'cats': cats, 'series': series, 'unit': unit,
+            'catName': cat_name or chinese_header(header[cat_col]),
+            'valName': val_name or (unit or ''), 'notes': notes,
+            'reverse': kind in ('hbar', 'diverge'), 'wide': wide, 'title': title}
+    if stacked and kind == 'hbar':
+        spec['stacked'] = True
+    return chart_block(spec, height=height, note=note)
+
+
+def list_items(items, cls='concl'):
+    """把结论/建议类条目渲染成徽章列表，替代表格。items 为已拼好的 HTML 片段。"""
+    return ''.join(f'<div class="{cls}">{i}</div>' for i in items if _text(i))
+
+
+def tile_grid(tiles, cols=None):
+    """把清单类数据渲染成磁贴网格，替代表格。tiles: [(标题, [行, ...]), ...]"""
+    cards = []
+    for head, lines in tiles:
+        if not lines:
+            continue
+        rows = ''.join(f'<div class="tile-row">{l}</div>' for l in lines)
+        cards.append(f'<div class="tile"><div class="tile-head">{head}</div>{rows}</div>')
+    if not cards:
+        return ''
+    style = f' style="grid-template-columns:repeat({cols},minmax(0,1fr))"' if cols else ''
+    return f'<div class="tile-grid"{style}>' + ''.join(cards) + '</div>'
+
+
 def fold(section_html):
     """Wrap a <section id="..."> in <details open>, moving its <h2> into <summary>."""
     m = re.match(r'\s*<section id="([^"]+)">\s*<h2>(.*?)</h2>', section_html, re.S)
@@ -249,42 +351,24 @@ def steps_ranks(ts_rows):
 # ---------- section builders ----------
 
 def sec_diagnosis(locator, num='2', title='瓶颈定位与解决'):
-    """The only promoted findings are concrete, ranked Insight locations."""
-    parts = [f'<section id="conclusions"><h2>{num}. {title}</h2>',
-             '<h3>瓶颈定位与解决</h3>' if title != '瓶颈定位与解决' else '',
-             f'<div class="card p-5"><p><b>{esc(locator.get("summary", "定位证据不足"))}</b></p></div>']
-    for key, title in (('communication', '通信'), ('compute', '计算'), ('free', 'Free（设备空闲）')):
-        findings = locator.get(key) or []
-        parts.append(f'<div class="card p-5 mt-4"><h3>{title}</h3>')
-        if findings:
-            rows = [[r.get('location', '定位信息不足'), r.get('issue', ''),
-                     r.get('impact', ''), r.get('cause', '')] for r in findings[:3]]
-            parts.append(html_table(['Insight 定位', '主要问题', '影响程度', '可能原因与处理方向'], rows))
-        else:
-            parts.append(f'<p>{esc(locator.get(key + "_reason") or "当前证据未定位可确认的异常；数据不足不代表没有瓶颈。")}</p>')
-        parts.append('</div>')
-    limits = locator.get('limitations') or []
-    if limits:
-        parts.append('<p class="text-slate-400 text-sm mt-3">结论范围：' +
-                     esc('；'.join(str(x) for x in limits)) + '</p>')
-    parts.append('</section>')
-    return ''.join(parts)
+    from lib.bottleneck_report import workbench
+    return f'<section id="conclusions"><h2>{num}. {title}</h2>{workbench(locator)}</section>'
 
 
 def compact_diagnosis_html(locator):
     """Offline entry point: three short evidence sections, no statistical appendix."""
     css = '''body{margin:0;background:#f5f7fb;color:#152238;font:15px/1.7 "Microsoft YaHei",sans-serif}
-main{max-width:1440px;margin:auto;padding:32px}h1{font-size:25px;margin:0 0 8px}h2{font-size:21px}
-h3{font-size:18px;color:#215794}p{margin:10px 0}.card{background:white;border:1px solid #dce4ef;border-radius:12px;padding:20px;margin:16px 0}
+main{max-width:none;margin:0 auto;padding:clamp(16px,3vw,40px)}h1{font-size:25px;margin:0 0 8px}h2{font-size:21px}
+h3{font-size:18px;color:#215794}p{margin:10px 0;max-width:118ch}.card{background:white;border:1px solid #dce4ef;border-radius:12px;padding:20px;margin:16px 0}
 .tw{overflow-x:auto}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{padding:12px;text-align:left;border-bottom:1px solid #e5eaf2;vertical-align:top;overflow-wrap:anywhere}
 th{background:#eef3f9}th:first-child{width:39%}th:nth-child(2){width:14%}th:nth-child(3){width:18%}
-.text-slate-400{color:#596a80}.text-sm{font-size:13px}@media(max-width:700px){main{padding:16px}table{min-width:900px}}'''
+.text-slate-400{color:#596a80}.text-sm{font-size:13px}@media(max-width:700px){main{padding:16px}table{min-width:720px}}'''
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            '<title>Insight 关键瓶颈定位</title><style>' + css + '</style></head>'
+            '<title>Insight 关键瓶颈定位</title><style>' + css + BW_CSS + '</style></head>'
             '<body><main><h1>Insight 关键瓶颈定位</h1>'
             '<p>按卡号、泳道、完整算子名和起始时间定位；每类只列最关键的点。</p>'
-            + sec_diagnosis(locator, '1') + '</main></body></html>')
+            + sec_diagnosis(locator, '1') + '</main><script>' + BW_JS + '</script></body></html>')
 
 
 def sec_conclusions(advisor, cluster_summary, compare, mode, num='2', locator=None):
@@ -348,16 +432,18 @@ def sec_conclusions(advisor, cluster_summary, compare, mode, num='2', locator=No
     order = {'High': 0, 'Medium': 1, 'Low': 2}
     items.sort(key=lambda x: order.get(x[0], 3))
     kind_map = {'High': 'critical', 'Medium': 'warn', 'Low': 'ok'}
-    rows = [[Raw(badge(lv, kind_map.get(lv, 'ok'))), txt] for lv, txt in items]
+    concl = list_items([f'{badge(lv, kind_map.get(lv, "ok"))}<span>{txt}</span>'
+                        for lv, txt in items])
     return f'''
 <section id="conclusions">
   <h2>{num}. 结论与建议</h2>
-  <div class="card p-5">{html_table(['优先级', '结论'], rows)}</div>
+  <div class="card p-5">{concl}</div>
   <p class="text-xs text-slate-500 mt-3">结论由中间件自动汇聚生成；关键数值请以各章节明细表为准。</p>
 </section>'''
 
 
-def sec_overview(detect, advisor, cluster_summary, mode, num='1'):
+def sec_overview(detect, advisor, cluster_summary, mode, num='1', locator=None):
+    from lib.bottleneck_report import severity_card
     cards = detect.get('cards', [])
     a = (advisor or {}).get('data') or {}
     coverage = detect.get('coverage') or {}
@@ -462,15 +548,20 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1'):
                       f'建议从"专家建议"章节入手，按瓶颈类型跳转到对应进阶分析明细。</p></div>')
     cards_html = ''
     if mode == 'single' and cards:
-        cards_html = ('<div class="card p-5 mt-4"><h3>卡片清单</h3>' + html_table(
-            ['rank', '数据目录', '格式', '框架', '可用'],
-            [[c['rank'], c['dir'], c['format'], c.get('framework'),
-              '✓' if c.get('usable') else '✗'] for c in cards]) + '</div>')
+        tiles = [(f"rank {esc(str(c['rank']))}", [
+            f'<span>数据目录</span><b>{esc(c["dir"])}</b>',
+            f'<span>格式 / 框架</span><b>{esc(c["format"])} · {esc(c.get("framework") or "—")}</b>',
+            f'<span>可用</span><b class="{"text-emerald-400" if c.get("usable") else "text-red-400"}">'
+            f'{"✓" if c.get("usable") else "✗"}</b>']) for c in cards]
+        cards_html = ('<div class="card p-5 mt-4"><h3>卡片清单</h3>'
+                      + tile_grid(tiles) + '</div>')
     return f'''
 <section id="overview">
   <h2>{num}. 数据概览</h2>
   {coverage_html}
-  <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">{kpi_html}</div>
+  {"<h3>采集窗口与 Stage 时间构成</h3>" if locator is not None else ""}
+  <div class="kpi-row">{kpi_html}</div>
+  {severity_card(locator) if locator is not None else ''}
   {ov_summary}
   {cards_html}
 </section>'''
@@ -480,18 +571,8 @@ def sec_cluster(cluster_summary, num='3'):
     ts = (cluster_summary or {}).get('time_summary', [])
     if not ts:
         return ''
-    steps, ranks = steps_ranks(ts)
-
-    # per (step, rank) detail — a rank may span multiple steps
-    detail_rows = [[t['step'], t['rank'], f"{t['stage(us)']/1000:.1f}",
-                    f"{t['computing(us)']/1000:.1f}",
-                    f"{t['communication_not_overlapped(us)']/1000:.1f}",
-                    f"{t['free(us)']/1000:.1f}",
-                    f"{t['computing_ratio']*100:.1f}%", f"{t['comm_ratio']*100:.1f}%",
-                    f"{t['free_ratio']*100:.1f}%"] for t in ts]
-    detail_tbl = html_table(
-        ['Step', 'Rank', 'Stage(ms)', '计算(ms)', '未掩盖通信(ms)', '空闲(ms)',
-         '计算占比', '通信占比', '空闲占比'], detail_rows, max_rows=80)
+    steps, _ = steps_ranks(ts)
+    rank_chart = rank_timing_panel(ts, cluster_summary.get('legacy_zero_fields'))
 
     # per-step aggregation across ranks
     by_step = {}
@@ -504,14 +585,8 @@ def sec_cluster(cluster_summary, num='3'):
     free_avg = [round(sum(m['free(us)'] for m in by_step.get(s, [])) /
                       max(len(by_step.get(s, [])), 1) / 1000, 2) for s in steps]
 
-    # 部分维度分组柱状图：x=计算/通信/free 三分类，每个分类内每个 step 一根柱，
-    # 展现计算、通信、free 各部分耗时在不同 step 之间的差异（跨 rank 平均）
-    part_series = [{'name': f'step {s}', 'type': 'bar',
-                    'data': [comp_avg[i], comm_avg[i], free_avg[i]]}
-                   for i, s in enumerate(steps)]
-    part_chart_data = {'categories': json.dumps(['计算', '通信', 'free']),
-                       'series': json.dumps(part_series)}
     step_rows = []
+    stage_avg_l, spread_l, slowest_l = [], [], []
     for s in steps:
         members = by_step.get(s, [])
         n = max(len(members), 1)
@@ -524,29 +599,38 @@ def sec_cluster(cluster_summary, num='3'):
                           f"{sum(m['communication_not_overlapped(us)'] for m in members)/n/1000:.1f}",
                           f"{sum(m['free(us)'] for m in members)/n/1000:.1f}",
                           f"step{s}/rank{worst['rank']}", f'{spread:.1f}'])
-    step_tbl = html_table(
-        ['Step', 'Rank 数', '平均 Stage(ms)', '平均计算(ms)', '平均未掩盖通信(ms)',
-         '平均空闲(ms)', '最慢组合', 'Stage 极差(ms)'], step_rows, max_rows=40)
+        stage_avg_l.append(round(stage_avg, 2))
+        spread_l.append(round(spread, 2))
+        slowest_l.append(f"最慢组合 step{s}/rank{worst['rank']}，参与 {len(members)} 卡")
 
+    # 合并图数据：三部分结构（堆积柱）+ Stage 总耗时/极差（折线），原两张图合为一张
     chart_data = {
-        'steps': json.dumps(steps),
-        'comp': json.dumps(comp_avg),
-        'comm': json.dumps(comm_avg),
-        'free': json.dumps(free_avg),
+        'steps': [str(s) for s in steps],
+        'comp': comp_avg,
+        'comm': comm_avg,
+        'free': free_avg,
+        'stage': stage_avg_l,
+        'spread': spread_l,
+        'slowest': slowest_l,
     }
 
     slow = (cluster_summary or {}).get('slow_rank', [])
     slow_html = ''
     if slow:
         s0 = slow[0]
+        slow_chart = chart_block(
+            {'kind': 'hbar', 'unit': '%', 'catName': '卡号', 'valName': '候选占比(%)',
+             'cats': [f"rank{r['rank']}" for r in slow],
+             'series': [{'name': '通信耗时最短占比', 'color': '#f472b6',
+                         'data': [round(r['vote_ratio'] * 100, 1) for r in slow]}],
+             'notes': [f"投票 {r['votes']} 次" for r in slow],
+             'reverse': True},
+            height=max(200, 34 * min(len(slow), 12)))
         slow_html = (f'<div class="card p-5 mt-4"><h3>短通信耗时候选（需验证到达时间）</h3>'
                      f'<p>rank <b class="text-red-400">{s0["rank"]}</b> 在 '
                      f'{s0["vote_ratio"]*100:.1f}% 的集合通信中耗时最短。'
                      f'这仅提供慢卡候选，需要结合各卡到达时间和下发/设备依赖验证'
-                     f'（共 {s0["votes"]} 次投票）。</p>'
-                     + html_table(['Rank', '投票数', '占比'],
-                                  [[r['rank'], r['votes'], f"{r['vote_ratio']*100:.1f}%"]
-                                   for r in slow]) + '</div>')
+                     f'（共 {s0["votes"]} 次投票）。</p>{slow_chart}</div>')
 
     # 集群小结：自动汇总时间结构与最慢/波动最大的 step
     total_stage = sum(_f(r[2]) for r in step_rows) or 1.0
@@ -567,20 +651,42 @@ def sec_cluster(cluster_summary, num='3'):
 负载不均或 Host 下发不足，优先对照"进阶分析"的通信类 / Host 下发类条目与慢卡识别结果；
 若结构稳定且计算占主导，则重点看计算类条目与 Top 耗时算子。</p></div>'''
 
+    trend_js = CLUSTER_CHART_JS.replace(
+        '{{STEP_TREND_DATA}}', json.dumps(chart_data, ensure_ascii=False))
+
     return f'''
 <section id="cluster">
   <h2>{num}. 集群总览（Step × Rank）</h2>
-  <div class="card p-5"><h3>按 Step 聚合（各 rank 平均）</h3>{step_tbl}</div>
-  <div class="card p-5 mt-4"><h3>Step × Rank 明细（同一 rank 的多个 step 分行展示）</h3>{detail_tbl}</div>
-  <div class="card p-5 mt-4"><h3>计算 / 通信 / free 三部分的 Step 间耗时差异（ms）</h3>
-  <p class="text-slate-400 text-sm mb-2">横轴为计算、通信、free 三个部分；每部分内的多根柱子对应不同 step
-  （跨 rank 平均），用于观察各部分耗时在不同 step 之间的波动与差异。</p>
-  <div id="chart-part-step" style="width:100%;height:420px;"></div></div>
-  <script>{RANK_DIFF_CHART_JS.format(**part_chart_data)}</script>
+  <div class="card rank-timing-card"><h3>Rank 耗时走势</h3>{rank_chart}</div>
+  <div class="card p-5 mt-4">
+    <h3>各 Step 时间分解与 Step 间差异（ms，跨 rank 平均）</h3>
+    <div class="toolbar">
+      <span class="ctl-label">图形</span>
+      <select id="trend-mode" class="ctl">
+        <option value="stack">堆积柱状（看结构差异）</option>
+        <option value="line">折线走势（看趋势）</option>
+      </select>
+      <span class="ctl-label">指标</span>
+      <div id="trend-metrics" class="flex flex-wrap items-center gap-3">
+        <label class="chk"><input type="checkbox" value="comp" checked>
+          <span class="dot" style="background:#38bdf8"></span>计算</label>
+        <label class="chk"><input type="checkbox" value="comm" checked>
+          <span class="dot" style="background:#fb923c"></span>未掩盖通信</label>
+        <label class="chk"><input type="checkbox" value="free" checked>
+          <span class="dot" style="background:#64748b"></span>空闲</label>
+        <label class="chk"><input type="checkbox" value="stage">
+          <span class="dot" style="background:#34d399"></span>Stage 总耗时</label>
+        <label class="chk"><input type="checkbox" value="spread">
+          <span class="dot" style="background:#ef4444"></span>Stage 极差</label>
+      </div>
+    </div>
+    <div id="chart-step-trend" style="width:100%;height:420px;"></div>
+    <p class="chart-note">堆积柱状看每个 Step 内计算 / 未掩盖通信 / 空闲的结构与 Step 间差异；
+    切换折线看趋势。勾选「Stage 极差」可叠加同一 Step 内最慢与最快 rank 的差距；
+    悬停任一点显示该 Step 的最慢组合与参与卡数。</p>
+  </div>
+  <script>{trend_js}</script>
   {slow_html}
-  <div class="card p-5 mt-4"><h3>各 Step 平均时间分解（ms，跨 rank 平均）</h3>
-  <div id="chart-cluster" style="width:100%;height:360px;"></div></div>
-  <script>{CLUSTER_CHART_JS.format(**chart_data)}</script>
   {cluster_note}
 </section>'''
 
@@ -595,7 +701,10 @@ def sec_advisor(advisor, mw, num='4'):
     inner = ''
     if advisor['unified']:
         scope = '整体（全部卡）' if len(a.get('ranks', [])) > 1 else '单卡'
-        ranks = ', '.join(str(r) for r in a.get('ranks', []))
+        rank_ids = a.get('ranks', [])
+        ranks = ', '.join(str(r) for r in rank_ids[:12])
+        if len(rank_ids) > 12:
+            ranks += f' …（共 {len(rank_ids):,} 张卡）'
         step_text = (f'每卡 1 个整段汇总 step；{a.get("steps")} 个 rank-step 样本'
                      if a.get('step_scope') == 'whole_prof' else f'{a.get("steps")} 个 rank-step 样本')
         def ratio_text(key):
@@ -624,25 +733,57 @@ def sec_advisor(advisor, mw, num='4'):
     advice_tbl = table_md_by_header(tables, ['优先级', '建议'])
     if advice_tbl:
         kind_map = {'High': 'critical', 'Medium': 'warn', 'Low': 'ok'}
-        rows = [[Raw(badge(r[0], kind_map.get(r[0], 'ok'))), r[1]]
-                for r in advice_tbl['rows'][:10]]
-        inner += ('<div class="card p-5 mt-4"><h3>建议清单</h3>'
-                  + html_table(['优先级', '建议'], rows) + '</div>')
+        advice = list_items([f'{badge(r[0], kind_map.get(r[0], "ok"))}<span>{esc(r[1])}</span>'
+                             for r in advice_tbl['rows'][:10]])
+        inner += '<div class="card p-5 mt-4"><h3>建议清单</h3>' + advice + '</div>'
 
     top_ops = table_md_by_header(tables, ['算子', '总耗时(ms)'])
     if top_ops:
+        ops_rows = top_ops['rows'][:10]
+        ops_chart = auto_chart(
+            top_ops['header'], ops_rows, kind='hbar', unit='ms', wide=True,
+            include=['总耗时', '耗时'], cat_name='算子', val_name='总耗时(ms)',
+            height=max(240, 30 * len(ops_rows)),
+            note='悬停查看调用次数等其余列。')
         inner += ('<div class="card p-5 mt-4"><h3>Top 10 耗时算子（全部卡聚合）</h3>'
-                  + html_table(top_ops['header'], top_ops['rows'][:10]) + '</div>')
+                  + (ops_chart or html_table(top_ops['header'], ops_rows)) + '</div>')
 
-    top_comm = table_md_by_header(tables, ['算子', 'Elapse'])
-    if top_comm:
-        inner += ('<div class="card p-5 mt-4"><h3>Top 10 通信算子（全部卡聚合，ms）</h3>'
-                  + html_table(top_comm['header'], top_comm['rows'][:10]) + '</div>')
+    fields = ('op_name', 'elapse', 'wait', 'transit', 'idle', 'n')
+    headers = ['算子', '累计耗时(ms)', '等待(ms)', '传输(ms)', '空闲(ms)', '次数']
+    comm_groups = a.get('top_comm_by_type')
+    history_note = ''
+    if comm_groups is None:
+        legacy = table_md_by_header(tables, ['算子', 'Elapse'])
+        if legacy:
+            comm_groups, _ = communication_tops((dict(zip(fields, row)) for row in legacy['rows']),
+                                                'op_name', 'elapse')
+            history_note = '<p>此历史摘要仅含此前保留的全局榜单。重新生成 Advisor 可查看各类型完整排名。</p>'
+    if comm_groups:
+        parts = ['<div class="card p-5 mt-4"><h3>各通信类型算子耗时 Top 10（全部卡聚合）</h3>', history_note]
+        for kind, ops in comm_groups.items():
+            rows = [[op['op_name'], *(f'{_f(op[key]):.3f}' for key in fields[1:-1]), op['n']] for op in ops]
+            cg_chart = auto_chart(
+                headers, rows, kind='hbar', unit='ms', stacked=True, wide=True,
+                include=['等待', '传输', '空闲'], cat_name='算子', val_name='耗时(ms)',
+                height=max(240, 30 * len(rows)),
+                note='堆积展示等待 / 传输 / 空闲三段；悬停查看累计耗时与次数。')
+            parts.append(f'<details class="mt-2" open><summary>{esc(kind)} · {len(ops)} 项</summary>'
+                         + (cg_chart or html_table(headers, rows)) + '</details>')
+        inner += ''.join(parts) + '</div>'
 
     per_rank = table_md_by_header(tables, ['Rank', 'Step数'])
     if per_rank:
+        pr_rows = per_rank['rows'][:40]
+        pr_chart = auto_chart(
+            per_rank['header'], pr_rows, kind='hbar', unit='ms', stacked=True, wide=True,
+            include=['computing', 'communication', 'free', '计算', '通信', '空闲'],
+            cat_name='卡号', val_name='耗时(ms)',
+            height=max(280, 22 * len(pr_rows)),
+            note='堆积展示计算 / 未掩盖通信 / 空闲；悬停查看 Stage、占比等其余列。'
+                 '完整逐 rank 数据见中间件文件。')
         inner += ('<div class="card p-5 mt-4"><h3>各 Rank 时间分解</h3>'
-                  + html_table(per_rank['header'], per_rank['rows']) + '</div>')
+                  + (pr_chart or html_table(per_rank['header'], per_rank['rows'],
+                                            max_rows=80)) + '</div>')
 
     # 瓶颈解读：把主导瓶颈映射到优化方向与对应进阶分析类别
     dom_key = str(a.get('dominant', '')).lower()
@@ -707,8 +848,9 @@ def sec_recipes(cluster_summary, mw, num='5'):
     if not categories:
         return ''
     parts = [f'''<section id="recipes"><h2>{num}. 进阶分析（五大类集中展示）</h2>
-<p class="text-slate-400 text-sm mb-3">五大类进阶分析（拆解对比类、计算类特性、通信类特性、
-Host 下发类特性、其他特性）直接展示分析结果；未支持项与完整能力清单见文末 recipes_summary.md。</p>''']
+<p class="text-slate-400 text-sm mb-3">各类同时列出分析结果、采集限制和明细入口。</p>''']
+    crel = cluster_rel(mw)
+    recipe_dir = os.path.join(cluster_dir(mw), 'recipes')
     for cat in categories:
         cat_title = cat.get('title', cat.get('key', ''))
         cat_parts = []
@@ -720,12 +862,35 @@ Host 下发类特性、其他特性）直接展示分析结果；未支持项与
             if hdr is None:
                 hdr = list(rows[0].keys())
             data = [[row.get(c, '') for c in hdr] for row in rows]
+            r_chart = auto_chart(
+                hdr, data[:20], kind='hbar', wide=True,
+                height=max(220, 30 * min(len(data), 20)),
+                note='仅展示前 20 行；完整数据见明细 CSV。' if len(data) > 20 else '')
             cat_parts.append(f'<div class="mt-4"><h4 class="sub-t">{esc(subtitle)}</h4>'
-                             + html_table(hdr, data, max_rows=20) + '</div>')
-        if cat_parts:
+                             + (r_chart or html_table(hdr, data, max_rows=20)) + '</div>')
+        available, limits = [], []
+        for recipe in cat.get('recipes', []):
+            name = recipe.get('name', '')
+            status = recipe.get('status')
+            if status == 'done':
+                label = esc(name)
+                if name and os.path.isdir(os.path.join(recipe_dir, name)):
+                    label = f'<a href="{esc(f"{crel}/recipes/{name}/")}" target="_blank">{label}</a>'
+                rows_label = f' · {esc(recipe["rows"])} 行' if recipe.get('rows') is not None else ''
+                description = f' · {esc(recipe["desc"])}' if recipe.get('desc') else ''
+                available.append(f'<li>{label}{rows_label}{description}</li>')
+            elif status in ('unsupported', 'failed'):
+                reason = recipe.get('reason') or ('执行失败' if status == 'failed' else '缺少适用数据')
+                limits.append(f'<li>{esc(name)} · {esc(reason)}</li>')
+        coverage = '<ul class="text-sm pl-5 mt-2 list-disc">' + ''.join(available) + '</ul>' if available else ''
+        if available and cat_parts:
+            coverage = '<details class="mt-4"><summary>查看本类明细文件</summary>' + coverage + '</details>'
+        if limits:
+            coverage += ('<details class="mt-2"><summary>查看本类数据限制</summary>'
+                         '<ul class="text-sm pl-5 mt-2 list-disc">' + ''.join(limits) + '</ul></details>')
+        if cat_parts or coverage:
             parts.append('<div class="card p-5 mt-4"><h3>' + esc(cat_title) + '</h3>'
-                         + ''.join(cat_parts) + '</div>')
-    crel = cluster_rel(mw)
+                         + ''.join(cat_parts) + coverage + '</div>')
     md_link = f'{crel}/recipes_summary.md'
     parts.append(f'<p class="text-xs text-slate-500 mt-2">完整汇总：'
                  f'<a href="{esc(md_link)}" target="_blank">recipes_summary.md</a> · '
@@ -747,13 +912,22 @@ def sec_compare(compare, num='6'):
              f"{r['Diff Ratio']*100:+.1f}%" if isinstance(r.get('Diff Ratio'),
                                                             (int, float))
              else r.get('Diff Ratio')] for r in ov]
+    # 总体指标：分组柱（基线 vs 比对），Diff 与变化比例放进 tooltip，避免再列表格
+    ov_chart = chart_block({
+        'kind': 'bar', 'unit': 'ms', 'catName': '维度', 'valName': '耗时(ms)',
+        'cats': [str(r[0]) for r in rows],
+        'series': [{'name': '基线(ms)', 'data': [r[1] for r in rows]},
+                   {'name': '比对(ms)', 'data': [r[2] for r in rows]}],
+        'notes': [f'Diff(ms) {r[3]} · 变化比例 {r[4]}' for r in rows],
+    }, height=max(260, 44 * max(len(rows), 4)),
+        note='分组柱对比基线卡与比对卡；悬停查看 Diff(ms) 与变化比例。')
     base_pct = f"{base.get('comm_ratio')*100:.1f}%" if base.get('comm_ratio') is not None else '?'
     comp_pct = f"{comp.get('comm_ratio')*100:.1f}%" if comp.get('comm_ratio') is not None else '?'
     parts = [f'''<section id="compare"><h2>{num}. 双卡比对（通信占比最大 vs 最小）</h2>
 <div class="card p-5">
 <p>基线：rank <b>{base.get('rank')}</b>（通信占比 {base_pct}）
 &nbsp;⇄&nbsp; 比对：rank <b>{comp.get('rank')}</b>（通信占比 {comp_pct}）</p>
-<h3>总体指标</h3>{html_table(['维度', '基线(ms)', '比对(ms)', 'Diff(ms)', 'Diff Ratio'], rows)}</div>''']
+<h3>总体指标</h3>{ov_chart or html_table(['维度', '基线(ms)', '比对(ms)', 'Diff(ms)', 'Diff Ratio'], rows)}</div>''']
     op_ins = ins.get('operator', {})
     if op_ins.get('top_degraded'):
         rows = [[r['Op Type'], r['Baseline Total Time(ms)'], r['Compare Total Time(ms)'],
@@ -763,30 +937,68 @@ def sec_compare(compare, num='6'):
                  else r.get('Diff Ratio')] for r in op_ins['top_degraded'][:10]]
         conc = op_ins.get('degradation_concentration_top10')
         note = f'（Top10 集中度 {conc*100:.0f}%）' if conc is not None else ''
+        deg_chart = chart_block({
+            'kind': 'diverge', 'unit': 'ms', 'catName': '算子', 'valName': 'Diff(ms)',
+            'cats': [str(r[0]) for r in rows],
+            'series': [{'name': 'Diff(ms)', 'data': [_num(r[3]) or 0.0 for r in rows]}],
+            'notes': [f'基线 {r[1]} ms · 比对 {r[2]} ms · 变化比例 {r[4]}' for r in rows],
+            'reverse': True, 'wide': True,
+        }, height=max(240, 32 * len(rows)),
+            note='向右（红）为比对卡更慢，向左（绿）为更快；悬停查看基线 / 比对绝对值。')
         parts.append(f'<div class="card p-5 mt-4"><h3>劣化 Top 算子 {note}</h3>'
-                     + html_table(['算子', '基线(ms)', '比对(ms)', 'Diff(ms)', 'Diff Ratio'],
-                                  rows) + '</div>')
+                     + (deg_chart or html_table(
+                         ['算子', '基线(ms)', '比对(ms)', 'Diff(ms)', 'Diff Ratio'],
+                         rows)) + '</div>')
     k_ins = ins.get('kernel', {})
     if k_ins.get('significant_degraded_top10'):
         rows = [[r['Kernel Name'], r['Baseline Total(us)'], r['Compare Total(us)'],
                  r['Diff Total(us)'], r['Baseline Calls'], r['Compare Calls']]
                 for r in k_ins['significant_degraded_top10'][:10]]
+        k_chart = chart_block({
+            'kind': 'diverge', 'unit': 'us', 'catName': 'Kernel', 'valName': 'Diff(μs)',
+            'cats': [str(r[0]) for r in rows],
+            'series': [{'name': 'Diff(us)', 'data': [_num(r[3]) or 0.0 for r in rows]}],
+            'notes': [f'基线 {r[1]} μs（{r[4]} 次） · 比对 {r[2]} μs（{r[5]} 次）'
+                      for r in rows],
+            'reverse': True, 'wide': True,
+        }, height=max(260, 34 * len(rows)), note='悬停查看两卡绝对耗时与调用次数。')
         parts.append(f'<div class="card p-5 mt-4"><h3>显著劣化 Kernel（ratio&gt;5%）'
                      f'共 {k_ins.get("significant_degraded_count", 0)} 个，Top 10</h3>'
-                     + html_table(['Kernel', '基线(us)', '比对(us)', 'Diff(us)', '基线次数',
-                                   '比对次数'], rows) + '</div>')
+                     + (k_chart or html_table(
+                         ['Kernel', '基线(us)', '比对(us)', 'Diff(us)', '基线次数',
+                          '比对次数'], rows)) + '</div>')
     if k_ins.get('comm_kernel_top10'):
         rows = [[r['Kernel Name'], r['Baseline Total(us)'], r['Compare Total(us)'],
                  r['Diff Total(us)'], r['Baseline Calls'], r['Compare Calls']]
                 for r in k_ins['comm_kernel_top10'][:10]]
+        ck_chart = chart_block({
+            'kind': 'hbar', 'unit': 'us', 'catName': '通信核函数', 'valName': '累计耗时(μs)',
+            'cats': [str(r[0]) for r in rows],
+            'series': [{'name': '基线(us)', 'data': [_num(r[1]) or 0.0 for r in rows]},
+                       {'name': '比对(us)', 'data': [_num(r[2]) or 0.0 for r in rows]}],
+            'notes': [f'Diff {r[3]} μs · 次数 {r[4]} → {r[5]}' for r in rows],
+            'reverse': True, 'wide': True,
+        }, height=max(260, 34 * len(rows)),
+            note='分组条对比两卡通信 Kernel 累计耗时；悬停查看 Diff 与调用次数。')
         parts.append('<div class="card p-5 mt-4"><h3>通信 Kernel 比对（Top 10）</h3>'
-                     + html_table(['通信 Kernel', '基线(us)', '比对(us)', 'Diff(us)',
-                                   '基线次数', '比对次数'], rows) + '</div>')
+                     + (ck_chart or html_table(
+                         ['通信 Kernel', '基线(us)', '比对(us)', 'Diff(us)',
+                          '基线次数', '比对次数'], rows)) + '</div>')
     if k_ins.get('load_imbalance_kernels'):
         rows = [[r['Kernel Name'], r['Baseline Calls'], r['Compare Calls']]
                 for r in k_ins['load_imbalance_kernels'][:10]]
+        li_chart = chart_block({
+            'kind': 'hbar', 'unit': '次', 'catName': 'Kernel', 'valName': '调用次数',
+            'cats': [str(r[0]) for r in rows],
+            'series': [{'name': '基线次数', 'data': [_num(r[1]) or 0 for r in rows]},
+                       {'name': '比对次数', 'data': [_num(r[2]) or 0 for r in rows]}],
+            'notes': [f'倍数差 {(_num(r[2]) or 1) / (_num(r[1]) or 1):.2f}x' for r in rows],
+            'reverse': True, 'wide': True,
+        }, height=max(260, 34 * len(rows)),
+            note='次数差 &gt;2x 通常指向负载不均或切分策略不一致。')
         parts.append('<div class="card p-5 mt-4"><h3>负载不均 Kernel（次数差 &gt;2x）</h3>'
-                     + html_table(['Kernel', '基线次数', '比对次数'], rows) + '</div>')
+                     + (li_chart or html_table(['Kernel', '基线次数', '比对次数'],
+                                               rows)) + '</div>')
     c_ins = ins.get('communication', {})
     if c_ins.get('top_degraded'):
         rows = [[r['Comm Op'], r['Baseline Total(us)'], r['Compare Total(us)'],
@@ -794,10 +1006,21 @@ def sec_compare(compare, num='6'):
                  r['Compare Wait(ms)'] if 'Compare Wait(ms)' in r else '',
                  r['Compare Transit(ms)'] if 'Compare Transit(ms)' in r else '']
                 for r in c_ins['top_degraded'][:10]]
+        co_chart = chart_block({
+            'kind': 'hbar', 'unit': 'ms', 'catName': '通信算子', 'valName': '耗时(ms)',
+            'cats': [str(r[0]) for r in rows],
+            'series': [{'name': '比对 Wait(ms)', 'data': [_num(r[4]) or 0.0 for r in rows]},
+                       {'name': '比对 Transit(ms)', 'data': [_num(r[5]) or 0.0 for r in rows]}],
+            'notes': [f'基线 {r[1]} μs · 比对 {r[2]} μs · Diff {r[3]} ms' for r in rows],
+            'reverse': True, 'wide': True, 'stacked': True,
+        }, height=max(260, 34 * len(rows)),
+            note='堆积展示比对卡的 Wait / Transit 拆解：Wait 高说明在等对端到达'
+                 '（负载不均 / 下发时机），Transit 高说明带宽或链路受限。')
         parts.append('<div class="card p-5 mt-4"><h3>通信算子比对（劣化 Top 10，'
                      '含 Wait/Transit 拆解）</h3>'
-                     + html_table(['通信算子', '基线(us)', '比对(us)', 'Diff(ms)',
-                                   '比对 Wait(ms)', '比对 Transit(ms)'], rows) + '</div>')
+                     + (co_chart or html_table(
+                         ['通信算子', '基线(us)', '比对(us)', 'Diff(ms)',
+                          '比对 Wait(ms)', '比对 Transit(ms)'], rows)) + '</div>')
     # 比对小结：自动归纳双卡差异的方向与集中点
     pts = []
     worse = [r for r in ov if isinstance(r.get('Diff Ratio'), (int, float))
@@ -897,13 +1120,21 @@ def sec_swimlane(mode, mw, num='7'):
                          fmt(mx), fmt(mn), n])
 
     src = esc(cards[0].get('source', '—')) if cards else '—'
+    sum_chart = chart_block({
+        'kind': 'donut', 'unit': 'ms', 'catName': '类别', 'valName': '持续时间(ms)',
+        'cats': [str(r[0]) for r in sum_rows],
+        'series': [{'name': '持续时间(ms)', 'data': [_f(r[1]) for r in sum_rows]}],
+        'notes': [f'自用 {r[2]} ms · 平均 {r[3]} ms · 最大 {r[4]} · 最小 {r[5]} · 次数 {r[6]}'
+                  for r in sum_rows],
+    }, height=320,
+        note='按持续时间占比展示三大类；悬停查看自用时间、平均/最大/最小持续时间与发生次数。')
     parts = [f'''<section id="swimlane"><h2>{num}. 泳道算子统计（Process / Ascend Hardware / Communication）</h2>
 <p class="text-slate-400 text-sm mb-3">按三大类聚合全部 Rank 的泳道算子：Thread 泳道→Process（host算子），
 Stream 泳道→Ascend Hardware（npu算子），通信域泳道→Communication；Plane 与总览泳道不统计。
 持续/自用时间为各 Rank 累加，平均持续时间 = 累计持续时间 ÷ 累计发生次数，最大/最小为跨 Rank 极值。
 数据源：{src}</p>
 <div class="card p-5"><h3>三大类汇总（跨全部 Rank 聚合）</h3>
-{html_table(['类别'] + OP_STAT_COLS, sum_rows)}</div>''']
+{sum_chart or html_table(['类别'] + OP_STAT_COLS, sum_rows)}</div>''']
 
     for cat in CATEGORY_ORDER:
         bucket = merged.get(cat) or {}
@@ -912,9 +1143,20 @@ Stream 泳道→Ascend Hardware（npu算子），通信域泳道→Communication
                  fmt(a['d'] / a['n'] if a['n'] else None),
                  fmt(a['mx']), fmt(a['mn']), a['n']]
                 for name, a in top]
+        top_chart = chart_block({
+            'kind': 'hbar', 'unit': 'ms', 'catName': '算子名称', 'valName': '耗时(ms)',
+            'cats': [str(r[0]) for r in rows],
+            'series': [{'name': '持续时间(ms)', 'data': [_f(r[1]) for r in rows]},
+                       {'name': '自用时间(ms)', 'data': [_f(r[2]) for r in rows]}],
+            'notes': [f'平均 {r[3]} ms · 最大 {r[4]} · 最小 {r[5]} · 次数 {r[6]}'
+                      for r in rows],
+            'reverse': True, 'wide': True,
+        }, height=max(260, 32 * len(rows)),
+            note='悬停查看平均 / 最大 / 最小持续时间与发生次数。')
         parts.append(f'<div class="card p-5 mt-4"><h3>{esc(cat)} — 持续耗时 Top 10 算子'
                      f'（去重后共 {len(bucket)} 个算子）</h3>'
-                     + html_table(['算子名称'] + OP_STAT_COLS, rows) + '</div>')
+                     + (top_chart or html_table(['算子名称'] + OP_STAT_COLS, rows))
+                     + '</div>')
 
     # 泳道小结：指出占比最高的类别与各类 Top1 算子，并给出解读
     tot_d = sum(_f(r[1]) for r in sum_rows) or 1.0
@@ -956,50 +1198,32 @@ def sec_appendix(mw, num='8'):
     files.sort()
     crel = cluster_rel(mw)
     ca_prefix = 'cluster_analysis_output/'
-    rows = []
+    tiles = []
     for rel, size in files:
         href = (f'{crel}/{rel[len(ca_prefix):]}'
                 if rel.startswith(ca_prefix) else rel)
-        rows.append([Raw(f'<a href="{esc(href)}" target="_blank">{esc(rel)}</a>'),
-                     f'{size/1024:.1f} KB'])
+        tiles.append((f'<a href="{esc(href)}" target="_blank">{esc(os.path.basename(rel))}</a>',
+                      [f'<span>相对路径</span><b>{esc(rel)}</b>',
+                       f'<span>大小</span><b>{size / 1024:.1f} KB</b>']))
     return f'''<section id="appendix"><h2>{num}. 附录：中间件清单</h2>
-<div class="card p-5">{html_table(['文件', '大小'], rows)}</div></section>'''
+<div class="card p-5">{tile_grid(tiles) or '<p class="text-slate-500">无中间件</p>'}</div></section>'''
 
 
-def sec_subreports(out_dir, num='8'):
-    """vendor 子报告（cluster-output-analysis / prof-compare）：iframe 内嵌 + 新窗口链接。"""
-    defs = [
-        ('reports/cluster_analysis_report.html', 'cluster-output-analysis 子报告',
-         'vendor cluster-output-analysis 生成：集群时间拆解、通信域映射、通信矩阵、'
-         '慢卡/慢链路等完整可视化'),
-        ('reports/compare_analysis_report.html', 'prof-compare 子报告',
-         'vendor prof-compare 生成：双卡算子 / Kernel / API / 模块维度比对完整可视化'),
-    ]
-    cards = []
-    for rel, name, desc in defs:
-        fp = os.path.join(out_dir, rel)
-        if not os.path.isfile(fp):
-            continue
-        cards.append(f'''<div class="card p-5 mt-4">
-<h3>{esc(name)} <a class="text-sm" href="{esc(rel)}" target="_blank">↗ 新窗口打开</a></h3>
-<p class="text-slate-400 text-sm mb-2">{esc(desc)}</p>
-<iframe src="{esc(rel)}" loading="lazy"
-  style="width:100%;height:840px;border:1px solid #334155;border-radius:.5rem;background:#0b1220;"></iframe>
-</div>''')
-    if not cards:
+def sec_prof_compare(mw_dir, out_dir, num):
+    path = Path(mw_dir) / DIR_REPORTS / PROF_COMPARE_REPORT
+    if not path.is_file():
         return ''
+    try:
+        link = quote(Path(os.path.relpath(path, out_dir)).as_posix())
+    except ValueError:
+        link = path.as_uri()
     return f'''<section id="subreports">
-  <h2>{num}. vendor 子报告（cluster-output-analysis / prof-compare）</h2>
-  {''.join(cards)}
-  <div class="card p-5 mt-4"><h3>子报告阅读指引</h3>
-  <p>cluster-output-analysis 子报告展示集群整体时序拆解、通信域映射与慢卡定位，
-  与本报告"集群总览 / 进阶分析"章节互为补充；prof-compare 子报告提供双卡差异的
-  算子 / Kernel / API 级归因，是"双卡比对"章节的明细展开。
-  建议先读主报告"结论与建议"，再按需深入对应子报告定位细节。</p></div>
-  <p class="text-xs text-slate-500 mt-2">子报告由 vendor 技能直接生成并嵌入本报告；
-  若内嵌区显示为空（浏览器安全策略），请点击"新窗口打开"。</p>
+<h2>{num}. prof-compare 子报告</h2>
+<div class="card p-5 mt-4">
+<p class="text-sm mb-2"><a href="{link}" target="_blank" rel="noopener">↗ 新窗口打开</a></p>
+<iframe src="{link}" title="prof-compare 双卡比对" loading="lazy" class="sub-frame"></iframe>
+</div>
 </section>'''
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -1022,49 +1246,56 @@ def main():
     exec_mode = 'msprof-analyze CLI' if detect.get('exec_mode') == 'cli' else 'fallback (built-in)'
 
     out_dir = os.path.dirname(os.path.abspath(args.output))
+    compare_stage = (workflow.get('stages') or {}).get('vendor_bridge_compare') or {}
+    show_compare = compare_stage.get('status') in (None, 'done', 'reused')
 
     if args.mode == 'cluster':
+        subreport = sec_prof_compare(mw_dir, out_dir, '8') if show_compare else ''
         sections = [
-            sec_overview(detect, advisor, cluster_summary, 'cluster', '1'),
+            sec_overview(detect, advisor, cluster_summary, 'cluster', '1', locator=locator),
             sec_conclusions(advisor, cluster_summary, compare, 'cluster', '2', locator=locator),
             sec_cluster(cluster_summary, '3'),
             sec_advisor(advisor, mw_dir, '4'),
             sec_recipes(cluster_summary, mw_dir, '5'),
             sec_compare(compare, '6'),
             sec_swimlane('cluster', mw_dir, '7'),
-            sec_subreports(out_dir, '8'),
-            sec_appendix(mw_dir, '9'),
+            subreport,
+            sec_appendix(mw_dir, '9' if subreport else '8'),
         ]
         nav_items = [('overview', '数据概览'), ('conclusions', '结论与建议'),
                      ('cluster', '集群总览'), ('advisor', '专家建议'),
                      ('recipes', '进阶分析'), ('compare', '双卡比对'),
-                     ('swimlane', '泳道算子'), ('subreports', 'vendor 子报告'),
-                     ('appendix', '附录')]
+                     ('swimlane', '泳道算子')]
+        if subreport:
+            nav_items.append(('subreports', 'prof-compare 子报告'))
+        nav_items.append(('appendix', '附录'))
         title = 'NPU 集群性能分析报告'
         subtitle = ('集群分析（Step×Rank）· 五大类进阶分析 · 通信占比极值卡比对 · '
-                    '泳道算子统计 · vendor 子报告')
+                    '泳道算子统计')
         mode_label = '集群模式'
     elif args.mode == 'compare':
+        subreport = sec_prof_compare(mw_dir, out_dir, '6') if show_compare else ''
         sections = [
-            sec_overview(detect, advisor, cluster_summary, 'compare', '1'),
+            sec_overview(detect, advisor, cluster_summary, 'compare', '1', locator=locator),
             sec_conclusions(advisor, cluster_summary, compare, 'compare', '2', locator=locator),
             sec_advisor(advisor, mw_dir, '3'),
             sec_compare(compare, '4'),
             sec_swimlane('compare', mw_dir, '5'),
-            sec_subreports(out_dir, '6'),
-            sec_appendix(mw_dir, '7'),
+            subreport,
+            sec_appendix(mw_dir, '7' if subreport else '6'),
         ]
         nav_items = [('overview', '数据概览'), ('conclusions', '结论与建议'),
                      ('advisor', '专家建议'), ('compare', '双卡比对'),
-                     ('swimlane', '泳道算子'), ('subreports', 'vendor 子报告'),
-                     ('appendix', '附录')]
+                     ('swimlane', '泳道算子')]
+        if subreport:
+            nav_items.append(('subreports', 'prof-compare 子报告'))
+        nav_items.append(('appendix', '附录'))
         title = 'NPU 集群比对报告'
-        subtitle = ('通信占比最大 vs 最小卡比对 · 劣化算子 / Kernel / 通信拆解 · '
-                    'vendor 子报告')
+        subtitle = '通信占比最大 vs 最小卡比对 · 劣化算子 / Kernel / 通信拆解'
         mode_label = '集群比对模式'
     else:
         sections = [
-            sec_overview(detect, advisor, None, 'single', '1'),
+            sec_overview(detect, advisor, None, 'single', '1', locator=locator),
             sec_conclusions(advisor, None, None, 'single', '2', locator=locator),
             sec_advisor(advisor, mw_dir, '3'),
             sec_swimlane('single', mw_dir, '4'),
@@ -1085,14 +1316,20 @@ def main():
         title=title, subtitle=subtitle, mode_label=mode_label,
         data_path=esc(detect.get('input', mw_dir)),
         gen_time=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        exec_mode=exec_mode, nav=nav, css=PAGE_CSS, spy_js=PAGE_JS,
+        exec_mode=exec_mode, nav=nav, css=PAGE_CSS + '\n' + BW_CSS,
+        spy_js=CHART_RENDER_JS + '\n' + PAGE_JS + '\n' + BW_JS,
         body='\n'.join(body_parts))
 
     if workflow.get('status') in ('partial', 'failed'):
         banner = ('<section class="card p-5"><h2>分析未完整完成</h2>'
                   f'<p>{esc("; ".join(workflow.get("errors", [])))}</p>'
                   '<p>缺失章节不代表健康；请查看 workflow_status.json。</p></section>')
-        html_out = html_out.replace('<section', banner + '<section', 1)
+        # 正文各章节已被 fold() 包成 <details class="sec">，横幅需插在第一个章节前
+        anchor = next((a for a in ('<details class="sec"', '<section') if a in html_out), None)
+        if anchor:
+            html_out = html_out.replace(anchor, banner + anchor, 1)
+        else:
+            html_out = html_out.replace('<div class="main">', '<div class="main">' + banner, 1)
     out = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, 'w', encoding='utf-8') as f:

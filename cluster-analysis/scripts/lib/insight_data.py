@@ -69,6 +69,17 @@ def trace_metadata(path):
 def iter_trace(path):
     # Existing parser uses bounded buffers, supports decimal ts strings and both
     # Chrome array and {traceEvents: [...]} exports without optional dependencies.
+    try:
+        import ijson
+    except ImportError:
+        ijson = None
+    if ijson is not None:
+        with path.open('rb') as source:
+            first = source.read(4096).lstrip()[:1]
+            if first in (b'[', b'{'):
+                source.seek(0)
+                yield from ijson.items(source, 'item' if first == b'[' else 'traceEvents.item')
+                return
     from swimlane_analyzer import iter_trace_events
     yield from iter_trace_events(str(path))
 
@@ -148,6 +159,8 @@ class Card:
         self.trace_start = None
         self.comms = []
         self.frees = defaultdict(list)
+        self.trace_computing = []
+        self.free_source = None
         self.compute = {}
 
     def close(self):
@@ -193,10 +206,18 @@ class Card:
             return
         self.compute_source = 'main_db:TASK+COMPUTE_TASK_INFO'
         sql = '''SELECT t.startNs AS startNs, t.endNs AS endNs, t.streamId AS streamId,
-                        t.taskType AS taskType, s.value AS sname,
-                        c.inputShapes AS ishapes, c.inputDataTypes AS idtypes
+                        t.taskType AS taskType, ${CORE_COLUMN} AS acceleratorCore, s.value AS sname,
+                        c.inputShapes AS ishapes, c.inputDataTypes AS idtypes,
+                        ${CONFIG_COLUMNS}
                  FROM TASK t JOIN COMPUTE_TASK_INFO c ON t.globalTaskId=c.globalTaskId
                  LEFT JOIN STRING_IDS s ON c.name=s.id ORDER BY t.startNs'''
+        config_columns = {'inputFormats': 'Input Formats', 'blockDim': 'Block Dim', 'mixBlockDim': 'Mix Block Dim',
+                          'outputShapes': 'Output Shapes', 'outputDataTypes': 'Output Data Types',
+                          'outputFormats': 'Output Formats'}
+        sql = sql.replace('${CORE_COLUMN}', 'c.taskType' if 'taskType' in self.columns['COMPUTE_TASK_INFO'] else 'NULL')
+        sql = sql.replace('${CONFIG_COLUMNS}', ', '.join(
+            f'c.{column} AS {column}' if column in self.columns['COMPUTE_TASK_INFO']
+            else f'NULL AS {column}' for column in config_columns))
         try:
             cur = self.conn.execute(sql)
         except sqlite3.Error:
@@ -211,17 +232,19 @@ class Card:
                 continue
             shape = self.text(row['ishapes'])
             dtype = self.text(row['idtypes'])
-            core = str(row['taskType'])
+            core = self.text(row['acceleratorCore'] if row['acceleratorCore'] is not None else row['taskType'])
             step = self.step_for(start)
-            key = (step, name, shape, dtype, core, '', '', '')
+            metadata = {label: self.text(row[column]) if column not in ('blockDim', 'mixBlockDim')
+                        else row[column] for column, label in config_columns.items() if row[column] is not None}
+            key = (step, name, shape, dtype, core, *(metadata.get(label, '') for label in config_columns.values()))
             item = self.compute.setdefault(key, {'rank': self.rank, 'step': step,
                 'name': name, 'shape': shape, 'dtype': dtype, 'core': core,
                 'total': 0, 'count': 0, 'largest': 0, 'start': start,
-                'stream': row['streamId'], 'row': {}})
+                'stream': row['streamId'], 'row': metadata})
             item['total'] += duration
             item['count'] += 1
             if duration > item['largest']:
-                item.update(largest=duration, start=start, stream=row['streamId'], row={})
+                item.update(largest=duration, start=start, stream=row['streamId'], row=metadata)
 
     def text(self, value):
         return self.strings.get(value, str(value or ''))
@@ -254,7 +277,10 @@ class Card:
                                'start': start, 'end': end, 'wait': ns(row.get('waitNs')),
                                'connection': row.get('connectionId'), 'op_id': row.get('opId'),
                                'lane': lane, 'semantic': semantic, 'members': members})
-        for row in query(self.conn, 'SELECT startNs,endNs FROM OVERLAP_ANALYSIS WHERE type=3 ORDER BY startNs'):
+        overlap = query(self.conn, 'SELECT startNs,endNs FROM OVERLAP_ANALYSIS WHERE type=3 ORDER BY startNs')
+        if overlap:
+            self.free_source = 'DB Overlap Analysis'
+        for row in overlap:
             start, end = ns(row['startNs']), ns(row['endNs'])
             for bounds in self.steps:
                 left, right = max(start, bounds['start']), min(end, bounds['end'])
@@ -262,6 +288,10 @@ class Card:
                     self.frees[bounds['id']].append((left, right))
         if not self.conn and self.trace.is_file():
             self._trace_events()
+            if self.frees:
+                self.free_source = 'Trace Overlap Analysis'
+        elif not overlap and self.trace.is_file():
+            self._trace_overlap()
         for step, pairs in list(self.frees.items()):
             merged = []
             for left, right in sorted(pairs):
@@ -273,6 +303,35 @@ class Card:
         self._csv_compute()
         if not self.compute and self.conn:
             self._db_compute()
+
+    def _trace_overlap(self):
+        """Fill missing DB overlap data from the same card's exported overlap lanes."""
+        processes = self.lanes['process']
+        overlap_by_pid = defaultdict(lambda: defaultdict(list))
+        for event in iter_trace(self.trace):
+            name = event.get('name')
+            pid = event.get('pid')
+            if name == 'process_name' and event.get('ph') == 'M':
+                processes[pid] = (event.get('args') or {}).get('name', '')
+            if name not in ('Free', 'Computing') or event.get('dur') is None:
+                continue
+            if processes.get(pid) not in (None, 'Overlap Analysis'):
+                continue
+            start = ns(event.get('ts'), 'us')
+            end = start + ns(event['dur'], 'us')
+            if start > 0 and end > start:
+                overlap_by_pid[pid][name].append((start, end))
+        for pid, intervals in overlap_by_pid.items():
+            if processes.get(pid) != 'Overlap Analysis':
+                continue
+            self.trace_computing.extend(intervals['Computing'])
+            for start, end in intervals['Free']:
+                for bounds in self.steps:
+                    left, right = max(start, bounds['start']), min(end, bounds['end'])
+                    if right > left:
+                        self.frees[bounds['id']].append((left, right))
+        if self.frees:
+            self.free_source = 'Trace Overlap Analysis'
 
     def _trace_events(self):
         trace_end = None
@@ -328,7 +387,8 @@ class Card:
             step = (self.step_for(start) if self.analysis_scope == 'whole_prof'
                     else str(row.get('Step Id') or self.step_for(start)))
             key = (step,row.get('Name',''),row.get('Input Shapes',''),row.get('Input Data Types',''),row.get('Accelerator Core',''),
-                   row.get('Input Formats',''),row.get('Block Dim',''),row.get('Mix Block Dim',''))
+                   *(row.get(field,'') for field in ('Input Formats', 'Block Dim', 'Mix Block Dim',
+                                                     'Output Shapes', 'Output Data Types', 'Output Formats')))
             item = self.compute.setdefault(key, {'rank': self.rank,'step':step,'name':row.get('Name',''),
                 'shape':row.get('Input Shapes',''),'dtype':row.get('Input Data Types',''),'core':row.get('Accelerator Core',''),
                 'total':0,'count':0,'largest':0,'start':start,'stream':row.get('Stream ID','?'),'row':row})
@@ -336,6 +396,53 @@ class Card:
             item['count'] += 1
             if duration > item['largest']:
                 item.update(largest=duration,start=start,stream=row.get('Stream ID','?'),row=row)
+
+    def compute_instance(self, item):
+        """Enrich only the displayed representative instance, requiring a unique TASK match."""
+        row = item['row']
+        start, duration = item['start'], item['largest']
+        end = start + duration
+        params = {name: row[field] for name, field in (
+            ('modelId', 'Model ID'), ('taskId', 'Task ID'), ('operatorType', 'Type'),
+            ('blockDim', 'Block Dim'), ('mixBlockDim', 'Mix Block Dim')) if row.get(field) not in (None, '', 'N/A')}
+        params['streamId'] = item['stream']
+        records = query(self.conn, '''SELECT t.* FROM TASK t JOIN COMPUTE_TASK_INFO c
+            ON t.globalTaskId=c.globalTaskId JOIN STRING_IDS s ON c.name=s.id
+            WHERE t.startNs=? AND t.endNs=? AND t.streamId=? AND s.value=? LIMIT 2''',
+            (start, end, item['stream'], item['name']))
+        pmu = {}
+        if len(records) == 1:
+            task = records[0]
+            for name in ('modelId', 'taskId', 'connectionId'):
+                if task.get(name) is not None:
+                    params[name] = task[name]
+            if task.get('taskType') is not None:
+                params['taskTypeId'] = task['taskType']
+                params['taskType'] = self.strings.get(task['taskType'])
+            pmu = {metric['value_name']: metric['value'] for metric in query(self.conn, '''
+                SELECT s.value AS value_name, p.value FROM TASK_PMU_INFO p
+                JOIN STRING_IDS s ON p.name=s.id WHERE p.globalTaskId=?''', (task.get('globalTaskId'),))
+                if re.fullmatch(r'ai[cv]_[a-z0-9_]+', metric['value_name'] or '')}
+        pmu_source = 'TASK_PMU_INFO' if pmu else 'kernel_details.csv'
+        def canonical(name):
+            if name in ('aicore_time(us)', 'aiv_time(us)'):
+                return ('aic' if name.startswith('aic') else 'aiv') + '_total_time'
+            return name.replace('(us)', '')
+        # Use CSV per metric when DB omits it, preserving separate timing units.
+        units = {name: 'ns' for name in pmu if name.endswith('_time')}
+        for name, value in row.items():
+            if not name.startswith(('aiv_', 'aic_', 'aicore_time')) or value in (None, '', 'N/A'):
+                continue
+            key = canonical(name)
+            if key not in pmu:
+                pmu[key] = value
+                if key.endswith('_time'):
+                    units[key] = 'μs'
+        return {'rank': self.rank, 'start_ns': start, 'end_ns': end, 'duration_ns': duration,
+                'count': item['count'], 'total_ns': item['total'], 'core': item['core'],
+                'inputs': [item['shape'], item['dtype'], row.get('Input Formats')],
+                'outputs': [row.get(f'Output {name}') for name in ('Shapes', 'Data Types', 'Formats')],
+                'params': params, 'pmu': pmu, 'pmu_time_units': units, 'pmu_source': pmu_source if pmu else None}
 
     def linked_host(self, event):
         rows = query(self.conn, 'SELECT * FROM CANN_API WHERE connectionId=?', (event['connection'],))
@@ -387,6 +494,11 @@ class Card:
         intervals=defaultdict(list)
         for row in rows:
             intervals[row['type']].append((max(start,ns(row['startNs'])),min(end,ns(row['endNs']))))
+        if self.free_source == 'Trace Overlap Analysis':
+            intervals[3] = sorted((max(start,a),min(end,b)) for pairs in self.frees.values()
+                                  for a,b in pairs if b > start and a < end)
+            intervals[0] = sorted((max(start,a),min(end,b)) for a,b in self.trace_computing
+                                  if b > start and a < end)
         out={}
         for kind,pairs in intervals.items():
             total=0;bound=None

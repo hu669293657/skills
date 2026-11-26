@@ -8,7 +8,7 @@ Modes:
   single              单卡数据
   cluster             多卡数据（有可用卡目录）
   cluster_output_only 输入仅含 cluster_analysis_output（无任何卡目录），
-                      只生成独立报告，不走完整 workflow
+                      缺少卡级 Prof，停止分析
 """
 import argparse
 import json
@@ -304,7 +304,7 @@ def main():
         cluster = check_cluster_output(cluster_root)
         cluster['expected_path'] = os.path.join(cluster_root, 'cluster_analysis_output')
     elif usable_n == 0:
-        # 无可用卡目录：输入可能仅为 cluster_analysis_output 文件夹
+        # 识别仅有集群输出件的输入，以便提示补齐卡级 Prof。
         # （兼容 db 新格式/旧格式 cluster.db/TEXT 模式）
         cluster = check_cluster_output(root)
         cluster['expected_path'] = os.path.join(root, 'cluster_analysis_output')
@@ -318,15 +318,7 @@ def main():
     existing = check_existing_outputs(root)
 
     if mode == 'cluster_output_only':
-        # 独立报告模式：只调用 cluster-output-analysis 出报告，不走完整 workflow
-        steps = {
-            'advisor': 'skip: no card dirs',
-            'swimlane': 'skip: no card dirs',
-            'cluster': 'skip: output exists',
-            'recipes': 'skip: standalone report only',
-            'compare': 'skip: no card dirs',
-            'report_mode': 'standalone',
-        }
+        steps = {'report_mode': None}
     else:
         steps = {
             'advisor': 'run per card',
@@ -367,6 +359,8 @@ def main():
                           'world_size_conflict': len(expected) > 1}
     if mixed:
         result['error'] = 'PyTorch and MindSpore data mixed in one root; analyze separately.'
+    elif mode == 'cluster_output_only':
+        result['error'] = '输入仅含 cluster_analysis_output，请同时提供可用的卡级 Prof 采集目录。'
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, 'w', encoding='utf-8') as f:
@@ -377,7 +371,7 @@ def main():
 
     print(f"mode={mode} cards={len(cards)} formats={[c['format'] for c in cards]}")
     if mode == 'cluster_output_only':
-        print('standalone: 输入仅含 cluster_analysis_output，将只生成独立报告')
+        print(result['error'])
     if cluster:
         print(f"cluster_output exists={cluster['exists']} recipes_done={cluster['recipes_done']}")
     for c in cards:

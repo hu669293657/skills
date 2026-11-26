@@ -17,6 +17,7 @@ import re
 import sys
 
 from lib.common import is_junk, iter_csv, read_csv_rows, read_json, to_f, us_to_ms
+from lib.communication_top import communication_tops
 from lib.config import AGG_ROWS, COMM_NAME_PATTERN
 from lib import prof_data
 from lib import analysis_scope
@@ -244,7 +245,9 @@ def analyze(cards):
             e['transit'] += transit
             e['idle'] += idle
             e['n'] += 1
-    top_comm = sorted(comm_totals.items(), key=lambda kv: -kv[1]['elapse'])[:10]
+    top_comm_by_type, top_comm = communication_tops(
+        ({'op_name': name, **stats} for name, stats in comm_totals.items()),
+        'op_name', 'elapse', overall_limit=1)
 
     # api aggregation
     api_totals = {}
@@ -261,6 +264,7 @@ def analyze(cards):
     return {'per_rank': per_rank, 'card_ctx': card_ctx, 'ratio': ratio,
             'dominant': dominant, 'reason': reason, 'top_ops': top_ops,
             'nb_top': nb_top, 'bb_top': bb_top, 'top_comm': top_comm,
+            'top_comm_by_type': top_comm_by_type,
             'top_apis': top_apis, 'wait_ratios': wait_ratios,
             'comm_totals': comm_totals}
 
@@ -317,7 +321,8 @@ def build_advice(res):
             items.append(('High', f"通信算子平均等待占比 {avg_wait*100:.0f}%（等待型通信），"
                                   f"各卡到达时间差异大，优先解决慢卡/负载不均"))
     if res['top_comm']:
-        name, e = res['top_comm'][0]
+        e = res['top_comm'][0]
+        name = e['op_name']
         items.append(('Low', f"耗时最大通信算子 {name}：elapse {e['elapse']:.3f}ms "
                              f"(wait {e['wait']:.3f}ms / transit {e['transit']:.3f}ms / "
                              f"idle {e['idle']:.3f}ms)"))
@@ -441,14 +446,14 @@ def write_report(res, cards, out_dir, root):
 
     lines.append('## 3. 通信分析')
     lines.append('')
-    if res['top_comm']:
-        lines.append('### Top 10 通信算子（全部卡聚合，单位 ms）')
-        lines.append('')
-        lines.append('| 算子 | Elapse | Wait | Transit | Idle | 次数 |')
-        lines.append('|---|---|---|---|---|---|')
-        for name, e in res['top_comm']:
-            lines.append(f'| {name} | {e["elapse"]:.3f} | {e["wait"]:.3f} | '
-                         f'{e["transit"]:.3f} | {e["idle"]:.3f} | {e["n"]} |')
+    if res['top_comm_by_type']:
+        lines.append('按通信类型排列各自的 Top 10，以全部卡累计 Elapse 降序排列，单位 ms。')
+        for kind, ops in res['top_comm_by_type'].items():
+            lines.extend(['', f'### {kind}', '', '| 算子 | Elapse | Wait | Transit | Idle | 次数 |',
+                          '|---|---|---|---|---|---|'])
+            for e in ops:
+                lines.append(f'| {e["op_name"]} | {e["elapse"]:.3f} | {e["wait"]:.3f} | '
+                             f'{e["transit"]:.3f} | {e["idle"]:.3f} | {e["n"]} |')
     else:
         lines.append('未发现通信算子数据。')
     lines.append('')
@@ -500,6 +505,7 @@ def write_report(res, cards, out_dir, root):
                               if res['per_rank'][r]['Stage'] else 0}
                      for r in ranks},
         'top_op': res['top_ops'][0][0] if res['top_ops'] else None,
+        'top_comm_by_type': res['top_comm_by_type'],
         'advice_count': len(items),
         'advice': [{'level': lv, 'text': tx} for lv, tx in items[:10]],
     }

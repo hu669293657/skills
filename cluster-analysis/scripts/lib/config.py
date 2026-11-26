@@ -18,6 +18,7 @@ DIR_COMPARE = 'compare'
 DIR_REPORTS = 'reports'
 DIR_SWIMLANE = 'swimlane'
 REPORT_HTML = 'performance_report.html'
+PROF_COMPARE_REPORT = 'compare_analysis_report.html'
 
 # vendor_bridge 返回码约定：2 = 输入缺失/不支持，跳过不算失败
 VENDOR_RC_SKIP = 2

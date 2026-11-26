@@ -266,12 +266,13 @@ class WholeProfTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout.decode('utf-8') + result.stderr.decode('utf-8'))
         state = json.loads((out / 'workflow_status.json').read_text(encoding='utf-8'))
         self.assertEqual(state['stages']['compare_fallback']['status'], 'unsupported')
-        self.assertEqual(state['stages']['vendor_bridge_cluster']['status'], 'unsupported')
+        self.assertEqual(state['stages']['vendor_bridge_compare']['status'], 'skipped')
         report = (out / 'performance_report.html').read_text(encoding='utf-8')
+        self.assertNotIn('href="#subreports"', report)
         self.assertIn('证据不足', report)
         self.assertNotIn('计算占主导，属计算密集负载', report)
 
-    def test_unknown_optional_overlap_skips_vendor_zero_filling(self):
+    def test_unknown_optional_overlap_keeps_prof_compare(self):
         cards = build_cards(self.root, [(0, 2, [WINDOW_ROW]), (1, 3, [WINDOW_ROW])])
         for card in cards:
             with closing(sqlite3.connect(Path(card) / 'ASCEND_PROFILER_OUTPUT/analysis.db')) as c:
@@ -283,7 +284,8 @@ class WholeProfTests(unittest.TestCase):
                                 env={**os.environ, 'PYTHONUTF8': '1'}, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout.decode('utf-8') + result.stderr.decode('utf-8'))
         state = json.loads((out / 'workflow_status.json').read_text(encoding='utf-8'))
-        self.assertEqual(state['stages']['vendor_bridge_cluster']['status'], 'unsupported')
+        self.assertEqual(state['stages']['vendor_bridge_compare']['status'], 'done')
+        self.assertTrue((out / 'reports/compare_analysis_report.html').exists())
         self.assertFalse((out / 'reports/cluster_analysis_report.html').exists())
 
 
