@@ -13,8 +13,11 @@ generate_cluster_report.py
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime
+from html import escape
+from pathlib import Path
 
 # 同目录导入分析判断共享模块（与 cluster_data_extractor.py 中文结论口径一致;
 # 缺失时降级为不渲染「分析与判断」块, 报告其余部分不受影响）
@@ -25,6 +28,8 @@ try:
     import advanced_insights as _insights
 except Exception:
     _insights = None
+
+from compare_metrics import communication_top_differences, inline_json, label_order, rank_chart_data
 
 US_TO_MS = 1000.0
 
@@ -67,12 +72,6 @@ def contrib_kpi(contrib, delta):
 
 
 # ==================== 带宽劣化智能解读 ====================
-
-def filter_total_ops(rows, name_key):
-    """防御性过滤: 剔除算子列表中的 Total 汇总行（旧版提取器可能未过滤）"""
-    return [r for r in rows
-            if not str(r.get(name_key, "")).strip().lower().startswith("total")]
-
 
 def get_eff_bw(entry):
     """读取带宽记录的有效吞吐字段（旧 JSON 无此字段时按 avg_size/avg_time 现算）"""
@@ -197,12 +196,18 @@ def merge_advanced(data_a, data_b, external_advanced=None):
 # ==================== 进阶分析渲染 ====================
 
 def _adv_table(headers, rows):
-    """进阶分析小表：rows 为已拼好的 <tr> 内容片段列表。"""
+    """进阶分析小表：rows 为已拼好的 <tr> 内容片段列表。
+
+    布局约定: 表格宽度随容器自适应, 长文本列加 col-text 类允许换行,
+    数值列保持不换行（见模板 .adv-table 样式）, 避免整表被撑破产生横向拖动。
+    """
     if not rows:
         return ""
     th = "".join(f'<th class="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>' for h in headers)
     trs = "".join(f'<tr class="border-t border-slate-800 hover:bg-slate-800/40">{r}</tr>' for r in rows)
-    return f'<div class="overflow-x-auto rounded-lg border border-slate-800"><table class="w-full text-sm text-slate-300"><thead><tr class="bg-slate-900/60">{th}</tr></thead><tbody>{trs}</tbody></table></div>'
+    return (f'<div class="table-wrap rounded-lg border border-slate-800">'
+            f'<table class="adv-table w-full text-sm text-slate-300">'
+            f'<thead><tr class="bg-slate-900/60">{th}</tr></thead><tbody>{trs}</tbody></table></div>')
 
 
 def _insights_block(items, title="分析与判断"):
@@ -241,7 +246,7 @@ def _render_feature_section(feat, badge_map, show_desc=True):
                 for m in metrics:
                     o = overall.get(m) or {}
                     fmt = lambda v: "—" if v is None else f"{v}"
-                    rows.append(f'<td class="px-3 py-2 font-medium text-white">{m}</td>'
+                    rows.append(f'<td class="col-text px-3 py-2 font-medium text-white">{m}</td>'
                                 f'<td class="px-3 py-2 text-right">{fmt(o.get("base_avg_ms"))}</td>'
                                 f'<td class="px-3 py-2 text-right">{fmt(o.get("cur_avg_ms"))}</td>'
                                 f'<td class="px-3 py-2 text-right font-mono">{fmt(o.get("diff_avg_ms"))}</td>')
@@ -267,7 +272,7 @@ def _render_feature_section(feat, badge_map, show_desc=True):
                 rows = []
                 for r0 in reasons[:10]:
                     pct = r0.get("pct", 0)
-                    rows.append(f'<td class="px-3 py-2">{r0.get("reason", "-")}</td>'
+                    rows.append(f'<td class="col-text px-3 py-2">{r0.get("reason", "-")}</td>'
                                 f'<td class="px-3 py-2 text-right">{r0.get("count", "-")}</td>'
                                 f'<td class="px-3 py-2 text-right font-mono">{r0.get("total_ms", "-")}</td>'
                                 f'<td class="px-3 py-2 text-right font-mono {"text-orange-400" if (pct or 0) > 30 else ""}">{pct}</td>')
@@ -280,11 +285,11 @@ def _render_feature_section(feat, badge_map, show_desc=True):
                 items = data.get("items") or []
                 rows = []
                 for it in items[:10]:
-                    rows.append(f'<td class="px-3 py-2 font-mono text-white">{it.get("op", "-")}</td>'
+                    rows.append(f'<td class="col-text px-3 py-2 font-mono text-white">{it.get("op", "-")}</td>'
                                 f'<td class="px-3 py-2 text-center font-mono">{it.get("slow_rank", "-")}</td>'
                                 f'<td class="px-3 py-2 text-center font-mono">{it.get("fast_rank", "-")}</td>'
                                 f'<td class="px-3 py-2 text-right font-mono text-orange-400">{it.get("duration_ms", "-")}</td>'
-                                f'<td class="px-3 py-2 text-xs">{it.get("reason", "")}</td>')
+                                f'<td class="col-text px-3 py-2 text-xs">{it.get("reason", "")}</td>')
                 if rows:
                     body += ('<div class="text-xs text-slate-400 mb-1">通信瓶颈 Top 10（慢/快 Rank 耗时差，ms）</div>'
                              + _adv_table(["通信算子", "慢 Rank", "快 Rank", "耗时差 (ms)", "推断原因"], rows))
@@ -356,23 +361,27 @@ def render_advanced_html(advanced):
                 inner += f'<div class="text-xs font-semibold text-indigo-300 mb-2">{tag_txt}</div>'
             inner += f'{head}{body}'
         else:
+            # A/B 对照: 宽屏并排双栏, 窄屏自动堆叠（样式见模板 .adv-ab-grid）
+            items = ""
             for i, feat in enumerate(group):
                 head, body = _render_feature_section(feat, badge_map, show_desc=(i == 0))
                 ctag = feat.get("cluster")
                 tag_txt = cluster_tag_map.get(ctag, f"集群{ctag}" if ctag else f"结果 {i + 1}")
-                sep = ' mb-5 pb-5 border-b border-slate-800' if i < len(group) - 1 else ''
-                inner += (f'<div class="{sep}">'
+                items += (f'<div class="adv-ab-item">'
                           f'<div class="text-xs font-semibold text-indigo-300 mb-2">{tag_txt}</div>'
                           f'{head}{body}</div>')
             # A/B 对照综合判断：双侧均有成功数据时输出「综合判断（基准 vs 对比）」块
+            extra = ""
             if _insights is not None and len(group) >= 2:
                 try:
                     fa = next((f for f in group if f.get("cluster") == "A"), group[0])
                     fb = next((f for f in group if f.get("cluster") == "B"), group[-1])
-                    inner += _insights_block(_insights.compare_insights(fa, fb),
-                                             title="综合判断（基准 vs 对比）")
+                    block = _insights_block(_insights.compare_insights(fa, fb),
+                                            title="综合判断（基准 vs 对比）")
+                    extra = f'<div class="adv-ab-full">{block}</div>' if block else ""
                 except Exception:
                     pass  # 综合判断生成失败不影响 A/B 数据展示
+            inner += f'<div class="adv-ab-grid">{items}</div>{extra}'
         blocks += f'<div class="card p-5 mb-4">{inner}</div>'
 
     if not blocks:
@@ -390,13 +399,40 @@ def render_advanced_html(advanced):
 
 # ==================== 比对报告 ====================
 
+def render_communication_differences(data_a, data_b):
+    """按通信类型分组的算子耗时差（B − A）双向柱状图（前端 ECharts 渲染）。
+
+    Python 侧只输出分组数据 JSON（#comm-diff-data）与折叠面板容器；图表在面板
+    展开时惰性初始化，避免隐藏容器宽度为 0 导致绘制异常。
+    """
+    groups, notes = communication_top_differences(data_a, data_b)
+    result = ['<p class="comm-diff-note">按同名算子的平均耗时差（B − A）降序排列：'
+              '正值（红）表示 B 更慢，负值（绿）表示 B 更快；条长按该类型内最大差值缩放。</p>']
+    result.extend(f'<p class="comm-diff-note">{escape(note)}</p>' for note in notes)
+    if not groups:
+        result.append('<p class="comm-diff-note">暂无两侧均有耗时的通信算子。</p>')
+    payload = []
+    for index, (kind, operators) in enumerate(groups.items()):
+        chart_id = f"comm-chart-{index}"
+        result.append(f'<details class="comm-diff-group" data-chart="{chart_id}"'
+                      f'{" open" if index == 0 else ""}>'
+                      f'<summary>{escape(kind)} <span>· {len(operators)} 个算子</span></summary>'
+                      f'<div class="comm-chart" id="{chart_id}"></div></details>')
+        payload.append({"id": chart_id, "kind": kind, "rows": [
+            {"name": name, "a": a, "b": b, "delta": delta}
+            for name, a, b, delta in operators]})
+    result.append(f'<script id="comm-diff-data" type="application/json">'
+                  f'{inline_json(payload)}</script>')
+    return "".join(result)
+
+
 def generate_compare_report(data_a, data_b, template_path, output_path, advanced_json=None):
     with open(template_path, "r", encoding="utf-8") as f:
         html = f.read()
 
     sa = data_a.get("step_summary", {})
     sb = data_b.get("step_summary", {})
-    steps = sorted(set(list(sa.keys()) + list(sb.keys())), key=lambda x: int(x) if x.isdigit() else x)
+    steps = sorted(sa.keys() | sb.keys(), key=label_order)
     ra = data_a.get("rank_summary", {})
     rb = data_b.get("rank_summary", {})
 
@@ -516,8 +552,8 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
     comm_text, comm_contrib_color, comm_contrib_note = contrib_kpi(comm_contrib, delta_comm)
 
     r = {
-        "{{PATH_A}}": data_a.get("data_dir", "?"),
-        "{{PATH_B}}": data_b.get("data_dir", "?"),
+        "{{PATH_A}}": escape(str(data_a.get("data_dir", "?"))),
+        "{{PATH_B}}": escape(str(data_b.get("data_dir", "?"))),
         "{{GENERATE_TIME}}": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "{{STATUS_TEXT}}": status_text,
         "{{RANK_A}}": str(len(ra)), "{{RANK_B}}": str(len(rb)),
@@ -559,7 +595,7 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
             else '<div class="text-xs text-slate-500">无逐类型带宽数据</div>'),
         "{{DIAGNOSIS_TEXT}}": diagnosis,
         "{{LOAD_TYPE_TEXT}}": load_type_text,
-        "{{STEP_LABELS}}": json.dumps(steps),
+        "{{STEP_LABELS}}": inline_json(steps),
         "{{A_STAGE_BAR}}": json.dumps([us_to_ms(sa.get(s, {"avg_stage": 0})["avg_stage"]) for s in steps]),
         "{{B_STAGE_BAR}}": json.dumps([us_to_ms(sb.get(s, {"avg_stage": 0})["avg_stage"]) for s in steps]),
         "{{A_PIE_COMPUTE_PCT}}": str(a_comp_pct), "{{A_PIE_COMM_PCT}}": str(a_comm_pct), "{{A_PIE_FREE_PCT}}": str(a_free_pct),
@@ -610,34 +646,7 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
     ]
     r["{{WATERFALL_DATA}}"] = json.dumps(wf, ensure_ascii=False)
 
-    # 通信算子差异 — 需要统一单位到 ms
-    is_a_text = data_a.get("format") == "text"
-    is_b_text = data_b.get("format") == "text"
-    # 修复: 防御性过滤 Total 汇总行（旧版提取器产出的 JSON 可能仍含该行）
-    ops_a_raw = filter_total_ops(filter_total_ops(data_a.get("comm_time_ops", []), "op_name"), "hccl_op_name")
-    ops_b_raw = filter_total_ops(filter_total_ops(data_b.get("comm_time_ops", []), "op_name"), "hccl_op_name")
-    ops_a = {op.get("op_name", op.get("hccl_op_name", "?")): op for op in ops_a_raw}
-    ops_b = {op.get("op_name", op.get("hccl_op_name", "?")): op for op in ops_b_raw}
-    all_ops = set(list(ops_a.keys()) + list(ops_b.keys()))
-    diff_list = []
-    for op in all_ops:
-        ea_raw = ops_a.get(op, {}).get("avg_elapsed", ops_a.get(op, {}).get("avg_elapsed_time", 0))
-        eb_raw = ops_b.get(op, {}).get("avg_elapsed", ops_b.get(op, {}).get("avg_elapsed_time", 0))
-        # 统一到 ms: TEXT 模式已经是 ms，DB 模式需要 μs→ms
-        ea = float(ea_raw or 0) if is_a_text else us_to_ms(float(ea_raw or 0))
-        eb = float(eb_raw or 0) if is_b_text else us_to_ms(float(eb_raw or 0))
-        diff = eb - ea
-        diff_list.append((op, diff))
-    diff_list.sort(key=lambda x: x[1], reverse=True)
-    top_diff = diff_list[:10]
-    if top_diff:
-        r["{{COMM_DIFF_HAS_DATA}}"] = "true"
-        r["{{COMM_DIFF_LABELS}}"] = json.dumps([d[0][:30] for d in top_diff])
-        r["{{COMM_DIFF_VALUES}}"] = json.dumps([round(d[1], 2) for d in top_diff])
-    else:
-        r["{{COMM_DIFF_HAS_DATA}}"] = "false"
-        r["{{COMM_DIFF_LABELS}}"] = "[]"
-        r["{{COMM_DIFF_VALUES}}"] = "[]"
+    r["{{COMM_DIFF_GROUPS}}"] = render_communication_differences(data_a, data_b)
 
     # 带宽对比
     if bwa or bwb:
@@ -654,28 +663,12 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
         r["{{A_BW_BAR}}"] = "[]"
         r["{{B_BW_BAR}}"] = "[]"
 
-    # Rank 差异表
-    all_ranks = sorted(set(list(ra.keys()) + list(rb.keys())), key=lambda x: int(x) if x.isdigit() else 999)
-    rank_diff_rows = ""
-    for rid in all_ranks:
-        sa_val = ra.get(rid, {}).get("avg_stage")
-        sb_val = rb.get(rid, {}).get("avg_stage")
-        if sa_val is None or sb_val is None:
-            # 两集群 Rank 集合不重叠时无法按 rank 配对，避免出现假的 ±100% 差值
-            sa_txt = us_to_ms(sa_val) if sa_val is not None else "-"
-            sb_txt = us_to_ms(sb_val) if sb_val is not None else "-"
-            rank_diff_rows += f'<tr><td class="p-3 font-bold text-white">{rid}</td><td class="text-right p-3 text-slate-300">{sa_txt}</td><td class="text-right p-3 text-slate-300">{sb_txt}</td><td class="text-right p-3 delta-neutral">-</td><td class="text-right p-3 delta-neutral">-</td><td class="text-center p-3"><span class="delta-neutral">→ 单侧数据</span></td></tr>'
-            continue
-        diff = sb_val - sa_val
-        pct = safe_div(diff, sa_val) * 100 if sa_val else 0
-        if diff > 0:
-            trend = '<span class="delta-up">↑ 劣化</span>'
-        elif diff < 0:
-            trend = '<span class="delta-down">↓ 改善</span>'
-        else:
-            trend = '<span class="delta-neutral">→ 持平</span>'
-        rank_diff_rows += f'<tr><td class="p-3 font-bold text-white">{rid}</td><td class="text-right p-3 text-slate-300">{us_to_ms(sa_val)}</td><td class="text-right p-3 text-slate-300">{us_to_ms(sb_val)}</td><td class="text-right p-3 {"delta-up" if diff>0 else "delta-down" if diff<0 else "delta-neutral"}">{fmt_signed(us_to_ms(diff))}</td><td class="text-right p-3 {"delta-up" if pct>0 else "delta-down" if pct<0 else "delta-neutral"}">{fmt_signed(round(pct, 1))}%</td><td class="text-center p-3">{trend}</td></tr>'
-    r["{{RANK_DIFF_ROWS}}"] = rank_diff_rows
+    if "{{RANK_CHARTS}}" in html:
+        assets = Path(__file__).resolve().parent.parent / "templates"
+        rank_html = (assets / "rank_charts.html").read_text(encoding="utf-8")
+        rank_js = (assets / "rank_charts.js").read_text(encoding="utf-8")
+        r["{{RANK_CHARTS}}"] = (rank_html.replace("{{RANK_CHART_JS}}", rank_js)
+                               .replace("{{RANK_CHART_DATA}}", inline_json(rank_chart_data(data_a, data_b))))
 
     # 劣化根因列表
     deg_items = ""
@@ -734,8 +727,7 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
             ' 重新生成本报告（可补充双集群时间拆解对比）。</p></div></div>'
         )
 
-    for key, val in r.items():
-        html = html.replace(key, val)
+    html = re.sub(r"\{\{[A-Z0-9_]+\}\}", lambda match: r.get(match[0], match[0]), html)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"比对报告已生成: {output_path}")

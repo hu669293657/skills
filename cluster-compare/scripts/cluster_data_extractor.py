@@ -240,11 +240,12 @@ def extract_db_old(db_path):
         rows = query_to_dicts(conn,
             "SELECT op_name, AVG(elapse_time) as avg_elapsed, AVG(transit_time) as avg_transit, "
             "AVG(wait_time) as avg_wait, AVG(synchronization_time) as avg_sync "
-            "FROM communication_time_info GROUP BY op_name ORDER BY avg_elapsed DESC LIMIT 20")
+            "FROM communication_time_info GROUP BY op_name ORDER BY avg_elapsed DESC, op_name")
         # 修复: 过滤 Total 汇总行（非真实算子）
         rows = filter_total_ops(rows, "op_name")
         if rows:
             data["comm_time_ops"] = rows
+            data["comm_time_ops_complete"] = True
         else:
             data["tables_empty"].append("communication_time_info")
 
@@ -331,11 +332,12 @@ def extract_db_new(db_path):
         rows = query_to_dicts(conn,
             "SELECT hccl_op_name, AVG(elapsed_time) as avg_elapsed, AVG(transit_time) as avg_transit, "
             "AVG(wait_time) as avg_wait, AVG(synchronization_time) as avg_sync, AVG(idle_time) as avg_idle "
-            "FROM ClusterCommunicationTime GROUP BY hccl_op_name ORDER BY avg_elapsed DESC LIMIT 20")
+            "FROM ClusterCommunicationTime GROUP BY hccl_op_name ORDER BY avg_elapsed DESC, hccl_op_name")
         # 修复: 过滤 Total 汇总行（非真实算子）
         rows = filter_total_ops(rows, "hccl_op_name")
         if rows:
             data["comm_time_ops"] = rows
+            data["comm_time_ops_complete"] = True
         else:
             data["tables_empty"].append("ClusterCommunicationTime")
 
@@ -506,46 +508,40 @@ def extract_text(text_dir):
                 comm_data = {}
         # 解析通信算子耗时统计
         # 结构: {rank_tuple: {step_id: {op_name@group: {rank_id, communication_time_info: {...}, communication_bandwidth_info: {...}}}}}
-        op_stats = {}  # {op_name: {elapsed: [], transit: [], wait: [], sync: []}}
-        for rank_tuple, step_dict in comm_data.items():
+        op_stats = {}  # 每个算子累计传输、等待、同步耗时和样本数
+        for step_dict in comm_data.values():
             if not isinstance(step_dict, dict):
                 continue
-            for step_id, op_dict in step_dict.items():
+            for op_dict in step_dict.values():
                 if not isinstance(op_dict, dict):
                     continue
                 for op_name, rank_info in op_dict.items():
                     if not isinstance(rank_info, dict):
                         continue
-                    # 跳过 Total 汇总行
-                    clean_name = op_name.split("@")[0]
+                    clean_name = op_name.split("@", 1)[0]
                     if clean_name.lower().startswith("total"):
                         continue
-                    time_info = rank_info.get("communication_time_info", {})
+                    time_info = rank_info.get("communication_time_info")
                     if not isinstance(time_info, dict):
                         continue
-                    if clean_name not in op_stats:
-                        op_stats[clean_name] = {"elapsed": [], "transit": [], "wait": [], "sync": []}
-                    # 时间单位: ms (TEXT 模式 JSON 中已经是 ms)
-                    op_stats[clean_name]["elapsed"].append(float(time_info.get("transit_time_ms", 0) or 0) +
-                                                           float(time_info.get("wait_time_ms", 0) or 0) +
-                                                           float(time_info.get("synchronization_time_ms", 0) or 0))
-                    op_stats[clean_name]["transit"].append(float(time_info.get("transit_time_ms", 0) or 0))
-                    op_stats[clean_name]["wait"].append(float(time_info.get("wait_time_ms", 0) or 0))
-                    op_stats[clean_name]["sync"].append(float(time_info.get("synchronization_time_ms", 0) or 0))
-        # 求均值并排序
+                    stats = op_stats.setdefault(clean_name, [0.0, 0.0, 0.0, 0])
+                    for i, field in enumerate(("transit_time_ms", "wait_time_ms", "synchronization_time_ms")):
+                        stats[i] += float(time_info.get(field, 0) or 0)
+                    stats[3] += 1
+        # TEXT 的通信算子耗时已是 ms。保留全量算子均值供双集群按类型匹配。
         comm_time_ops = []
-        for op_name, stats in op_stats.items():
-            n = len(stats["elapsed"]) if stats["elapsed"] else 1
+        for op_name, (transit, wait, sync, count) in op_stats.items():
             comm_time_ops.append({
                 "op_name": op_name,
-                "avg_elapsed": round(sum(stats["elapsed"]) / n, 4),
-                "avg_transit": round(sum(stats["transit"]) / n, 4),
-                "avg_wait": round(sum(stats["wait"]) / n, 4),
-                "avg_sync": round(sum(stats["sync"]) / n, 4),
+                "avg_elapsed": (transit + wait + sync) / count,
+                "avg_transit": transit / count,
+                "avg_wait": wait / count,
+                "avg_sync": sync / count,
             })
-        comm_time_ops.sort(key=lambda x: x["avg_elapsed"], reverse=True)
+        comm_time_ops.sort(key=lambda op: (-op["avg_elapsed"], op["op_name"]))
         if comm_time_ops:
-            data["comm_time_ops"] = comm_time_ops[:20]
+            data["comm_time_ops"] = comm_time_ops
+            data["comm_time_ops_complete"] = True
         else:
             data["tables_empty"].append("cluster_communication.json (no valid ops)")
     else:

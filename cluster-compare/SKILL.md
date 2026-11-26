@@ -85,7 +85,8 @@ FROM step_statistic_info GROUP BY step_id;
 -- 新格式表名: ClusterStepTraceTime, 字段名略有不同
 
 -- 3. 各 Rank 时间明细
-SELECT rank_id, step_id, compute_time, communication_time, free_time, stage_time
+SELECT rank_id, step_id, compute_time, communication_time, free_time, stage_time,
+       overlap_communication_time, pure_communication_time
 FROM step_statistic_info ORDER BY step_id, rank_id;
 
 -- 4. 通信时间汇总（如有数据）
@@ -109,10 +110,10 @@ SELECT COUNT(DISTINCT hostUid) FROM HostInfo;
 **TEXT 模式文件解析**（参考 `references/text_schema.md`）：
 - 读取 `cluster_step_trace_time.csv`：解析 Step/Type/Index/Computing/Communication/Free/Stage 等列
 - 读取 `communication_group.json`：解析 collective/p2p 通信组信息，提取 rank 列表作为基础信息
-- 读取 `cluster_communication.json`（如有）：解析通信算子耗时统计，提取 Top10 算子的 elapsed/transit/wait/sync 时间
+- 读取 `cluster_communication.json`（如有）：解析通信算子耗时统计，保留各算子的 elapsed/transit/wait/sync 均值，供双集群按类型排名
 - 读取 `cluster_communication_matrix.json`（如有）：解析 4 层嵌套 JSON 通信矩阵，提取 src_rank/dst_rank/transport_type/bandwidth/transit_size，按传输类型（LOCAL/HCCS/RDMA）聚合带宽
 - **路径检测**：支持 `data_dir/cluster_step_trace_time.csv` 或 `data_dir/cluster_analysis_output/cluster_step_trace_time.csv` 两种结构
-- **单位注意**：TEXT 模式 JSON 中时间单位为 ms（毫秒），DB 模式为 μs（微秒），脚本需自动适配
+- **单位注意**：Rank/Step 时间在 DB 和 TEXT CSV 中均为 μs。通信算子时间在 DB 中为 μs，在 TEXT 通信 JSON 中为 ms
 
 #### 步骤 1.3: 内嵌进阶分析（提取时同步执行，默认开启）
 
@@ -167,22 +168,25 @@ MD 文件必须包含以下章节：
      - 通信贡献度 = (ΔComm / ΔStage) × 100%
      - 空闲贡献度 = (ΔFree / ΔStage) × 100%
      - 贡献度可超 100% 或为负（分项变化方向相反、相互抵消所致），解读时以"占 Stage 变化比例、各分项可相互抵消"口径说明，不得简单当作"占比"
-   - 二级算子归因：通信时间差值 Top5 算子
+   - 二级算子归因：按通信类型查看耗时差异 Top 10
    - 带宽劣化：各 band_type 均值带宽下降百分比 + **有效吞吐**（总传输量/总传输时间，SUM/SUM 或 avg_size/avg_time）对比
 2. **渲染比对报告**，报告包含：
    - **核心 KPI 卡片**：Stage 耗时增幅、通信变化贡献度（带显著性门控与配色说明）、计算变化贡献度、带宽变化（均值口径 + 有效吞吐口径）、集群规模对比
    - **Step 核心耗时对比**：并排柱状图（集群A vs 集群B），按 Step 分组
    - **负载类型转换**：双饼图对比（A 的计算/通信/空闲占比 vs B 的占比）
    - **劣化归因瀑布图**：计算/通信/空闲对总劣化的贡献度分解
-   - **通信算子差异 Top10**：表格 + 柱状图，展示耗时差最大的算子
+   - **通信算子耗时差异 Top 10**：按 AllReduce、AllGather、Send、Receive 等算子类型分别展示。将两侧同名算子的平均耗时统一为 ms，按 B − A 降序排名，每类最多 10 个。旧提取 JSON 可能只含全局 Top 20，要获得完整排名须重新提取两份 JSON
    - **带宽对比柱状图**：各 band_type 的 A vs B 带宽对比
-   - **Rank 级差异热力图**：每个 Rank 的 Stage 时间差值
+   - **Rank 级耗时走势**：同一横轴按 Step + Rank 对齐 A/B。Step 和指标可多选，每组 Step × 指标用 A 实线、B 虚线展示总耗时（Stage）、总通信、总 Free、通算重合、纯通信或纯计算。默认按 Rank 编号升序，可切换方向，或按所选排序 Step 的 A/B 总耗时、总通信、总 Free、通算重合、纯通信排序
+   - **Rank 级差异走势**：同样支持多 Step、多指标与排序。五项指标可切换差值（B − A，ms）与变化率（(B − A) ÷ A，%），还可按该差异排序。任一侧缺值时断线，A 为零时变化率留空
+   - 两张图悬浮显示该 Step 和 Rank 的 A/B 各指标值。万卡全览按屏幕像素保留各段峰谷，缩放、平移或输入 Rank 编号可查看逐卡原值
    - **劣化根因总结 & 行动建议**：P0/P1/P2 优先级问题列表
    - **进阶分析章节**：`{{ADVANCED_ANALYSIS_HTML}}` 自动合并渲染两路结果——集群 A/B JSON 内嵌的 `advanced_analysis`（阶段 1 提取时已同步执行，同名 feature 按集群归属 A/B 对照展示）与 `--advanced` 外部 JSON（含双集群时间拆解对比）；两者皆无时显示引导卡；每个进阶 feature 卡片尾部渲染中文**「分析与判断」**块，A/B 对照展示时追加**「综合判断（基准 vs 对比）」**块（结论由 `scripts/advanced_insights.py` 规则化生成，优先复用单集群 JSON 内嵌 `analysis` 字段）
-3. **生成 MD 比对报告**（与 HTML 同步，结论一致）：
+3. **生成 HTML 和 MD 比对报告**（Markdown 链接到 HTML 的两张 Rank 图）：
    ```bash
+   python scripts/generate_cluster_report.py --data-a <a.json> --data-b <b.json> --output compare.html
    python scripts/generate_cluster_md.py --data-a <a.json> --data-b <b.json> --output compare.md
-   # 可选: 追加 --advanced 外部进阶分析 JSON; --top-ranks 控制 Rank 级差异表行数（默认 20，0=全部）
+   # 可选: --advanced 合并外部进阶分析 JSON；HTML 文件不同名或不在同目录时，用 --html-report 指定路径
    python scripts/generate_cluster_md.py --data-a <a.json> --data-b <b.json> --output compare.md --advanced <advanced_analysis.json>
    ```
    MD 报告含八章节：一、综合结论 / 二、核心指标对比 / 三、劣化根因 / 四、行动建议 / 五、Step 级耗时对比 / 六、Rank 级差异 / 七、通信算子差异 / 八、进阶分析（含「分析与判断」与「综合判断（基准 vs 对比）」），全部中文输出。
@@ -263,8 +267,8 @@ python scripts/generate_cluster_report.py --data-a <a.json> --data-b <b.json> --
 
 ```bash
 python scripts/generate_cluster_md.py --data-a <a.json> --data-b <b.json> --output compare.md
-# 可选: --advanced 外部进阶分析 JSON（补双集群时间拆解对比）; --top-ranks 控制 Rank 级差异表行数（默认 20，0=全部）
-python scripts/generate_cluster_md.py --data-a <a.json> --data-b <b.json> --output compare.md --advanced <advanced_analysis.json> --top-ranks 20
+# Markdown 默认链接到同名 HTML 的两张 Rank 图，可用 --html-report 指定其他路径
+python scripts/generate_cluster_md.py --data-a <a.json> --data-b <b.json> --output compare.md --advanced <advanced_analysis.json>
 ```
 
 ### 进阶分析编排脚本

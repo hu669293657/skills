@@ -26,6 +26,8 @@ import json
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import quote
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
@@ -229,10 +231,10 @@ def render_advanced_md(merged):
 
 # ==================== 比对主文档 ====================
 
-def generate_md(data_a, data_b, advanced_json=None, top_ranks=20):
+def generate_md(data_a, data_b, advanced_json=None, top_ranks=None, html_link="cluster_compare_report.html"):
     sa = data_a.get("step_summary", {})
     sb = data_b.get("step_summary", {})
-    steps = sorted(set(list(sa.keys()) + list(sb.keys())), key=lambda x: int(x) if x.isdigit() else x)
+    steps = sorted(sa.keys() | sb.keys(), key=_rep.label_order)
     ra = data_a.get("rank_summary", {})
     rb = data_b.get("rank_summary", {})
 
@@ -459,56 +461,51 @@ def generate_md(data_a, data_b, advanced_json=None, top_ranks=20):
     L.append(md_table(["Step", "集群A Stage", "集群B Stage", "差值", "变化"], step_rows))
     L.append("")
 
-    # 六、Rank 级差异
-    all_ranks = sorted(set(list(ra.keys()) + list(rb.keys())), key=lambda x: int(x) if x.isdigit() else 999)
-    rank_rows = []
-    for rid in all_ranks:
-        va = (ra.get(rid) or {}).get("avg_stage")
-        vb = (rb.get(rid) or {}).get("avg_stage")
-        ta = _rep.us_to_ms(va) if va is not None else "—"
-        tb = _rep.us_to_ms(vb) if vb is not None else "—"
-        if va is None or vb is None:
-            rank_rows.append([rid, ta, tb, "—", "—", "单侧数据"])
-            continue
-        diff = vb - va
-        pct = _rep.safe_div(diff, va) * 100 if va else 0
-        trend = "劣化" if diff > 0 else "改善" if diff < 0 else "持平"
-        rank_rows.append([rid, ta, tb, _rep.fmt_signed(_rep.us_to_ms(diff)),
-                          f"{_rep.fmt_signed(round(pct, 1))}%", trend])
-    rank_rows.sort(key=lambda r: abs(float(r[3])) if r[3] not in ("—", "") else 0, reverse=True)
-    if top_ranks and top_ranks > 0:
-        shown = rank_rows[:top_ranks]
-        scope = f"按差值绝对值降序 Top {top_ranks}（共 {len(rank_rows)} 个 Rank，可用 --top-ranks 0 展开全部）"
-    else:
-        shown = rank_rows
-        scope = f"全部 {len(rank_rows)} 个 Rank（按差值绝对值降序）"
-    L.append(f"## 六、Rank 级差异（{scope}）")
+    # 六、Rank 级走势
+    L.append("## 六、Rank 级耗时与差异")
     L.append("")
-    L.append(md_table(["Rank", "集群A Stage (ms)", "集群B Stage (ms)", "差值 (ms)", "变化", "趋势"], shown))
+    L.append(f"[两集群耗时走势]({html_link}#rank-timing) · [差异走势]({html_link}#rank-difference)（HTML）")
     L.append("")
+    if top_ranks is not None:
+        all_ranks = sorted(ra.keys() | rb.keys(), key=_rep.label_order)
+        rank_rows = []
+        for rid in all_ranks:
+            va = (ra.get(rid) or {}).get("avg_stage")
+            vb = (rb.get(rid) or {}).get("avg_stage")
+            ta = _rep.us_to_ms(va) if va is not None else "—"
+            tb = _rep.us_to_ms(vb) if vb is not None else "—"
+            if va is None or vb is None:
+                rank_rows.append([rid, ta, tb, "—", "—", "单侧数据"])
+                continue
+            diff = vb - va
+            pct = f"{(diff / va) * 100:+.1f}%" if va else "—"
+            trend = "劣化" if diff > 0 else "改善" if diff < 0 else "持平"
+            rank_rows.append([rid, ta, tb, _rep.fmt_signed(_rep.us_to_ms(diff)),
+                              pct, trend])
+        rank_rows.sort(key=lambda r: abs(float(r[3])) if r[3] not in ("—", "") else 0, reverse=True)
+        if top_ranks and top_ranks > 0:
+            shown = rank_rows[:top_ranks]
+            scope = f"按差值绝对值降序 Top {top_ranks}（共 {len(rank_rows)} 个 Rank，可用 --top-ranks 0 展开全部）"
+        else:
+            shown = rank_rows
+            scope = f"全部 {len(rank_rows)} 个 Rank（按差值绝对值降序）"
+        L.append(f"跨 Step 的 Rank 级 Stage 均值（{scope}）")
+        L.append("")
+        L.append(md_table(["Rank", "集群A Stage (ms)", "集群B Stage (ms)", "差值 (ms)", "变化", "趋势"], shown))
+        L.append("")
 
     # 七、通信算子差异
-    is_a_text = data_a.get("format") == "text"
-    is_b_text = data_b.get("format") == "text"
-    ops_a_raw = _rep.filter_total_ops(_rep.filter_total_ops(data_a.get("comm_time_ops", []), "op_name"), "hccl_op_name")
-    ops_b_raw = _rep.filter_total_ops(_rep.filter_total_ops(data_b.get("comm_time_ops", []), "op_name"), "hccl_op_name")
-    ops_a = {op.get("op_name", op.get("hccl_op_name", "?")): op for op in ops_a_raw}
-    ops_b = {op.get("op_name", op.get("hccl_op_name", "?")): op for op in ops_b_raw}
-    op_rows = []
-    for op in set(list(ops_a.keys()) + list(ops_b.keys())):
-        ea_raw = ops_a.get(op, {}).get("avg_elapsed", ops_a.get(op, {}).get("avg_elapsed_time", 0))
-        eb_raw = ops_b.get(op, {}).get("avg_elapsed", ops_b.get(op, {}).get("avg_elapsed_time", 0))
-        ea = float(ea_raw or 0) if is_a_text else _rep.us_to_ms(float(ea_raw or 0))
-        eb = float(eb_raw or 0) if is_b_text else _rep.us_to_ms(float(eb_raw or 0))
-        op_rows.append([op, round(ea, 2), round(eb, 2), _rep.fmt_signed(round(eb - ea, 2))])
-    op_rows.sort(key=lambda r: float(str(r[3]).replace("+", "")) if r[3] not in ("—", "") else 0, reverse=True)
-    L.append("## 七、通信算子差异 Top 10（ms）")
-    L.append("")
-    if op_rows:
-        L.append(md_table(["通信算子", "集群A 均值", "集群B 均值", "差值"], op_rows[:10]))
-    else:
-        L.append("无通信算子级数据。")
-    L.append("")
+    groups, notes = _rep.communication_top_differences(data_a, data_b)
+    L.extend(["## 七、各通信类型的算子耗时差异 Top 10（ms）", "",
+              "按同名算子的平均耗时差（B − A）降序排列。", ""])
+    for note in notes:
+        L.extend([note, ""])
+    for kind, operators in groups.items():
+        L.extend([f"### {kind}", "",
+                  md_table(["通信算子", "集群A 均值", "集群B 均值", "差值"],
+                           [[name, f"{a:.6g}", f"{b:.6g}", f"{delta:+.6g}"] for name, a, b, delta in operators]), ""])
+    if not groups:
+        L.extend(["暂无两侧均有耗时的通信算子。", ""])
 
     # 八、进阶分析
     L.append("## 八、进阶分析（msprof-analyze -m 专项）")
@@ -532,8 +529,9 @@ def main():
     parser.add_argument("--output", required=True, help="输出 Markdown 文件路径")
     parser.add_argument("--advanced", default=None,
                         help="可选: run_advanced_analysis.py 输出的进阶分析 JSON（含双集群时间拆解对比; 内嵌结果缺失时亦作回退来源）")
-    parser.add_argument("--top-ranks", type=int, default=20,
-                        help="Rank 级差异表展示条数（按差值绝对值降序, 0=全部, 默认 20）")
+    parser.add_argument("--html-report", help="交互版 HTML 路径（默认与 Markdown 同路径同名，扩展名为 .html）")
+    parser.add_argument("--top-ranks", type=int, default=None,
+                        help="额外附上旧版 Rank 均值表的条数（0=全部）")
     args = parser.parse_args()
 
     with open(args.data_a, "r", encoding="utf-8") as f:
@@ -545,7 +543,13 @@ def main():
         with open(args.advanced, "r", encoding="utf-8") as f:
             advanced = json.load(f)
 
-    md = generate_md(data_a, data_b, advanced, top_ranks=args.top_ranks)
+    output = Path(args.output).resolve()
+    html = Path(args.html_report).resolve() if args.html_report else output.with_suffix(".html")
+    try:
+        html_link = quote(Path(os.path.relpath(html, output.parent)).as_posix())
+    except ValueError:  # Windows 盘符不同时没有相对路径
+        html_link = html.as_uri()
+    md = generate_md(data_a, data_b, advanced, top_ranks=args.top_ranks, html_link=html_link)
     out_dir = os.path.dirname(os.path.abspath(args.output))
     os.makedirs(out_dir, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:

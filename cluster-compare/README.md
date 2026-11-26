@@ -18,9 +18,9 @@
 
 - 两个集群 Stage 总耗时差多少？劣化幅度多大？
 - 劣化来自**计算、通信还是空闲**？（贡献度归因，带 1% 显著性门控，避免 ΔStage 趋近 0 时贡献度爆炸）
-- 哪些**通信算子**差异最大？（通信算子差异 Top10 表格 + 柱状图）
+- 哪些**通信算子**差异最大？（按通信类型分别展示耗时差异 Top 10）
 - **带宽下降**是真实链路劣化还是统计口径差异？（均值带宽 + 有效吞吐双口径判定：均值降而吞吐平 → 口径差异；均值与吞吐同降 → 真实劣化）
-- **慢卡**在哪？（Rank 级差异热力图，Stage 时间偏离均值 > 10% 标记异常）
+- **慢卡**在哪？（Rank 级 A/B 耗时走势和差异走势，可按指标排序并定位卡号）
 - **空闲时间**成因是什么？（free_analysis 进阶分析：Reason 分布、次数、总时长、占比）
 - **通信瓶颈**在哪张卡、哪个算子？（communication_bottleneck 进阶分析：慢/快 Rank 耗时差与推断原因）
 - 双集群 rank/step 级时间指标对比与 Top 差异 Rank（cluster_time_compare_summary，仅 DB 模式）
@@ -74,12 +74,16 @@ msprof-analyze cluster -m all -d <profiling_path> -o <output_path>
 
 | 输出件 | 文件名 | 说明 |
 |---|---|---|
-| HTML 比对报告 | `cluster_compare_report.html` | ECharts 交互式图表：KPI 卡片、Step 耗时对比柱状图、负载类型双饼图、劣化归因瀑布图、通信算子差异 Top10、带宽对比、Rank 级差异热力图、根因总结与行动建议、进阶分析章节 |
-| MD 比对报告 | `cluster_compare_report.md` | 与 HTML 同口径的八章节中文报告：综合结论 / 核心指标对比 / 劣化根因 / 行动建议 / Step 级耗时对比 / Rank 级差异 / 通信算子差异 / 进阶分析 |
+| HTML 比对报告 | `cluster_compare_report.html` | 两张 Rank 交互走势、按通信类型的差异 Top 10、KPI、Step 耗时、负载分布、劣化归因、带宽和进阶分析 |
+| MD 比对报告 | `cluster_compare_report.md` | 与 HTML 同口径的八章节中文报告：综合结论 / 核心指标对比 / 劣化根因 / 行动建议 / Step 级耗时对比 / Rank 级走势（链接至 HTML） / 分类型通信算子差异 / 进阶分析 |
 | 单集群 MD 总结 | `{data_dir}/cluster_data_summary.md` | 每个集群一份：集群概览、Step 时间统计、Rank 级明细、负载分布、通信分析、异常 Rank 识别、数据完整性说明 |
 | 进阶分析 JSON（可选） | `advanced_analysis.json` | 双集群时间拆解对比（cluster_time_compare_summary），可 `--advanced` 合并进 HTML/MD 报告 |
 
 未指定输出路径时，比对报告默认保存在集群 A 的数据目录下。
+
+在 HTML 中多选 Step 和指标，横轴按 Rank 编号或指定 Step 的指标排序。耗时图展示 A/B 各自的时间，差异图支持 B − A 和以 A 为基准的变化率。悬浮查看两集群的逐卡指标，用 Ctrl + 滚轮、缩放按钮或 Rank 编号定位查看细节。集群规模较大时，全览按屏幕宽度绘制并保留峰谷，缩放后可查看每张卡。
+
+完整的分类型 Top 10 需要未截断的算子均值。使用旧版提取 JSON 时，重新提取两份数据再生成报告。
 
 ## 五、流程图
 
@@ -109,11 +113,11 @@ flowchart TD
 |---|---|
 | `scripts/cluster_data_extractor.py` | 自动识别 DB/TEXT 格式，提取全景数据为 JSON，默认内嵌执行进阶分析（`--no-advanced` 可跳过） |
 | `scripts/generate_cluster_report.py` | 生成 HTML 比对报告（自动合并内嵌与外部进阶分析） |
-| `scripts/generate_cluster_md.py` | 生成 MD 比对报告（与 HTML 同口径，`--top-ranks` 控制 Rank 级差异表行数） |
+| `scripts/generate_cluster_md.py` | 生成 MD 比对报告（`--html-report` 指定交互版路径，`--top-ranks` 可选附加旧版均值表） |
 | `scripts/run_advanced_analysis.py` | 进阶分析编排（双集群时间拆解对比等，支持 `--dry-run`、`--force`） |
 | `scripts/advanced_insights.py` | 规则化中文「分析与判断」生成器（三方共享，保证口径一致） |
 | `scripts/verify_extracted_metrics.py` | 提取结果快速交叉校验（Step/Rank 均值、带宽口径判定提示） |
-| `templates/cluster_compare_report.html` | HTML 报告模板（自包含、`{{占位符}}` 数据驱动、中文界面） |
+| `templates/cluster_compare_report.html` | HTML 报告模板（生成时内嵌 Rank 图的数据和脚本） |
 | `references/db_schema.md` | DB 模式表结构参考 |
 | `references/text_schema.md` | TEXT 模式数据结构参考 |
 
