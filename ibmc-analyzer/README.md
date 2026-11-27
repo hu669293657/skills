@@ -1,4 +1,4 @@
-# ibmc_analyzer（华为 iBMC 一键收集日志分析）
+# ibmc-analyzer（华为 iBMC 一键收集日志分析）
 
 分析华为 iBMC 一键收集/带外日志，产出结构化 JSON 与精美 HTML 诊断报告，支持单机深度分析与多机集群对比，快速判断机器/BMC 是否健康。
 
@@ -49,11 +49,11 @@ flowchart TD
 
 ```text
 # 单机分析
-使用 ibmc_analyzer 分析 D:\bmc\dump_info 目录，判断机器和 BMC 是否健康
+使用 ibmc-analyzer 分析 D:\bmc\dump_info 目录，判断机器和 BMC 是否健康
 
 # 压缩包分析
-用 ibmc_analyzer 解析 D:\bmc\server01_onekey.zip，生成 HTML 诊断报告
+用 ibmc-analyzer 解析 D:\bmc\server01_onekey.zip，生成 HTML 诊断报告
 
 # 多机对比
-用 ibmc_analyzer 对比 D:\bmc\node1 与 D:\bmc\node2 两个一键收集包，找出异常机器
+用 ibmc-analyzer 对比 D:\bmc\node1 与 D:\bmc\node2 两个一键收集包，找出异常机器
 ```

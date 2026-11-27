@@ -1,6 +1,6 @@
 ---
 name: "issue-analyzer"
-description: "昇腾现网故障日志取证分析（故障类问题，非性能分析）。当用户提供 plog/slog/host/device/framework/dmesg 等日志，排查模型拉起失败、训练/推理中断、算子或驱动报错、服务异常等故障类问题时使用。不用于 Prof 性能分析与瓶颈定位（用 cluster-analysis）、两份 Prof/集群数据对比（单卡用 prof-compare，多卡用 cluster-compare）、环境配置采集与比对（用 ascend-dump-analyzer）、BMC 硬件健康诊断（用 ibmc_analyzer）。"
+description: "昇腾现网故障日志取证分析（故障类问题，非性能分析）。当用户提供 plog/slog/host/device/framework/dmesg 等日志，排查模型拉起失败、训练/推理中断、算子或驱动报错、服务异常等故障类问题时使用。不用于 Prof 性能分析与瓶颈定位（用 cluster-analysis）、两份 Prof/集群数据对比（单卡用 prof-compare，多卡用 cluster-compare）、环境配置采集与比对（用 ascend-dump-analyzer）、BMC 硬件健康诊断（用 ibmc-analyzer）。"
 ---
 
 # Ascend Field Issue Analyzer（昇腾现网问题分析）

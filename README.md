@@ -14,7 +14,7 @@ skills/
 ├── cluster-compare/          # 两集群/多卡 Prof 比对与劣化归因
 ├── prof-compare/             # 两份单卡 Prof 细粒度比对（中文报告）
 ├── cpu-host-performance/     # HostBound 定位（ftrace 采集 + 证据化诊断）
-├── ibmc_analyzer/            # iBMC 服务器硬件健康分析
+├── ibmc-analyzer/            # iBMC 服务器硬件健康分析
 └── vllm-ascend-tuning/       # vLLM-Ascend 全链路性能调优
 ```
 
@@ -30,7 +30,7 @@ skills/
      - 单卡/单机 → `prof-compare`
 3. **Prof 分析怀疑点不在算子层？**
    - 怀疑 Host/CPU 拖慢 NPU/GPU → `cpu-host-performance`
-   - 硬件层（BMC/电源/温度/ECC） → `ibmc_analyzer`
+   - 硬件层（BMC/电源/温度/ECC） → `ibmc-analyzer`
    - 环境配置漂移 → `ascend-dump-analyzer`
 4. **推理服务调优**（并行策略/编译/量化/基准测试） → `vllm-ascend-tuning`
 
@@ -103,9 +103,9 @@ skills/
 - **现场采集**：`scripts/cpu_trace_collect.sh` 客户侧一键采集，不联网、不装包、结束自动恢复 tracing 配置
 - **运行**：`python3 -m analyzer analyze <输入路径> --output-dir <输出目录>`（在 skill 根目录）
 
-### 7. ibmc_analyzer
+### 7. ibmc-analyzer
 
-**iBMC 服务器日志分析与故障定位工具**（[README](ibmc_analyzer/README.md)）
+**iBMC 服务器日志分析与故障定位工具**（[README](ibmc-analyzer/README.md)）
 
 基于 iBMC 一键收集 (dump_info) 日志，进行故障根因定位、性能瓶颈排查和集群硬件配置一致性校验。
 
@@ -135,7 +135,7 @@ skills/
 | 对比两个集群或多卡 Prof 数据 | cluster-compare |
 | 对比两份单卡 Prof（GPU vs NPU / 调优前后） | prof-compare |
 | 怀疑 Host/CPU 拖慢 NPU/GPU（ftrace 采集与诊断） | cpu-host-performance |
-| 判断服务器/BMC 硬件健康 | ibmc_analyzer |
+| 判断服务器/BMC 硬件健康 | ibmc-analyzer |
 | 端到端 vLLM-Ascend 调优 | vllm-ascend-tuning |
 
 ## 同步方式

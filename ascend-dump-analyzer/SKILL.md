@@ -1,6 +1,6 @@
 ---
 name: "ascend-dump-analyzer"
-description: "用于 Ascend 昇腾服务器环境采集、dump/预检信息分析、多环境配置漂移比对，以及核对已安装或拟部署的硬件、Ascend HDK、CANN、TorchNPU、训练和推理组件版本配套。也用于用户明确指定本 skill 后提供的 .json、.log、.txt 或目录。一般现网故障日志取证用 issue-analyzer，Prof 性能分析用 cluster-analysis，BMC 硬件健康诊断用 ibmc_analyzer。"
+description: "用于 Ascend 昇腾服务器环境采集、dump/预检信息分析、多环境配置漂移比对，以及核对已安装或拟部署的硬件、Ascend HDK、CANN、TorchNPU、训练和推理组件版本配套。也用于用户明确指定本 skill 后提供的 .json、.log、.txt 或目录。一般现网故障日志取证用 issue-analyzer，Prof 性能分析用 cluster-analysis，BMC 硬件健康诊断用 ibmc-analyzer。"
 ---
 
 # Ascend 环境分析器
