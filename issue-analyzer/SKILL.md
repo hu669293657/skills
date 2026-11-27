@@ -3,6 +3,38 @@ name: "issue-analyzer"
 description: "昇腾现网故障日志取证分析（故障类问题，非性能分析）。当用户提供 plog/slog/host/device/framework/dmesg 等日志，排查模型拉起失败、训练/推理中断、算子或驱动报错、服务异常等故障类问题时使用。不用于 Prof 性能分析与瓶颈定位（用 cluster-analysis）、两份 Prof/集群数据对比（单卡用 prof-compare，多卡用 cluster-compare）、环境配置采集与比对（用 ascend-dump-analyzer）、BMC 硬件健康诊断（用 ibmc_analyzer）。"
 ---
 
+
+## 全栈升级：优先执行的补充规则（v1.1）
+
+这是一套针对训练/推理**故障**的分诊与证据管理流程；不等于所有故障均由 Ascend/CANN/HCCL 造成。前置阅读：
+- `references/fullstack-log-matrix.md`：Host/Device 应用、Device 系统、OS、Docker/K8s、网络、存储、框架、服务的 P0/P1 日志矩阵与只读采集建议。
+- `references/fullstack-playbooks.md`：拉不起、训练中断、推理中断、HCCL 建链与执行期、主机及集群调度故障的分叉诊断。
+- `references/causal-analysis.md`：证据真实性 vs 因果验证、A/B/C/D 根因等级与安全处置要求。
+
+### 优先级规则（覆盖本文旧版本中冲突的表述）
+
+1. **先做有证据的分析，不因非必要现场信息缺失而停工**。缺时间可先按时间分桶筛查；缺 rank 映射则先标记未知并推断候选，不要自行猜测；只有没有任何日志或无法识别目标案例时才问最小必要信息。
+2. **现场原始日志只读**。不要自动 reset NPU、kill 进程、重启、修改网络/驱动、删除/移动日志；高风险处置必须经过现场审批和回滚准备。
+3. **双轨扫描**：`log_analyzer.py scan` 保留原有 manifest，**首先**执行新 `scripts/fullstack_triage.py` 对文本日志进行完整遍历和异常大类聚合。它无每文件 500 行截断；`events` 只是前 N 条样本，报告中明确显示 `examples_truncated`，不能声称已找到全局首个根因。旧 `extract` 用于已收敛的时间窗与精确取证，若出现截断须缩小窗口或针对性重扫。
+4. `verify PASS` 只证明引用的 `file:line:quote` 属实，**不证明根因已验证**；对根因另行按 A/B/C/D 定级。
+5. 先判断业务→容器/调度→Host OS→框架/控制面→CANN/Runtime→Device/HCCL，并关注跨层反例。HCCL timeout、RPC 504、exit 137 均不可单凭关键词定根因。
+6. 多机时钟/时区、NTP 偏差不明确时，先做逐机局部时间线，不机械拼接为唯一全局顺序；要区分最早的报错节点与事件源头。
+7. 对版本/固件/错误码的含义，按照**实际现场版本**的官方文档校验；官方文档中的命令不一定适用于当前产品型号。
+8. **采集隐私**：环境变量、HTTP 请求、K8s Pod spec、plog 可能包含客户个人信息、口令、令牌。报告/外传前脱敏，允许保留离线可信副本做 SHA256 校验。
+
+### 推荐开始命令
+
+```bash
+python issue-analyzer/scripts/log_analyzer.py scan --dir ./logs --out analysis_out/manifest.json --md analysis_out/manifest.md
+python issue-analyzer/scripts/fullstack_triage.py --dir ./logs --out analysis_out/fullstack_triage.json --retain 100
+# 针对初步分类收敛故障时间窗、文件，再使用既有 extract/stats/context/verify
+python -m unittest discover -s issue-analyzer/tests -v
+```
+
+### 结论格式增量
+
+报告需额外增加：`问题所在层/触发层/传播到的层`；`前 3 个根因候选、正证据、反证、缺失证据、下一条最有信息量的只读命令`；`日志覆盖率/是否截断/时钟风险`；`根因因果等级 A/B/C/D`。业务恢复动作与永久根因修复应分开。
+
 # Ascend Field Issue Analyzer（昇腾现网问题分析）
 
 分析昇腾（Ascend）服务器现网问题的文本日志取证技能。输入客户现场日志（plog、slog/host/device 日志、训练框架日志、推理服务日志、dmesg 等），输出**带完整证据链、经过回验**的 Markdown 分析报告。典型场景：模型拉起失败、训练中断、推理中断。
