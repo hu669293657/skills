@@ -7,8 +7,7 @@ existing analysis outputs, and produces a workflow plan.
 Modes:
   single              单卡数据
   cluster             多卡数据（有可用卡目录）
-  cluster_output_only 输入仅含 cluster_analysis_output（无任何卡目录），
-                      缺少卡级 Prof，停止分析
+  cluster_output_only 仅有集群输出件，使用集群模式生成总报告
 """
 import argparse
 import json
@@ -17,6 +16,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
+from lib.cluster_source import DB_NAMES, STEP_CSV, STEP_TABLES, db_tables, open_db
 from contextlib import closing
 
 from lib.common import is_junk, read_json, read_csv_rows
@@ -191,32 +191,33 @@ def check_cluster_output(root):
     """Inspect existing cluster_analysis_output under root."""
     out = {'exists': False, 'path': None, 'has_db': False, 'tables': [],
            'text_files': [], 'recipes_done': False, 'recipe_files': []}
-    direct = any(os.path.isfile(os.path.join(root, fn)) for fn in
-                 ('cluster_analysis.db', 'cluster.db', 'cluster_step_trace_time.csv'))
+    direct = any(os.path.isfile(os.path.join(root, fn)) for fn in (*DB_NAMES, STEP_CSV))
     p = root if direct else os.path.join(root, 'cluster_analysis_output')
     if not os.path.isdir(p):
         return out
     out['exists'] = True
     out['path'] = p
-    db = next((os.path.join(p, fn) for fn in ('cluster_analysis.db', 'cluster.db')
-               if os.path.isfile(os.path.join(p, fn))), os.path.join(p, 'cluster_analysis.db'))
-    base_tables = {'ClusterBaseInfo', 'ClusterStepTraceTime', 'HostInfo', 'RankDeviceMap',
-                   'CommunicationGroupMapping', 'ClusterCommunicationTime',
-                   'ClusterCommunicationBandwidth', 'ClusterCommunicationMatrix'}
-    if os.path.isfile(db) and os.path.getsize(db) > 0:
+    out['source_files'] = [fn for fn in (*DB_NAMES, STEP_CSV) if os.path.isfile(os.path.join(p, fn))]
+    for name in DB_NAMES:
+        db = os.path.join(p, name)
+        if not os.path.isfile(db) or os.path.getsize(db) == 0:
+            continue
         try:
-            with closing(sqlite3.connect(Path(db).resolve().as_uri() + '?mode=ro&immutable=1', uri=True)) as conn:
-                tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-                step_table = next((t for t in ('ClusterStepTraceTime', 'step_statistic_info') if t in tables), None)
-                out['has_db'] = bool(step_table and conn.execute(f'SELECT 1 FROM "{step_table}" LIMIT 1').fetchone())
-            out['tables'] = tables
+            with closing(open_db(db)) as conn:
+                tables = db_tables(conn)
+                has_steps = any(conn.execute(f'SELECT 1 FROM "{tables[t.lower()]}" LIMIT 1').fetchone()
+                                for t in STEP_TABLES if t.lower() in tables)
+            if has_steps:
+                out.update(has_db=True, db_path=db, tables=list(tables.values()))
+                break
         except sqlite3.Error as e:
             out['error'] = str(e)
     for fn in os.listdir(p):
         if is_junk(fn):
             continue
-        if fn == 'cluster_step_trace_time.csv' and read_csv_rows(os.path.join(p, fn)):
+        if fn == STEP_CSV and read_csv_rows(os.path.join(p, fn)):
             out['text_files'].append(fn)
+            out['step_csv'] = os.path.join(p, fn)
     rdir = os.path.join(p, 'recipes')
     if os.path.isdir(rdir):
         out['recipe_files'] = [f for f in os.listdir(rdir) if not is_junk(f)]
@@ -295,30 +296,24 @@ def main():
     usable_n = len([c for c in cards if c['usable']])
     mode = 'cluster' if usable_n > 1 else 'single'
 
-    cluster = None
-    cluster_root = None
-    if mode == 'cluster' and cards:
-        # multi-card root = common parent of card dirs
-        parents = {os.path.dirname(c['dir']) for c in cards}
-        cluster_root = parents.pop() if len(parents) == 1 else root
-        cluster = check_cluster_output(cluster_root)
-        cluster['expected_path'] = os.path.join(cluster_root, 'cluster_analysis_output')
-    elif usable_n == 0:
-        # 识别仅有集群输出件的输入，以便提示补齐卡级 Prof。
-        # （兼容 db 新格式/旧格式 cluster.db/TEXT 模式）
-        cluster = check_cluster_output(root)
-        cluster['expected_path'] = os.path.join(root, 'cluster_analysis_output')
-        has_data = (cluster['has_db'] or cluster['text_files']
-                    or os.path.isfile(os.path.join(root, 'cluster_analysis_output', 'cluster.db'))
-                    or os.path.isfile(os.path.join(root, 'cluster.db')))
-        if has_data:
-            mode = 'cluster_output_only'
-            cluster_root = root
+    parents = {os.path.dirname(c['dir']) for c in cards if c['usable']}
+    card_root = next(iter(parents)) if len(parents) == 1 and root not in card_dirs else root
+    cluster = check_cluster_output(root)
+    if not (cluster['has_db'] or cluster['text_files']) and card_root != root:
+        nested = check_cluster_output(card_root)
+        if nested['has_db'] or nested['text_files'] or not cluster.get('source_files'):
+            cluster = nested
+    has_data = bool(cluster['has_db'] or cluster['text_files'])
+    if has_data:
+        mode = 'cluster' if usable_n else 'cluster_output_only'
+    cluster_root = card_root if mode in ('cluster', 'cluster_output_only') else None
+    cluster['expected_path'] = os.path.join(card_root, 'cluster_analysis_output')
 
     existing = check_existing_outputs(root)
 
     if mode == 'cluster_output_only':
-        steps = {'report_mode': None}
+        steps = {'cluster': 'reuse supplied aggregate', 'recipes': 'run supported recipes',
+                 'report_mode': 'cluster'}
     else:
         steps = {
             'advisor': 'run per card',
@@ -359,8 +354,6 @@ def main():
                           'world_size_conflict': len(expected) > 1}
     if mixed:
         result['error'] = 'PyTorch and MindSpore data mixed in one root; analyze separately.'
-    elif mode == 'cluster_output_only':
-        result['error'] = '输入仅含 cluster_analysis_output，请同时提供可用的卡级 Prof 采集目录。'
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, 'w', encoding='utf-8') as f:
@@ -371,7 +364,7 @@ def main():
 
     print(f"mode={mode} cards={len(cards)} formats={[c['format'] for c in cards]}")
     if mode == 'cluster_output_only':
-        print(result['error'])
+        print('仅有集群输出件，将生成集群总报告，跳过卡级分析。')
     if cluster:
         print(f"cluster_output exists={cluster['exists']} recipes_done={cluster['recipes_done']}")
     for c in cards:

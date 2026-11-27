@@ -114,18 +114,61 @@ class RegressionTests(unittest.TestCase):
         (self.path / 'cluster_analysis_output/recipes/slow_rank').mkdir(parents=True)
         self.assertFalse(detect.check_cluster_output(str(self.path))['recipes_done'])
 
-    def test_output_only_requires_rank_profs(self):
+    def test_text_cluster_only_publishes_the_main_report(self):
         p = self.path / 'cluster_analysis_output'
         p.mkdir()
         csv_file(p / 'cluster_step_trace_time.csv', [{'Step': '0', 'Type': 'rank', 'Index': 0, 'Computing': 1000, 'Communication': 100, 'Free': 100, 'Stage': 1200}])
         out = self.path / 'out'
         r = self.workflow(p, out)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         state = json.loads((out / 'workflow_status.json').read_text(encoding='utf-8'))
-        self.assertEqual(state['status'], 'failed')
-        self.assertIn('卡级 Prof', ' '.join(state['errors']))
-        self.assertFalse((out / 'reports').exists())
-        self.assertFalse((out / 'performance_report.html').exists())
+        self.assertEqual(state['status'], 'complete')
+        self.assertEqual(state['stages']['insight_locator']['status'], 'unsupported')
+        html = (out / 'performance_report.html').read_text(encoding='utf-8')
+        self.assertIn('Rank 耗时走势', html)
+        self.assertIn('集群汇总覆盖 1 Rank', html)
+        self.assertIn('卡级 Prof 覆盖 0 Rank', html)
+        self.assertNotIn('id="advisor"', html)
+        summary = report.read_json(out / 'cluster_summary/recipes_summary.json')
+        self.assertIsNone(summary['time_summary'][0]['comm_ratio'])
+        self.assertFalse((p / 'recipes_summary.json').exists())
+
+    def test_native_cluster_without_metadata_keeps_all_ranks_when_cards_are_sampled(self):
+        root = self.path / 'input'
+        card(root, 1)
+        card(root, 2)
+        p = root / 'cluster_analysis_output'
+        p.mkdir()
+        db = p / 'cluster_analysis.db'
+        with closing(sqlite3.connect(db)) as conn:
+            conn.execute('CREATE TABLE ClusterStepTraceTime (step TEXT, type TEXT, "index" INT, '
+                         'computing REAL, communication_not_overlapped REAL, free REAL, stage REAL)')
+            conn.executemany('INSERT INTO ClusterStepTraceTime VALUES (?,?,?,?,?,?,?)', [
+                (str(step), 'rank', rank, 7000, 2000, 1000, 10000 + rank)
+                for step in (1719, 1720) for rank in range(4)])
+            conn.execute("INSERT INTO ClusterStepTraceTime VALUES ('1720','stage',99,7000,2000,1000,99999)")
+            conn.execute('CREATE TABLE ClusterCommunicationTime (step TEXT, rank_id INT, hccl_op_name TEXT, '
+                         'elapsed_time REAL, transit_time REAL, wait_time REAL, idle_time REAL, synchronization_time REAL)')
+            conn.execute("INSERT INTO ClusterCommunicationTime VALUES ('1720',3,'hcom_allReduce__1',10,0,10,0,0)")
+            conn.commit()
+        before = db.read_bytes(), db.stat().st_mtime_ns
+        for source, output, card_count in ((p, 'pure', 0), (root, 'mixed', 2)):
+            with self.subTest(source=source):
+                out = self.path / output
+                r = self.workflow(source, out, '--force')
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual((db.read_bytes(), db.stat().st_mtime_ns), before)
+                self.assertFalse((p / 'recipes').exists())
+                html = (out / 'performance_report.html').read_text(encoding='utf-8')
+                self.assertIn('集群汇总覆盖 4 Rank', html)
+                self.assertIn(f'卡级 Prof 覆盖 {card_count} Rank', html)
+                self.assertIn('rank-step 样本：8', html)
+                self.assertIn('hcom_allReduce', html)
+                self.assertEqual('id="advisor"' in html, bool(card_count))
+                self.assertFalse(list(out.rglob('cluster_analysis_report.html')))
+                summary = report.read_json(out / 'cluster_summary/recipes_summary.json')
+                self.assertFalse(summary['recipes_failed'])
+                self.assertIn('communication_bottleneck', summary['recipes_done'])
 
     def test_shared_skill_compares_ranks_without_sibling_skill(self):
         shared = self.path / 'shared' / 'cluster-analysis'

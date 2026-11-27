@@ -13,8 +13,8 @@
 | `workflow_status.json`、`workflow_cache.json` | run_workflow.py | 阶段状态、覆盖范围、退出码和输入/参数/代码指纹 |
 | `advisor/advisor.md`、`advisor/advisor.json` | advisor_fallback.py（原生 advisor all 产物仅留档） | Advisor 结论 |
 | `cluster_analysis_output/cluster_analysis.db` | 原生 msprof-analyze 或 cluster_fallback.py | 集群分析主库（SQLite） |
-| `cluster_analysis_output/recipes/<name>/*.csv` | recipe_fallback.py | 各 recipe 明细 CSV |
-| `cluster_analysis_output/recipes_summary.{md,json}` | recipe_fallback.py | recipe 汇总（同时写入 DB 表 RecipeSummary） |
+| `cluster_summary/recipes/<name>/*.csv` | recipe_fallback.py | 已有集群输出的派生明细，输入文件只读 |
+| `cluster_summary/recipes_summary.{md,json}` | recipe_fallback.py | 已有集群输出的全量 Rank × Step 与 recipe 状态。工作流自行生成的内置集群库沿用源旁的派生目录，并可写入其 RecipeSummary 表 |
 | `compare/compare_analysis_result.json` | compare_fallback.py | 卡间对比明细 |
 | `compare/performance_comparison_result_*.xlsx` | 原生 msprof-analyze（归一化复制）或 compare_fallback.py | 对比 Excel（P5 读取此文件） |
 | `reports/compare_analysis_report.html` | 内置 prof-compare，由 vendor_bridge 调用 | 双卡比对子报告（iframe 内嵌） |
@@ -34,7 +34,8 @@
 python scripts/detect_prof.py --path <输入路径> --output <mw>/detect_result.json --skill-dir <skill根>
 ```
 - 失败处理：中止流水线（无输入类型无法继续）。
-- 模式判定：`single`（单卡）/ `cluster`（多卡，有可用卡目录）。仅有 `cluster_analysis_output` 时，探测标记 `cluster_output_only`，工作流提示补齐卡级 Prof 并退出 1。
+- 模式判定：`single`（单卡 Prof）/ `cluster`（多卡 Prof，或集群输出随附卡级 Prof）/ `cluster_output_only`（仅集群输出）。后两种均生成 P7 集群主报告。支持传集群输出件本身或其父目录；只有集群数据时跳过卡级阶段。
+- `coverage` 表示卡级证据范围。`cluster_coverage` 由工作流从实际用于出报的时间汇总统计，记录 Rank 数、Step 数和 rank-step 样本数。输入仅有样本卡时，样本数量不限制已有集群汇总的覆盖。
 - `input` 保留用户路径；P1–P4 使用 `cluster_root`（或实际单卡目录）。`export_type`、`available_artifacts` 和 `capabilities` 分别表示导出配置、可用文件和当前脚本能力；TEXT 与 DB 可以共存。无分步标识时输出 `analysis_scope=whole_prof`、`step_ids=["prof"]`；真实标识数另存 `known_step_count`。缺摘要时尝试有效事件/会话范围；仍无证据则失败。规则见 [whole_prof_step.md](whole_prof_step.md)。`coverage` 包含期望/实际/缺失 rank、唯一 step 数、rank-step 样本数，另含 `db_window_count`（采集窗行数）、`db_step_scopes`、`device_ids`（rank→device 真实映射）。
 - **DB 能力探测**：TEXT 缺失时经 `scripts/lib/prof_data.py`（WAL 感知只读）探测 `analysis.db::StepTraceTime / CommAnalyzer*` 与主 DB 元数据表。逐卡输出 `db_capabilities`（step_rows/window_rows/comm_* /rank_device_map/host_info/step_time/sources）、`db_step_scope`（`step`|`capture_window`）、`device_id` 及来源；`capabilities.fallback_*` 由有效 TEXT/DB 摘要或可推导的事件/时间范围共同决定；无分步整段统一用内置路径。
 
@@ -46,19 +47,20 @@ python scripts/advisor_fallback.py --root <输入路径> --output <mw>/advisor
 - 内置实现按卡回退：`step_trace_time.csv` 缺失时读 `analysis.db::StepTraceTime`（us）；`communication.json` 缺失时读 `analysis.db::CommAnalyzerTime`（ms）。整段单 step 口径在 advisor.md 与 JSON 标注（不能按真实训练迭代解释）；NULL 指标计数一并输出。
 
 ### P2 cluster（原生优先）
-原生：`msprof-analyze cluster analysis -d <输入路径> --top_num N`。原生成功但产物缺 `cluster_analysis.db` 时（下游 recipes/泳道依赖），用内置实现补齐（幂等：db 已存在自动跳过）。原生失败/不可用降级：
+优先复用已有的集群输出，保留用户提供的库和 CSV。缺集群输出时才从多卡 Prof 生成。原生可用时执行 `msprof-analyze cluster analysis -d <输入路径> --top_num N`；原生失败或没有可用集群时间输出时用内置实现：
 ```bash
 python scripts/cluster_fallback.py --root <输入路径> [--force]
 ```
 - DB-only：步骤行来自 `analysis.db::StepTraceTime`（有效 step 用原 id；无分步数据整体用 `prof` 汇总标签），通信三表来自 `CommAnalyzer*`（ms/MB/GB/s）；rank→device 用主 DB `RANK_DEVICE_MAP`，host 用 `HOST_INFO`，缺失才回退推断。
 - 派生来源写入 `ClusterBaseInfo`（step_source/device_map_source/host_source/communication_source/step_id_semantics）与 `status_info`（NULL 指标计数、未映射 step 计数），见 db_support.md §4。
 
-### P3 recipes（原生优先）
-原生：逐个执行 8 个 recipe 子命令（cluster_time_summary / communication_time_sum / slow_rank / slow_link / communication_bottleneck / free_analysis / compute_op_sum / hccl_sum，附 `--top_num`）。原生成功但缺 `recipes_summary.json`（总报告契约件，原生不产出）时，用内置实现补齐全量 23+1 recipe 与汇总件。原生失败/不可用降级：
+### P3 recipes 与集群时间汇总
+内置 recipe 为 P7 生成统一汇总。仅当本次由原生 P2 新生成集群输出时，额外运行原生支持的 8 项 recipe 留档。已有集群数据由一键工作流传入 `--cluster-db` 和/或 `--step-csv`，派生文件写到独立的 `cluster_summary/`。缺少可选 `ClusterBaseInfo` 时照常读取逐 Rank 时间，不推断并行参数或补写原库。缺失指标保留未知，依赖该字段或卡级明细的 recipe 标为 unsupported。
 ```bash
 python scripts/recipe_fallback.py --root <输入路径> --top-num 20
 ```
 - CATEGORIES 注册的 23 个正式 recipe；extra recipe `communication_bandwidth_sum` 实际执行但未注册（扩展定位，见 recipes_catalog.md）。
+- 基础 Rank × Step 汇总先于进阶 recipe 落盘。`--skip-recipes` 仍生成该汇总。已有集群输出的 recipe 默认最长 7200 秒，可用 `--recipe-timeout` 调整。进阶阶段失败且基础汇总可用时，保留主报告并显示失败阶段。
 - 通信算子判定正则：当前以 recipe_fallback.py 的 `COMM_NAME_PATTERN` 为准（二期收敛至 scripts/lib/config.py）。
 
 ### P4 compare（原生优先）
@@ -100,24 +102,24 @@ python scripts/insight_locator.py --detect <mw>/detect_result.json --output <mw>
 ```bash
 python scripts/report_generator.py --middleware <mw> --mode {single|cluster|compare} --output <mw>/performance_report.html
 ```
-- mode 由 detect_result.json 判定决定（run_workflow 自动传递）。
+- mode 由 detect_result.json 判定（run_workflow 自动传递，`cluster_output_only` 使用 `cluster` 渲染）。所有输入共用 `scripts/report_assets/template.html`。
 - 图表 ECharts 懒初始化；`<details>` 区块默认展开；样式与模板规范见 html_template_spec.md。
 - `performance_report.html` 仍是默认主交付；其“结论与建议”章节读取 P6a 结果，按通信、计算、Free 展示关键点。同名定位摘要是配套产物。
 
 ## 3. run_workflow 一键编排
 
 ```bash
-python scripts/run_workflow.py --input <Prof数据路径> --output-dir <输出根> \
+python scripts/run_workflow.py --input <Prof数据路径或集群输出目录> --output-dir <输出根> \
     [--top-num 20] [--base-rank N --compare-rank N] [--report-mode cluster] \
-    [--skip-recipes] [--skip-compare] [--skip-swimlane] [--skip-report] [--force] [--no-native] [--timeout 300]
+    [--skip-recipes] [--skip-compare] [--skip-swimlane] [--skip-report] [--force] [--no-native] [--timeout 300] [--recipe-timeout 7200]
 ```
-- 默认**原生优先**：探测到 `msprof-analyze`（PATH 存在性）即各阶段优先原生，失败或产物缺口自动回退/由 fallback 补齐；`--no-native` 整体禁用原生，全部使用内置实现；`--msprof-cli` 兼容保留（no-op）。
+- 卡级 Advisor、双卡比对和缺失集群件的生成优先使用已探测到的原生 CLI。`--no-native` 禁用原生。`--force` 重算派生结果，保留用户提供的集群源。
 - 未提供的可选参数均取脚本默认值；json 解析输入异常已由 run_workflow 保护（try/except）。
 
 ## 4. 全局纪律
 
-1. **原生 CLI 优先（默认）**：run_workflow 以 `shutil.which('msprof-analyze')` 探测；可用则 P1 `advisor all`（留档）、P2/P3 `cluster` 子命令、P4 `compare` 均优先原生，失败或产物缺口（db/summary/json）自动回退或由 fallback 补齐；`--no-native` 整体禁用（能力对照见 msprof_cli.md）。
-2. **单卡模式**：P2/P3/P4 跳过；advisor 和 P6 泳道做单卡；P7 `--mode single`。**多卡模式**：P1 对**所有卡**聚合 advisor；默认比对通信占比最大/最小的不同 rank，要求 step 窗口一致。
+1. **集群源优先**：有可用的集群输出时，直接从其中的 Rank × Step 生成集群汇总。已有源的缓存同时校验数据库、WAL 和时间 CSV 的指纹；运行期间源变化时停止出报。
+2. **卡级阶段**：P1 聚合实际提供且可分析的 Prof；至少两张卡具备可比口径时才执行默认双卡比对。泳道和 Insight 按可用卡级证据执行。仅有单卡 Prof 时跳过 P2–P4。
 3. **进阶分析全量执行**：23 正式 + 1 扩展 recipe 全跑；部分数据缺失的 recipe 输出「不支持/数据缺失」说明，不算失败。
 4. **unit 纪律**：单位由字段/schema 定义，不由 DB/TEXT 容器决定。Step trace 为 μs（CSV 与 `analysis.db::StepTraceTime` 同）；TEXT communication.json、`analysis.db::CommAnalyzer*` 和新表 ClusterCommunicationTime 的时间为 ms；主 DB 事件/会话/STEP_TIME 为 ns；中间库记录 communication_time_unit，旧版 schema 按其声明转换。报告统一标注单位；累计算子耗时必须与同一 rank/step 窗口的 Computing 总和比较，不能除以平均单 step。
 5. **step/采集窗纪律**：无分步数据把整个 prof 作为一个汇总 step（`prof`），真实分步保留原编号；原始 NULL-step 来源不改写。汇总 step 可用于整个范围的分析，但不推算单次训练迭代或推理请求吞吐。契约详见 whole_prof_step.md。
@@ -129,7 +131,7 @@ python scripts/run_workflow.py --input <Prof数据路径> --output-dir <输出�
 
 分析任务多且相互独立，按「波次（Wave）」调度子 agent，每波最多 3 个并行：
 
-- **Wave 0**：主 agent 运行 P0 检测，确定单卡或多卡及后续步骤。缺卡级 Prof 时提示补齐数据。
+- **Wave 0**：主 agent 运行 P0 检测，选定集群源并确认卡级证据。只有集群输出时运行 P3 汇总和 P7 出报。
 - **Wave 1**（互不依赖，3 个子 agent 并行）：
   - 子 agent A：P1 全卡 advisor
   - 子 agent B：P2 集群输出件生成（多卡且缺失时；单卡跳过）
@@ -147,12 +149,12 @@ python scripts/run_workflow.py --input <Prof数据路径> --output-dir <输出�
 ## 6. 端到端验收清单
 
 1. `detect_result.json` 存在且含类型判定字段。
-2. advisor.md 与 advisor.json 至少其一存在（始终由内置实现归一化；原生 advisor all 产物仅留档）。
-3. `cluster_analysis.db` 为有效 SQLite 文件。
-4. `recipes_summary.md` 覆盖全部执行过的 recipe（对应 summary JSON 存在）。
-5. 多卡时 `performance_comparison_result_*.xlsx` 与 `compare_analysis_result.json` 成对存在。
+2. 有卡级摘要时，advisor.md 和 advisor.json 由内置实现归一化。
+3. 集群输入的数据库或 CSV 中有有效 Rank × Step 时间数据，报告计数与源数据一致。
+4. `recipes_summary.json` 有基础集群时间汇总。执行进阶 recipe 后，`recipes_summary.md` 记录执行状态与缺失证据。
+5. 双卡比对完成时，`performance_comparison_result_*.xlsx` 与 `compare_analysis_result.json` 成对存在。
 6. P4 比对工作簿可用时，`reports/` 下有 prof-compare HTML 和中文 xlsx。P5 跳过或失败时检查其阶段状态。
-7. 多卡时 swimlane_rank{N}.md 覆盖全部参与卡，swimlane_compare.md 存在。
+7. 泳道明细覆盖具备泳道数据的参加卡；有两张以上可用卡时另有 swimlane_compare.md。
 8. `performance_report.html` 可直接打开，有 prof-compare 子报告时可通过内嵌区和新窗口打开。
 9. 有卡级数据时 P6a 结果存在并进入原总报告；通信实例跨卡仅一条，三部分各最多三条，缺失卡与证据不足有明确范围说明。P6a 成功不代替前八项验收。
 10. **DB-only 输入**：`detect_result.json` 逐卡含 `db_capabilities`/`db_step_scope`（原始 step 或 capture_window）和 `analysis_scope`（实际 step 或 whole_prof）；advisor/compare/insight 产物标注 DB 来源；整段口径有明确说明（`prof` 标签、每卡 1 step、无单次迭代吞吐结论）；泳道记 unsupported 而非失败；派生 `cluster_analysis_output` 的 ClusterBaseInfo 含来源键。

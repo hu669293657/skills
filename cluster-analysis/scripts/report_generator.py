@@ -187,14 +187,17 @@ def table_md_by_header(tables, first_cols):
 def cluster_dir(mw):
     """cluster_analysis_output: inside mw, else sibling of mw, else data root
     recorded in detect_result.json (input/cluster_output)."""
+    det = read_json(os.path.join(mw, 'detect_result.json')) or {}
+    co = det.get('cluster_output')
+    co = co if isinstance(co, dict) else {}
+    if co.get('report_data_dir'):
+        return co['report_data_dir']
     d1 = os.path.join(mw, 'cluster_analysis_output')
     if os.path.isdir(d1):
         return d1
     d2 = os.path.join(os.path.dirname(mw), 'cluster_analysis_output')
     if os.path.isdir(d2):
         return d2
-    det = read_json(os.path.join(mw, 'detect_result.json')) or {}
-    co = det.get('cluster_output')
     if isinstance(co, dict):
         for key in ('path', 'expected_path'):
             if co.get(key) and os.path.isdir(co[key]):
@@ -348,6 +351,15 @@ def steps_ranks(ts_rows):
     return steps, ranks
 
 
+def complete_average(rows, key):
+    values = [row.get(key) for row in rows]
+    return sum(values) / len(values) if values and None not in values else None
+
+
+def formatted_ratio(value):
+    return f'{value:.1%}' if value is not None else '未知'
+
+
 # ---------- section builders ----------
 
 def sec_diagnosis(locator, num='2', title='瓶颈定位与解决'):
@@ -372,12 +384,13 @@ th{background:#eef3f9}th:first-child{width:39%}th:nth-child(2){width:14%}th:nth-
 
 
 def sec_conclusions(advisor, cluster_summary, compare, mode, num='2', locator=None):
-    if locator is not None:
+    from lib.bottleneck_report import workbench
+    if locator is not None and not (cluster_summary or {}).get('time_summary'):
         return sec_diagnosis(locator, num, title='结论与建议')
     items = []
-    if advisor:
+    if advisor and locator is None:
         a = advisor['data']
-        prefix = '集群' if len(a.get('ranks', [])) > 1 else ''
+        prefix = '卡级 Prof 样本' if mode != 'single' else ''
         items.append(('High', f"{prefix}主导瓶颈：{a.get('dominant', '—')}；"
                               f"Stage 平均 {a.get('stage_ms', '—')}ms，"
                               f"计算 {(a.get('computing_ratio') or 0)*100:.0f}% / "
@@ -390,14 +403,14 @@ def sec_conclusions(advisor, cluster_summary, compare, mode, num='2', locator=No
         slow = cluster_summary.get('slow_rank', [])
         if ts:
             steps, ranks = steps_ranks(ts)
-            avg_free = sum(t['free_ratio'] for t in ts) / len(ts)
-            avg_comm = sum(t['comm_ratio'] for t in ts) / len(ts)
+            avg_free = complete_average(ts, 'free_ratio')
+            avg_comm = complete_average(ts, 'comm_ratio')
             worst = max(ts, key=lambda t: t['stage(us)'])
-            items.append(('High', f"共 {len(ranks)} 个 rank × {len(steps)} 个 step："
-                                  f"最慢组合为 step {worst['step']} / rank {worst['rank']}"
+            items.append(('High', f"集群汇总覆盖 {len(ranks)} Rank、{len(steps)} Step、{len(ts)} 个 rank-step 样本。"
+                                  f"最慢组合为 step {esc(worst['step'])} / rank {worst['rank']}"
                                   f"（Stage {worst['stage(us)']/1000:.1f}ms）；"
-                                  f"平均空闲占比 {avg_free*100:.1f}%，"
-                                  f"未掩盖通信占比 {avg_comm*100:.1f}%"))
+                                  f"平均空闲占比 {formatted_ratio(avg_free)}，"
+                                  f"未掩盖通信占比 {formatted_ratio(avg_comm)}"))
             if slow:
                 items.append(('Medium', f"集合通信短耗时候选：rank {slow[0]['rank']} 在 "
                                       f"{slow[0]['vote_ratio']*100:.0f}% 的集合通信中"
@@ -405,8 +418,8 @@ def sec_conclusions(advisor, cluster_summary, compare, mode, num='2', locator=No
         bott = [r for r in cluster_summary.get('top_bottleneck_ops', [])
                 if str(r.get('bottleneck_type', '')).startswith('wait')]
         if bott:
-            items.append(('Medium', f"存在 {len(bott)} 个等待型通信算子"
-                                    f"（如 {bott[0]['op']}）：各卡到达时间差大，"
+            items.append(('Medium', f"有 {len(bott)} 个通信算子的已记录等待占比较高"
+                                    f"（如 {esc(bott[0]['op'])}），"
                                     f"需结合到达时间与链路数据验证原因"))
     if compare:
         ins = compare.get('insights', {})
@@ -438,6 +451,7 @@ def sec_conclusions(advisor, cluster_summary, compare, mode, num='2', locator=No
 <section id="conclusions">
   <h2>{num}. 结论与建议</h2>
   <div class="card p-5">{concl}</div>
+  {workbench(locator) if locator is not None else ''}
   <p class="text-xs text-slate-500 mt-3">结论由中间件自动汇聚生成；关键数值请以各章节明细表为准。</p>
 </section>'''
 
@@ -447,6 +461,7 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1', locator=None):
     cards = detect.get('cards', [])
     a = (advisor or {}).get('data') or {}
     coverage = detect.get('coverage') or {}
+    ts = (cluster_summary or {}).get('time_summary', []) if mode != 'single' else []
     world = coverage.get('expected_world_size')
     observed = coverage.get('observed_ranks', [])
     missing = coverage.get('missing_ranks', [])
@@ -455,7 +470,20 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1', locator=None):
                      f'唯一 step：{coverage.get("unique_step_count", "未知")}；'
                      f'rank-step 样本：{coverage.get("rank_step_samples", "未知")}。'
                      f'缺失 rank：{esc(missing if missing else "无或未知")}。'
-                     '结论仅限已提供的 rank 与采集窗口；不据此定位未提供 rank 的瓶颈。</p></div>') if coverage else ''
+                     '结论仅限已提供的 rank 与采集窗口；不据此定位未提供 rank 的瓶颈。</p></div>') if coverage and not ts else ''
+    if ts:
+        steps, ranks = steps_ranks(ts)
+        card_count = len(coverage.get('observed_ranks', {c['rank'] for c in cards if c.get('usable', True)}))
+        coverage_html = (
+            '<div class="card p-5 mt-4"><h3>数据覆盖与结论范围</h3>'
+            f'<p>集群汇总覆盖 {len(ranks)} Rank；唯一 Step：{len(steps)}；rank-step 样本：{len(ts)}。</p>'
+            f'<p>卡级 Prof 覆盖 {card_count} Rank。'
+            + ('专家建议、Insight 定位、双卡比对和泳道以各章节提供的卡级证据为准。'
+               if card_count else '本次输入仅含集群汇总，卡级定位需要对应的原始 Prof。')
+            + '</p></div>')
+        if 'prof' in steps and not coverage.get('synthetic_step_ranks'):
+            coverage_html += ('<p>集群摘要包含整段汇总标签 prof。该标签对应采集范围，'
+                              '不能解释为单次迭代或请求。</p>')
     whole_ranks = coverage.get('synthetic_step_ranks', [])
     if whole_ranks:
         coverage_html += ('<div class="card p-5 mt-4"><h3>整段 prof 汇总口径</h3>'
@@ -465,25 +493,24 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1', locator=None):
                           '比较以各卡提供的采集范围为准；时窗和负载等价需另行核验。</p></div>')
     missing_metrics = {rank: value.get('missing_required') for rank, value in (a.get('per_rank') or {}).items()
                        if value.get('missing_required')}
+    use_card_metrics = bool(missing_metrics) and not (cluster_summary or {}).get('step_metrics_normalized')
     if missing_metrics:
         coverage_html += ('<div class="card p-5 mt-4"><h3>部分摘要指标未知</h3>'
                           f'<p>{esc(missing_metrics)}。相关占比不具备诊断依据；'
                           '兼容表中的缺省数字不是实测值，请使用已有绝对时间与事件证据。</p></div>')
     kpis = []
-    ts = (cluster_summary or {}).get('time_summary', [])
-    if mode != 'single' and ts:
-        steps, ranks = steps_ranks(ts)
+    if ts:
         avg_stage = sum(t['stage(us)'] for t in ts) / len(ts) / 1000
+        shares = {label: complete_average(ts, key) for label, key in
+                  (('计算', 'computing_ratio'), ('未掩盖通信', 'comm_ratio'), ('空闲', 'free_ratio'))}
         kpis = [
             ('Rank 数', f'{len(ranks)}', '个', 'text-blue-400', '🖥️'),
-            ('Step 数', f'{len(steps)}', '个/卡', 'text-purple-400', '🪜'),
+            ('Step 数', f'{len(steps)}', '个', 'text-purple-400', '🪜'),
             ('平均 Stage', f'{avg_stage:.1f}', 'ms', 'text-sky-400', '⏱️'),
-            ('计算占比', f"{sum(t['computing_ratio'] for t in ts)/len(ts)*100:.1f}", '%',
-             'text-emerald-400', '⚙️'),
-            ('未掩盖通信占比', f"{sum(t['comm_ratio'] for t in ts)/len(ts)*100:.1f}", '%',
-             'text-orange-400', '📡'),
-            ('空闲占比', f"{sum(t['free_ratio'] for t in ts)/len(ts)*100:.1f}", '%',
-             'text-amber-400', '💤'),
+            *[(label + '占比', formatted_ratio(shares[label]), '', color, icon)
+              for label, color, icon in (('计算', 'text-emerald-400', '⚙️'),
+                                         ('未掩盖通信', 'text-orange-400', '📡'),
+                                         ('空闲', 'text-amber-400', '💤'))],
         ]
     else:
         kpis = [
@@ -497,7 +524,7 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1', locator=None):
             ('空闲占比', f"{(a.get('free_ratio') or 0)*100:.1f}", '%',
              'text-amber-400', '💤'),
         ]
-    if missing_metrics:
+    if use_card_metrics:
         keys = {key for values in missing_metrics.values() for key in values}
         mapping = {'计算占比': 'Computing', '未掩盖通信占比': 'Communication(Not Overlapped)',
                    '通信占比': 'Communication(Not Overlapped)', '空闲占比': 'Free'}
@@ -511,15 +538,17 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1', locator=None):
         f'<div class="absolute -right-3 -bottom-4 opacity-10 text-6xl">{k[4]}</div></div>'
         for k in kpis)
     # 概览小结：自动解读 KPI 结构，给出最可能的问题方向
-    if missing_metrics:
+    if ts and None in shares.values():
+        ov_summary = ('<div class="card p-5 mt-4"><h3>概览小结</h3>'
+                      '<p>部分 Rank × Step 记录缺少时间分解或有效 Stage。'
+                      '相应占比标为未知，不能确定完整时间结构或主导瓶颈。</p></div>')
+    elif use_card_metrics:
         ov_summary = ('<div class="card p-5 mt-4"><h3>概览小结</h3>'
                       '<p>部分摘要指标未知；不能确定时间结构或主导瓶颈。'
                       '整个 prof 的范围和已有绝对事件证据仍可查看。</p></div>')
-    elif mode != 'single' and ts:
-        c_pct = sum(t['computing_ratio'] for t in ts) / len(ts)
-        m_pct = sum(t['comm_ratio'] for t in ts) / len(ts)
-        f_pct = sum(t['free_ratio'] for t in ts) / len(ts)
-        struct = {'计算': c_pct, '未掩盖通信': m_pct, '空闲': f_pct}
+    elif ts:
+        c_pct, m_pct, f_pct = shares.values()
+        struct = shares
         top_part = max(struct, key=struct.get)
         hint = {
             '计算': '计算占主导，属计算密集负载，优化重点在算子效率与融合。',
@@ -529,8 +558,7 @@ def sec_overview(detect, advisor, cluster_summary, mode, num='1', locator=None):
                   '优化重点在提升下发并发度。',
         }[top_part]
         ov_summary = (f'<div class="card p-5 mt-4"><h3>概览小结</h3>'
-                      f'<p>本次采集覆盖 <b class="text-blue-400">{len(ranks)}</b> 个 rank × '
-                      f'<b class="text-purple-400">{len(steps)}</b> 个 step，平均 Stage '
+                      f'<p>集群摘要的 {len(ts)} 个 rank-step 样本平均 Stage '
                       f'<b class="text-sky-400">{avg_stage:.1f}ms</b>；时间结构为计算 '
                       f'{c_pct*100:.1f}% / 未掩盖通信 {m_pct*100:.1f}% / 空闲 {f_pct*100:.1f}%。'
                       f'占比最高的是 <b class="text-orange-400">{top_part}</b>'
@@ -578,13 +606,11 @@ def sec_cluster(cluster_summary, num='3'):
     by_step = {}
     for t in ts:
         by_step.setdefault(str(t['step']), []).append(t)
-    comp_avg = [round(sum(m['computing(us)'] for m in by_step.get(s, [])) /
-                      max(len(by_step.get(s, [])), 1) / 1000, 2) for s in steps]
-    comm_avg = [round(sum(m['communication_not_overlapped(us)'] for m in by_step.get(s, [])) /
-                      max(len(by_step.get(s, [])), 1) / 1000, 2) for s in steps]
-    free_avg = [round(sum(m['free(us)'] for m in by_step.get(s, [])) /
-                      max(len(by_step.get(s, [])), 1) / 1000, 2) for s in steps]
-
+    metric_keys = ('computing(us)', 'communication_not_overlapped(us)', 'free(us)')
+    parts_by_step = {s: [complete_average(by_step[s], key) for key in metric_keys] for s in steps}
+    comp_avg, comm_avg, free_avg = [
+        [round(value / 1000, 2) if value is not None else None for value in series]
+        for series in zip(*parts_by_step.values())]
     step_rows = []
     stage_avg_l, spread_l, slowest_l = [], [], []
     for s in steps:
@@ -595,9 +621,7 @@ def sec_cluster(cluster_summary, num='3'):
         spread = (max(m['stage(us)'] for m in members) -
                   min(m['stage(us)'] for m in members)) / 1000 if len(members) > 1 else 0
         step_rows.append([s, len(members), f'{stage_avg:.1f}',
-                          f"{sum(m['computing(us)'] for m in members)/n/1000:.1f}",
-                          f"{sum(m['communication_not_overlapped(us)'] for m in members)/n/1000:.1f}",
-                          f"{sum(m['free(us)'] for m in members)/n/1000:.1f}",
+                          *(f'{v / 1000:.1f}' if v is not None else '—' for v in parts_by_step[s]),
                           f"step{s}/rank{worst['rank']}", f'{spread:.1f}'])
         stage_avg_l.append(round(stage_avg, 2))
         spread_l.append(round(spread, 2))
@@ -633,17 +657,17 @@ def sec_cluster(cluster_summary, num='3'):
                      f'（共 {s0["votes"]} 次投票）。</p>{slow_chart}</div>')
 
     # 集群小结：自动汇总时间结构与最慢/波动最大的 step
-    total_stage = sum(_f(r[2]) for r in step_rows) or 1.0
-    c_share = sum(_f(r[3]) for r in step_rows) / total_stage
-    m_share = sum(_f(r[4]) for r in step_rows) / total_stage
-    f_share = sum(_f(r[5]) for r in step_rows) / total_stage
+    stage_mean = complete_average(ts, 'stage(us)')
+    means = [complete_average(ts, key) for key in metric_keys]
+    c_share, m_share, f_share = [formatted_ratio(v / stage_mean if v is not None and stage_mean else None)
+                                 for v in means]
     slow_row = max(step_rows, key=lambda r: _f(r[2]))
     vola_row = max(step_rows, key=lambda r: _f(r[7]))
-    vola_pct = _f(vola_row[7]) / _f(slow_row[2]) * 100 if _f(slow_row[2]) else 0
+    vola_pct = _f(vola_row[7]) / _f(vola_row[2]) * 100 if _f(vola_row[2]) else 0
     cluster_note = f'''<div class="card p-5 mt-4"><h3>集群小结</h3>
-<p>全部 step 合计时间结构：计算 <b class="text-emerald-400">{c_share*100:.1f}%</b> /
-未掩盖通信 <b class="text-orange-400">{m_share*100:.1f}%</b> /
-空闲 <b class="text-amber-400">{f_share*100:.1f}%</b>。最慢 step 为
+<p>全部 rank-step 合计时间结构：计算 <b class="text-emerald-400">{c_share}</b> /
+未掩盖通信 <b class="text-orange-400">{m_share}</b> /
+空闲 <b class="text-amber-400">{f_share}</b>。最慢 step 为
 <b class="text-red-400">step {esc(str(slow_row[0]))}</b>（平均 Stage {slow_row[2]}ms，
 最慢组合 {esc(str(slow_row[6]))}）；step 间波动最大的是 step {esc(str(vola_row[0]))}
 （Stage 极差 {vola_row[7]}ms，约为其平均 Stage 的 {vola_pct:.0f}%）。</p>
@@ -652,7 +676,17 @@ def sec_cluster(cluster_summary, num='3'):
 若结构稳定且计算占主导，则重点看计算类条目与 Top 耗时算子。</p></div>'''
 
     trend_js = CLUSTER_CHART_JS.replace(
-        '{{STEP_TREND_DATA}}', json.dumps(chart_data, ensure_ascii=False))
+        '{{STEP_TREND_DATA}}', json.dumps(chart_data, ensure_ascii=False).replace('<', '\\u003c'))
+    comm_groups = cluster_summary.get('top_comm_by_type') or {}
+    comm_rankings = ''
+    if comm_groups:
+        boards = []
+        for kind, ops in comm_groups.items():
+            rows = [[op['op'], op['total_elapse(ms)'], op['count']] for op in ops]
+            boards.append(f'<details open><summary>{esc(kind)}</summary>'
+                          + html_table(['算子', '累计耗时(ms)', '次数'], rows) + '</details>')
+        comm_rankings = ('<div class="card p-5 mt-4"><h3>各通信类型算子耗时 Top 10（集群输出）</h3>'
+                         + ''.join(boards) + '</div>')
 
     return f'''
 <section id="cluster">
@@ -674,7 +708,7 @@ def sec_cluster(cluster_summary, num='3'):
           <span class="dot" style="background:#fb923c"></span>未掩盖通信</label>
         <label class="chk"><input type="checkbox" value="free" checked>
           <span class="dot" style="background:#64748b"></span>空闲</label>
-        <label class="chk"><input type="checkbox" value="stage">
+        <label class="chk"><input type="checkbox" value="stage" {'checked' if any(None in series for series in (comp_avg, comm_avg, free_avg)) else ''}>
           <span class="dot" style="background:#34d399"></span>Stage 总耗时</label>
         <label class="chk"><input type="checkbox" value="spread">
           <span class="dot" style="background:#ef4444"></span>Stage 极差</label>
@@ -687,6 +721,7 @@ def sec_cluster(cluster_summary, num='3'):
   </div>
   <script>{trend_js}</script>
   {slow_html}
+  {comm_rankings}
   {cluster_note}
 </section>'''
 
@@ -700,7 +735,7 @@ def sec_advisor(advisor, mw, num='4'):
 
     inner = ''
     if advisor['unified']:
-        scope = '整体（全部卡）' if len(a.get('ranks', [])) > 1 else '单卡'
+        scope = '本次提供的卡级 Prof' if len(a.get('ranks', [])) > 1 else '单卡'
         rank_ids = a.get('ranks', [])
         ranks = ', '.join(str(r) for r in rank_ids[:12])
         if len(rank_ids) > 12:
@@ -745,7 +780,7 @@ def sec_advisor(advisor, mw, num='4'):
             include=['总耗时', '耗时'], cat_name='算子', val_name='总耗时(ms)',
             height=max(240, 30 * len(ops_rows)),
             note='悬停查看调用次数等其余列。')
-        inner += ('<div class="card p-5 mt-4"><h3>Top 10 耗时算子（全部卡聚合）</h3>'
+        inner += ('<div class="card p-5 mt-4"><h3>Top 10 耗时算子（卡级 Prof 聚合）</h3>'
                   + (ops_chart or html_table(top_ops['header'], ops_rows)) + '</div>')
 
     fields = ('op_name', 'elapse', 'wait', 'transit', 'idle', 'n')
@@ -759,7 +794,7 @@ def sec_advisor(advisor, mw, num='4'):
                                                 'op_name', 'elapse')
             history_note = '<p>此历史摘要仅含此前保留的全局榜单。重新生成 Advisor 可查看各类型完整排名。</p>'
     if comm_groups:
-        parts = ['<div class="card p-5 mt-4"><h3>各通信类型算子耗时 Top 10（全部卡聚合）</h3>', history_note]
+        parts = ['<div class="card p-5 mt-4"><h3>各通信类型算子耗时 Top 10（卡级 Prof 聚合）</h3>', history_note]
         for kind, ops in comm_groups.items():
             rows = [[op['op_name'], *(f'{_f(op[key]):.3f}' for key in fields[1:-1]), op['n']] for op in ops]
             cg_chart = auto_chart(
@@ -807,7 +842,7 @@ def sec_advisor(advisor, mw, num='4'):
               f'<a href="{esc(link)}" target="_blank">{esc(link)}</a></p>')
     return f'''
 <section id="advisor">
-  <h2>{num}. 专家建议（advisor，整体口径）</h2>
+  <h2>{num}. 专家建议（advisor，卡级 Prof）</h2>
   <div class="card p-5">{inner}</div>
 </section>'''
 
@@ -860,7 +895,7 @@ def sec_recipes(cluster_summary, mw, num='5'):
                 continue
             hdr = header
             if hdr is None:
-                hdr = list(rows[0].keys())
+                hdr = list(rows[0].keys())[:24]
             data = [[row.get(c, '') for c in hdr] for row in rows]
             r_chart = auto_chart(
                 hdr, data[:20], kind='hbar', wide=True,
@@ -1133,7 +1168,7 @@ def sec_swimlane(mode, mw, num='7'):
 Stream 泳道→Ascend Hardware（npu算子），通信域泳道→Communication；Plane 与总览泳道不统计。
 持续/自用时间为各 Rank 累加，平均持续时间 = 累计持续时间 ÷ 累计发生次数，最大/最小为跨 Rank 极值。
 数据源：{src}</p>
-<div class="card p-5"><h3>三大类汇总（跨全部 Rank 聚合）</h3>
+<div class="card p-5"><h3>三大类汇总（有泳道数据的卡级 Prof）</h3>
 {sum_chart or html_table(['类别'] + OP_STAT_COLS, sum_rows)}</div>''']
 
     for cat in CATEGORY_ORDER:
@@ -1188,21 +1223,17 @@ Stream 泳道→Ascend Hardware（npu算子），通信域泳道→Communication
 
 def sec_appendix(mw, num='8'):
     files = []
-    for pattern in ('detect_result.json', 'advisor/*', 'swimlane/*', 'compare/*',
-                    'cluster_analysis_output/recipes_summary.*',
-                    'cluster_analysis_output/recipes/*/*'):
-        for fp in glob.glob(os.path.join(mw, pattern)):
-            if os.path.isfile(fp):
-                rel = os.path.relpath(fp, mw).replace('\\', '/')
-                files.append((rel, os.path.getsize(fp)))
-    files.sort()
-    crel = cluster_rel(mw)
-    ca_prefix = 'cluster_analysis_output/'
+    for directory, prefix, patterns in (
+            (mw, '', ('detect_result.json', 'advisor/*', 'swimlane/*', 'compare/*')),
+            (cluster_dir(mw), cluster_rel(mw) + '/', ('recipes_summary.*', 'recipes/*/*'))):
+        for pattern in patterns:
+            for fp in glob.glob(os.path.join(directory, pattern)):
+                if os.path.isfile(fp):
+                    rel = os.path.relpath(fp, directory).replace('\\', '/')
+                    files.append((prefix + rel, os.path.getsize(fp)))
     tiles = []
-    for rel, size in files:
-        href = (f'{crel}/{rel[len(ca_prefix):]}'
-                if rel.startswith(ca_prefix) else rel)
-        tiles.append((f'<a href="{esc(href)}" target="_blank">{esc(os.path.basename(rel))}</a>',
+    for rel, size in sorted(files):
+        tiles.append((f'<a href="{esc(rel)}" target="_blank">{esc(os.path.basename(rel))}</a>',
                       [f'<span>相对路径</span><b>{esc(rel)}</b>',
                        f'<span>大小</span><b>{size / 1024:.1f} KB</b>']))
     return f'''<section id="appendix"><h2>{num}. 附录：中间件清单</h2>
@@ -1308,7 +1339,8 @@ def main():
         subtitle = '专家建议 · 泳道算子统计（Thread / Stream / 通信域）'
         mode_label = '单卡模式'
 
-    nav = ''.join(f'<a href="#{i}">{t}</a>' for i, t in nav_items)
+    nav_ids = {match[1] for section in sections if (match := re.search(r'<section id="([^"]+)">', section))}
+    nav = ''.join(f'<a href="#{i}">{t}</a>' for i, t in nav_items if i in nav_ids)
 
     # every major section folds into <details open> (user requirement #9)
     body_parts = [fold(s) for s in sections if s]

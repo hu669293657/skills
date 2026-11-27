@@ -44,9 +44,9 @@
         axisPointer: { type: stackMode ? 'shadow' : 'line' },
         formatter(ps) {
           const i = ps[0] ? ps[0].dataIndex : 0;
-          let h = '<div style="font-weight:700;margin-bottom:4px">Step ' + steps[i] + '</div>';
+          let h = '<div style="font-weight:700;margin-bottom:4px">Step ' + escapeText(steps[i]) + '</div>';
           ps.forEach(p => { h += p.marker + p.seriesName + '：<b>' + fmt(p.value) + ' ms</b><br>'; });
-          if (slowest[i]) h += '<span style="color:#94a3b8">最慢组合：' + slowest[i] + '</span>';
+          if (slowest[i]) h += '<span style="color:#94a3b8">最慢组合：' + escapeText(slowest[i]) + '</span>';
           return h;
         }
       }, window.ECHARTS_TOOLTIP_STYLE),
@@ -65,6 +65,10 @@
       },
       series
     };
+  }
+
+  function escapeText(value) {
+    return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   function fmt(v) { return (typeof v === 'number') ? v.toFixed(2) : v; }

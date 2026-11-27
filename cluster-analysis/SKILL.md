@@ -1,6 +1,6 @@
 ---
 name: cluster-analysis
-description: 分析单份昇腾（Ascend）NPU Prof。适用于单卡或多卡的训练与推理性能分析、慢卡或慢算子定位、通信诊断、advisor、同次采集内的双卡比对和 HTML 报告。输入需包含卡级 Prof 采集目录。两份集群采集的对比使用 cluster-compare，故障日志排查使用 issue-analyzer，Host 系统级瓶颈诊断使用 cpu-host-performance。
+description: 分析单份昇腾（Ascend）NPU 卡级 Prof 或已有 cluster_analysis_output，生成 performance_report.html。适用于单卡或多卡性能分析、慢卡或慢算子定位、通信诊断、Advisor 和同次采集内的双卡比对。两份集群采集的对比使用 cluster-compare，故障日志排查使用 issue-analyzer，Host 系统级瓶颈诊断使用 cpu-host-performance。
 ---
 
 # 昇腾 NPU 训练性能分析技能（cluster-analysis）
@@ -9,7 +9,9 @@ description: 分析单份昇腾（Ascend）NPU Prof。适用于单卡或多卡�
 
 TEXT 导出目录可以同时存在 DB。以采集配置和实际产物能力共同路由，不根据 DB 文件存在猜测导出格式。后续阶段使用 detector 给出的实际卡根目录。原始 step 与整段汇总 step（`prof`）分别标记；整段分析只计一个 step，不解释为一次训练迭代或一个推理请求。报告先检查 `workflow_status.json`：`complete` 才算完整完成，`partial`/`failed` 必须说明失败阶段。结论限于已提供 rank 和 step/window，通信占比高或 collective 耗时短不等于已经定位慢卡。
 
-默认主交付为 `performance_report.html`。P6a Insight 瓶颈定位为「数据概览」提供严重度组合卡，为「结论与建议」提供双栏证据工作台。两处共用归一化严重度。每类最多三条候选，Free 展示整步空闲分布并标记候选位置，计算默认折叠实例级 PMU、输入输出与任务参数。泳道、完整算子和精确时间可展开复核。严重度用于排查排序，归一化与缺失口径见 [references/insight_localization.md](references/insight_localization.md)。
+把数据目录交给 `scripts/run_workflow.py --input <路径>`。纯集群输出、集群输出随附部分卡级 Prof、全量卡级 Prof 都用 P7 的 `scripts/report_assets/template.html` 生成 `performance_report.html`。已有集群输出时，集群总览和 KPI 取它覆盖的全部 Rank × Step，原库只读。卡级 Advisor、Insight、双卡比对和泳道使用实际提供的 Prof，首页分别显示集群汇总与卡级覆盖。缺少卡级 Prof 时直接使用集群汇总出报。
+
+P6a Insight 瓶颈定位为「数据概览」提供严重度组合卡，为「结论与建议」提供双栏证据工作台。两处共用归一化严重度。每类最多三条候选，Free 展示整步空闲分布并标记候选位置，计算默认折叠实例级 PMU、输入输出与任务参数。归一化与缺失口径见 [references/insight_localization.md](references/insight_localization.md)。
 
 有卡级数据时执行 P6a，并完整阅读 [references/insight_localization.md](references/insight_localization.md)。`insight_bottlenecks.json` 是总报告使用的定位证据，同名 `.md`/`.html` 是附加摘要，不能代替总报告或被当作完成完整流程的依据。
 
@@ -42,7 +44,7 @@ TEXT 导出目录可以同时存在 DB。以采集配置和实际产物能力共
 | `references/pipeline.md` | **单一事实来源**：阶段命令、目录契约、全局纪律、并行调度、验收清单、扩展守则 |
 | `references/recipes_catalog.md` | 五大类 23 正式 + 1 扩展 recipe 目录 |
 | `references/msprof_cli.md` | msprof-analyze 原生 CLI 与 fallback 能力对照 |
-| `references/html_template_spec.md` | HTML 模板交互规范（模板改动只改这里） |
+| `references/html_template_spec.md` | P7 唯一主报告模板的布局与交互规范 |
 | `references/insight_localization.md` | 原报告结论章节的 Insight 映射、慢卡归因、计算/Free 证据及定位输出契约 |
 | `references/whole_prof_step.md` | 无分步 TEXT/DB 整段单 step 规则、来源、时间边界与验收 |
 | `references/db_support.md` | DB-only 适配契约：analysis.db/主 DB 已验证 schema、单位、采集窗语义、来源标记与限制 |

@@ -36,21 +36,27 @@ import sqlite3
 import sys
 import traceback
 from collections import defaultdict
+from itertools import groupby
+from pathlib import Path
 
 from lib.common import is_junk, read_csv_rows, read_json, to_f
+from lib.cluster_source import base_info, db_tables, install_steps, open_db, read_steps, source_signature
+from lib.communication_top import communication_tops
 from lib.config import AGG_ROWS, COMM_NAME_PATTERN
-from lib.rank_timing import legacy_zero_fields
+from lib.workflow_state import write_json
 
 
 class Ctx:
     """分析上下文：所有 recipe 函数统一接收 ctx，并返回 (rows|None, reason|None)。"""
 
-    def __init__(self, cur, card_dirs, root, recipes_dir, top_num=20):
+    def __init__(self, cur, card_dirs, root, recipes_dir, top_num=20, supplied=False):
         self.cur = cur                    # cluster_analysis.db 游标
         self.card_dirs = card_dirs        # rank -> 本地 PROF 目录
         self.root = root                  # 多卡根目录
         self.recipes_dir = recipes_dir    # recipe csv 输出根目录
         self.top_num = top_num            # hccl_sum TopN
+        self.supplied = supplied
+        self.communication_summary = None
 
 
 def norm_op(name):
@@ -63,6 +69,13 @@ def q(cur, sql, args=()):
     return cur.fetchall()
 
 
+def card_paths(ctx):
+    if getattr(ctx, 'supplied', False):
+        return ctx.card_dirs
+    return {int(rank): path if path and os.path.isdir(path) else ctx.card_dirs.get(int(rank))
+            for rank, path in q(ctx.cur, 'SELECT rankId, profilePath FROM RankDeviceMap')}
+
+
 # ---------------- 拆解对比类 ----------------
 
 def recipe_cluster_time_summary(ctx):
@@ -71,17 +84,23 @@ def recipe_cluster_time_summary(ctx):
                       'communication, overlapped, free, stage, bubble, preparing, dp_index, pp_index, tp_index '
                       'FROM ClusterStepTraceTime WHERE type = \'rank\' ORDER BY CAST(step AS INTEGER), "index"')
     out = []
+    def rounded(value):
+        return None if value is None else round(value, 1)
+
+    def ratio(value, stage):
+        return round(value / stage, 4) if value is not None and stage else None
+
     for step, rank, comp, comm_no, comm, overlap, free, stage, bubble, prep, dp, pp, tp in rows:
         out.append({
-            'step': step, 'rank': int(rank), 'computing(us)': round(comp, 1),
-            'communication_not_overlapped(us)': round(comm_no, 1),
-            'communication(us)': comm, 'overlapped(us)': overlap, 'free(us)': round(free, 1),
-            'stage(us)': round(stage, 1), 'bubble(us)': round(bubble, 1),
-            'preparing(us)': round(prep, 1),
+            'step': step, 'rank': int(rank), 'computing(us)': rounded(comp),
+            'communication_not_overlapped(us)': rounded(comm_no),
+            'communication(us)': comm, 'overlapped(us)': overlap, 'free(us)': rounded(free),
+            'stage(us)': rounded(stage), 'bubble(us)': rounded(bubble),
+            'preparing(us)': rounded(prep),
             'dp_index': dp, 'pp_index': pp, 'tp_index': tp,
-            'computing_ratio': round(comp / stage, 4) if stage else 0,
-            'comm_ratio': round(comm_no / stage, 4) if stage else 0,
-            'free_ratio': round(free / stage, 4) if stage else 0,
+            'computing_ratio': ratio(comp, stage),
+            'comm_ratio': ratio(comm_no, stage),
+            'free_ratio': ratio(free, stage),
         })
     return out, None
 
@@ -145,16 +164,15 @@ def recipe_calibrate_npu_gpu(ctx):
 # ---------------- 计算类 ----------------
 
 def recipe_compute_op_sum(ctx):
-    paths = q(ctx.cur, 'SELECT rankId, profilePath FROM RankDeviceMap')
-    rank_map = {}
-    for rank, path in paths:
-        rank_map[int(rank)] = path if path and os.path.isdir(path) else ctx.card_dirs.get(int(rank))
+    rank_map = card_paths(ctx)
     per_rank = {}
     for rank in sorted(rank_map):
         path = rank_map[rank]
         if not path:
             continue
         stats = read_csv_rows(os.path.join(path, 'ASCEND_PROFILER_OUTPUT', 'op_statistic.csv'))
+        if not stats:
+            continue
         agg = {}
         for r in stats:
             name = r.get('OP Type', '')
@@ -181,16 +199,14 @@ def recipe_compute_op_sum(ctx):
             row['max_min_ratio'] = round(max(totals) / min(totals), 3) if min(totals) else None
             row['load_imbalance'] = '⚠' if (row['max_min_ratio'] or 0) > 1.2 else 'ok'
         out.append(row)
-    return out, None
+    return (out, None) if out else (None, '无卡级 op_statistic.csv 计算算子明细')
 
 
 def recipe_freq_analysis(ctx):
     """Use recorded clock samples; PMU cycles may sum over multiple cores."""
     freqs = []
     per_rank = []
-    paths = q(ctx.cur, 'SELECT rankId, profilePath FROM RankDeviceMap')
-    rank_map = {int(r): (p if p and os.path.isdir(p) else ctx.card_dirs.get(int(r)))
-                for r, p in paths}
+    rank_map = card_paths(ctx)
     for rank in sorted(rank_map):
         path = rank_map[rank]
         if not path:
@@ -285,43 +301,49 @@ def recipe_communication_group_map(ctx):
 
 
 def recipe_communication_time_sum(ctx):
-    rows = q(ctx.cur, 'SELECT step, rank_id, hccl_op_name, elapsed_time, transit_time, wait_time, '
-                      'idle_time, synchronization_time FROM ClusterCommunicationTime')
-    agg = defaultdict(lambda: {'n': 0, 'elapse': [], 'transit': [], 'wait': [], 'idle': [], 'sync': []})
-    for step, rank, op, elapse, transit, wait, idle, sync in rows:
-        if op in AGG_ROWS:
+    if ctx.communication_summary is not None:
+        return ctx.communication_summary
+    rows = ctx.cur.execute('SELECT hccl_op_name, elapsed_time, transit_time, wait_time, '
+                           'idle_time, synchronization_time FROM ClusterCommunicationTime')
+    agg = defaultdict(lambda: {'n': 0, 'elapse': 0.0, 'transit': 0.0, 'wait': 0.0, 'idle': 0.0,
+                               'sync': 0.0, 'max': 0.0, 'min': float('inf')})
+    for op, elapse, transit, wait, idle, sync in rows:
+        if not op or op in AGG_ROWS:
             continue
         a = agg[norm_op(op)]
+        el = to_f(elapse)
         a['n'] += 1
-        a['elapse'].append(to_f(elapse))
-        a['transit'].append(to_f(transit))
-        a['wait'].append(to_f(wait))
-        a['idle'].append(to_f(idle))
-        a['sync'].append(to_f(sync))
+        a['elapse'] += el
+        a['max'] = max(a['max'], el)
+        a['min'] = min(a['min'], el)
+        a['transit'] += to_f(transit)
+        a['wait'] += to_f(wait)
+        a['idle'] += to_f(idle)
+        a['sync'] += to_f(sync)
     out = []
-    for op, a in sorted(agg.items(), key=lambda x: -sum(x[1]['elapse'])):
+    for op, a in sorted(agg.items(), key=lambda x: -x[1]['elapse']):
         el = a['elapse']
         out.append({
             'op': op, 'count': a['n'],
-            'total_elapse(ms)': round(sum(el), 3), 'avg_elapse(ms)': round(sum(el) / len(el), 3),
-            'max_elapse(ms)': round(max(el), 3), 'min_elapse(ms)': round(min(el), 3),
-            'total_wait(ms)': round(sum(a['wait']), 3),
-            'total_transit(ms)': round(sum(a['transit']), 3),
-            'total_idle(ms)': round(sum(a['idle']), 3),
-            'total_sync(ms)': round(sum(a['sync']), 3),
-            'wait_ratio': round(sum(a['wait']) / sum(el), 4) if sum(el) else 0,
+            'total_elapse(ms)': round(el, 3), 'avg_elapse(ms)': round(el / a['n'], 3),
+            'max_elapse(ms)': round(a['max'], 3), 'min_elapse(ms)': round(a['min'], 3),
+            'total_wait(ms)': round(a['wait'], 3),
+            'total_transit(ms)': round(a['transit'], 3),
+            'total_idle(ms)': round(a['idle'], 3),
+            'total_sync(ms)': round(a['sync'], 3),
+            'wait_ratio': round(a['wait'] / el, 4) if el else 0,
         })
-    return out, None
+    ctx.communication_summary = (out, None) if out else (None, '无通信时间统计')
+    return ctx.communication_summary
 
 
 def recipe_hccl_sum(ctx):
     """Top-N communication ops with per-rank split (msprof hccl_sum flavor)."""
-    rows = q(ctx.cur, 'SELECT step, rank_id, hccl_op_name, elapsed_time, wait_time, transit_time '
-                      'FROM ClusterCommunicationTime')
+    rows = ctx.cur.execute('SELECT rank_id, hccl_op_name, elapsed_time FROM ClusterCommunicationTime')
     per = defaultdict(lambda: defaultdict(lambda: {'elapse': 0.0, 'n': 0}))
     ranks = set()
-    for step, rank, op, elapse, wait, transit in rows:
-        if op in AGG_ROWS:
+    for rank, op, elapse in rows:
+        if rank is None or not op or op in AGG_ROWS:
             continue
         key = norm_op(op)
         e = per[key][int(rank)]
@@ -339,7 +361,7 @@ def recipe_hccl_sum(ctx):
         out.append(row)
         if len(out) >= ctx.top_num:
             break
-    return out, None
+    return (out, None) if out else (None, '无各 Rank 通信时间统计')
 
 
 def recipe_communication_matrix_sum(ctx):
@@ -427,20 +449,20 @@ def recipe_slow_rank(ctx):
         for key in (group_name, pg_name):
             if key and len(members) > 1:
                 expected[str(key)] = members
-    rows = q(ctx.cur, 'SELECT step, rank_id, hccl_op_name, group_name, elapsed_time FROM ClusterCommunicationTime')
-    groups = defaultdict(list)
-    for step, rank, op, group, elapse in rows:
-        if op in AGG_ROWS:
-            continue
-        groups[(step, op, str(group))].append((int(rank), to_f(elapse)))
+    if not expected:
+        return None, '无可用于对齐的通信组参与 rank 映射'
+    rows = ctx.cur.execute('SELECT step, hccl_op_name, group_name, rank_id, elapsed_time '
+                           'FROM ClusterCommunicationTime ORDER BY step, hccl_op_name, group_name')
     votes = defaultdict(int)
     op_votes = defaultdict(lambda: defaultdict(int))
-    for (step, op, group), members in groups.items():
-        ranks = [r for r, _ in members]
-        if group not in expected or set(ranks) != expected[group] or len(ranks) != len(set(ranks)):
+    for (_, op, group), members in groupby(rows, key=lambda row: row[:3]):
+        if not op or op in AGG_ROWS or str(group) not in expected:
             continue
-        members.sort(key=lambda x: x[1])
-        slow = members[0][0]
+        timings = [(int(rank), to_f(elapse, None)) for _, _, _, rank, elapse in members if rank is not None]
+        ranks = {rank for rank, _ in timings}
+        if ranks != expected[str(group)] or len(timings) != len(ranks) or any(elapse is None for _, elapse in timings):
+            continue
+        slow = min(timings, key=lambda row: (row[1], row[0]))[0]
         votes[slow] += 1
         op_votes[op][slow] += 1
     total_votes = sum(votes.values()) or 1
@@ -505,9 +527,7 @@ def recipe_communication_bottleneck(ctx):
 # ---------------- Host 下发类 ----------------
 
 def recipe_cann_api_sum(ctx):
-    paths = q(ctx.cur, 'SELECT rankId, profilePath FROM RankDeviceMap')
-    rank_map = {int(r): (p if p and os.path.isdir(p) else ctx.card_dirs.get(int(r)))
-                for r, p in paths}
+    rank_map = card_paths(ctx)
     per_rank = {}
     for rank in sorted(rank_map):
         path = rank_map[rank]
@@ -716,17 +736,19 @@ def build_summary_md(status, data):
         lines.append('')
     ts = data.get('cluster_time_summary') or []
     if ts:
+        def unit(value, scale, suffix=''):
+            return '—' if value is None else f'{value * scale:.1f}{suffix}'
+
         steps = sorted({str(t['step']) for t in ts})
         lines.append('## 集群时间总览（cluster_time_summary，按 step × rank）')
         lines.append('')
         lines.append('| step | rank | Stage(ms) | 计算(ms) | 未掩盖通信(ms) | 空闲(ms) | 通信占比 | 空闲占比 |')
         lines.append('|---|---|---|---|---|---|---|---|')
         for r in ts:
-            lines.append(f"| {r['step']} | {r['rank']} | {r['stage(us)']/1000:.1f} | "
-                         f"{r['computing(us)']/1000:.1f} | "
-                         f"{r['communication_not_overlapped(us)']/1000:.1f} | "
-                         f"{r['free(us)']/1000:.1f} | {r['comm_ratio']*100:.1f}% | "
-                         f"{r['free_ratio']*100:.1f}% |")
+            times = [unit(r[key], 0.001) for key in
+                     ('stage(us)', 'computing(us)', 'communication_not_overlapped(us)', 'free(us)')]
+            ratios = [unit(r[key], 100, '%') for key in ('comm_ratio', 'free_ratio')]
+            lines.append(f"| {r['step']} | {r['rank']} | " + ' | '.join(times + ratios) + ' |')
         lines.append('')
         lines.append(f"- 共 {len(steps)} 个 step：{', '.join(steps[:10])}"
                      f"{'…' if len(steps) > 10 else ''}")
@@ -745,77 +767,97 @@ def build_summary_md(status, data):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', required=True, help='multi-card root containing cluster_analysis_output')
+    parser.add_argument('--root', required=True, help='root used to locate available rank Prof data')
     parser.add_argument('--top-num', type=int, default=20, help='hccl_sum TopN')
+    parser.add_argument('--cluster-db', help='existing cluster database, opened read-only')
+    parser.add_argument('--step-csv', help='existing cluster_step_trace_time.csv')
+    parser.add_argument('--output-dir', help='directory for derived recipe CSV and summaries')
+    parser.add_argument('--summary-only', action='store_true', help='generate the core Rank × Step summary only')
     args = parser.parse_args()
 
     root = os.path.abspath(args.root)
-    db = os.path.join(root, 'cluster_analysis_output', 'cluster_analysis.db')
-    if not os.path.isfile(db) or os.path.getsize(db) == 0:
-        print(f'ERROR: {db} not found; run cluster analysis first', file=sys.stderr)
-        sys.exit(1)
-
-    conn = sqlite3.connect(db)
+    supplied = bool(args.cluster_db or args.step_csv)
+    output = Path(args.output_dir or Path(root) / 'cluster_analysis_output').resolve()
+    if supplied:
+        sources = [Path(path).resolve() for path in (args.cluster_db, args.step_csv) if path]
+        if not args.output_dir or any(output == path.parent for path in sources):
+            parser.error('specify an --output-dir outside the supplied cluster export')
+        signatures = source_signature(args.cluster_db, args.step_csv)
+        conn = open_db(args.cluster_db)
+    else:
+        if args.summary_only:
+            parser.error('--summary-only requires --cluster-db or --step-csv')
+        db = os.path.join(root, 'cluster_analysis_output', 'cluster_analysis.db')
+        if not os.path.isfile(db) or os.path.getsize(db) == 0:
+            print(f'ERROR: {db} not found; run cluster analysis first', file=sys.stderr)
+            sys.exit(1)
+        conn = sqlite3.connect(db)
     cur = conn.cursor()
-    recipes_dir = os.path.join(root, 'cluster_analysis_output', 'recipes')
-    os.makedirs(recipes_dir, exist_ok=True)
-    card_dirs = local_card_map(root)
-    ctx = Ctx(cur, card_dirs, root, recipes_dir, top_num=args.top_num)
+    output.mkdir(parents=True, exist_ok=True)
+    recipes_dir = str(output / 'recipes')
+    ctx = Ctx(cur, local_card_map(root), root, recipes_dir, top_num=args.top_num, supplied=supplied)
 
     status = {}   # name -> {'status': 'done'|'unsupported', 'rows': N, 'reason': str}
     data = {}     # name -> rows (for summary json)
-    quality = dict(q(cur, 'SELECT key, value FROM ClusterBaseInfo WHERE key IN '
-                          "('missing_required_metrics', 'unknown_summary_metrics', 'optional_step_values')"))
-    missing = json.loads(quality.get('missing_required_metrics', '{}'))
-    unknown = json.loads(quality.get('unknown_summary_metrics', '{}'))
-    summary_recipes = {'cluster_time_summary', 'cluster_time_compare_summary',
-                       'computational_op_masking', 'free_analysis', 'pp_chart'}
+    tables = db_tables(conn)
+    quality = base_info(conn, tables)
+    summary_path = output / 'recipes_summary.json'
+    steps = read_steps(conn, tables, args.step_csv, quality)
+    install_steps(conn, steps)
+    missing_columns = {key for _, _, values in steps for key, value in values.items() if value is None}
+    time_summary, _ = recipe_cluster_time_summary(ctx)
+    base_summary = {'analysis_scope': quality.get('analysis_scope'), 'time_summary': time_summary,
+                    'step_metrics_normalized': True, 'categories': []}
+    if supplied:
+        base_summary['source_signature'] = signatures
+    # Publish the core report input first so an optional recipe can time out independently.
+    write_json(summary_path, base_summary)
+    if args.summary_only:
+        conn.close()
+        return
+    comparison_columns = {'computing', 'communication_not_overlapped', 'free'}
+    required_columns = {
+        'cluster_time_compare_summary': comparison_columns,
+        'pp_chart': comparison_columns | {'pp_index'},
+        'computational_op_masking': {'overlapped', 'communication', 'computing'},
+        'free_analysis': {'free'},
+    }
 
-    # 统一调度：遍历注册表逐 recipe 执行，单个失败不阻断整体
-    for cat_key, cat_title, recipes in CATEGORIES:
-        for name, desc, func in recipes:
-            if name == 'computational_op_masking' and any(
-                    {'Overlapped', 'Communication'} & set(keys) for keys in unknown.values()):
-                status[name] = {'status': 'unsupported', 'reason':
-                                'Overlapped 或 Communication 未知，不能将缺省 0 当作真实掩盖比例'}
-                continue
-            if missing and name in summary_recipes:
-                status[name] = {'status': 'unsupported', 'reason':
-                                '部分必需摘要指标未知，不使用兼容表缺省值诊断：' + str(missing)}
-                continue
-            try:
-                rows, reason = func(ctx)
-            except Exception as e:
-                traceback.print_exc()
-                status[name] = {'status': 'failed', 'reason': f'{type(e).__name__}: {e}'}
-                continue
-            if rows is None:
-                status[name] = {'status': 'unsupported', 'reason': reason or ''}
-                continue
-            status[name] = {'status': 'done', 'rows': len(rows)}
-            data[name] = rows
-            write_csv(os.path.join(recipes_dir, name, f'{name}.csv'), rows)
-
-    # 扩展 recipe：与注册表同协议执行，但不进入能力矩阵（见 recipes_catalog.md）
-    for name, func in EXTRA_RECIPES:
+    def execute(name, func):
+        absent = required_columns.get(name, set()) & missing_columns
+        if absent:
+            status[name] = {'status': 'unsupported',
+                            'reason': '集群摘要缺少字段：' + ', '.join(sorted(absent))}
+            return
         try:
-            rows, reason = func(ctx)
-        except Exception as e:
-            traceback.print_exc()
-            status[name] = {'status': 'failed', 'reason': f'{type(e).__name__}: {e}'}
-            continue
+            rows, reason = (time_summary, None) if name == 'cluster_time_summary' else func(ctx)
+        except Exception as exc:
+            unavailable = supplied and isinstance(exc, sqlite3.OperationalError) and str(exc).startswith(
+                ('no such table:', 'no such column:'))
+            if not unavailable:
+                traceback.print_exc()
+            status[name] = {'status': 'unsupported' if unavailable else 'failed',
+                            'reason': f'{type(exc).__name__}: {exc}'}
+            return
         if rows is None:
             status[name] = {'status': 'unsupported', 'reason': reason or ''}
-            continue
+            return
         status[name] = {'status': 'done', 'rows': len(rows)}
         data[name] = rows
         write_csv(os.path.join(recipes_dir, name, f'{name}.csv'), rows)
 
-    # summary md + json
+    # 统一调度：遍历注册表逐 recipe 执行，单个失败不阻断整体
+    for cat_key, cat_title, recipes in CATEGORIES:
+        for name, desc, func in recipes:
+            execute(name, func)
+
+    # 扩展 recipe：与注册表同协议执行，但不进入能力矩阵（见 recipes_catalog.md）
+    for name, func in EXTRA_RECIPES:
+        execute(name, func)
+
     md = build_summary_md(status, data)
-    md_path = os.path.join(root, 'cluster_analysis_output', 'recipes_summary.md')
-    with open(md_path, 'w', encoding='utf-8') as f:
-        f.write(md)
+    md_path = output / 'recipes_summary.md'
+    md_path.write_text(md, encoding='utf-8')
 
     categories_json = []
     for cat_key, cat_title, recipes in CATEGORIES:
@@ -825,14 +867,14 @@ def main():
                         for n, d, _ in recipes],
         })
     summary = {
-        'analysis_scope': (q(cur, "SELECT value FROM ClusterBaseInfo WHERE key='analysis_scope'") or [[None]])[0][0],
+        **base_summary,
         'categories': categories_json,
         'recipes_done': [n for n, s in status.items() if s['status'] == 'done'],
         'recipes_unsupported': {n: s.get('reason') for n, s in status.items()
                                 if s['status'] == 'unsupported'},
         'recipes_failed': {n: s.get('reason') for n, s in status.items() if s['status'] == 'failed'},
-        'time_summary': data.get('cluster_time_summary', []),
-        'legacy_zero_fields': legacy_zero_fields(quality),
+        'top_comm_by_type': communication_tops(data.get('communication_time_sum', []),
+                                               'op', 'total_elapse(ms)')[0],
         'slow_rank': (data.get('slow_rank') or [])[:5],
         'top_bottleneck_ops': (data.get('communication_bottleneck') or [])[:10],
         'free_analysis': data.get('free_analysis', []),
@@ -843,15 +885,13 @@ def main():
         'masking': (data.get('computational_op_masking') or [])[:10],
         'pp_chart': (data.get('pp_chart') or [])[:10],
     }
-    with open(os.path.join(root, 'cluster_analysis_output', 'recipes_summary.json'), 'w',
-              encoding='utf-8') as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-
-    cur.execute('CREATE TABLE IF NOT EXISTS RecipeSummary (recipe_name TEXT PRIMARY KEY, rows INTEGER)')
-    cur.execute('DELETE FROM RecipeSummary')
-    cur.executemany('INSERT OR REPLACE INTO RecipeSummary VALUES (?, ?)',
-                    [(n, s.get('rows', 0)) for n, s in status.items() if s['status'] == 'done'])
-    conn.commit()
+    write_json(summary_path, summary)
+    if not supplied:
+        cur.execute('CREATE TABLE IF NOT EXISTS RecipeSummary (recipe_name TEXT PRIMARY KEY, rows INTEGER)')
+        cur.execute('DELETE FROM RecipeSummary')
+        cur.executemany('INSERT OR REPLACE INTO RecipeSummary VALUES (?, ?)',
+                        [(n, s.get('rows', 0)) for n, s in status.items() if s['status'] == 'done'])
+        conn.commit()
     conn.close()
 
     done = len(summary['recipes_done'])

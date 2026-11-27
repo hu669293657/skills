@@ -4,7 +4,7 @@
 
 无分步时，TEXT 空 Step 与 DB NULL-step 统一将整个 prof 作为每卡一个汇总 step（`prof`）分析；真实 step 保留原编号。原始文件不改写。规则与来源/边界说明见 `references/whole_prof_step.md`。
 
-默认输出为 `performance_report.html`。P6a 将通信、计算和 Free 的定位结果写入「结论与建议」，`insight_bottlenecks.{json,md,html}` 提供配套证据和摘要。双卡比对子报告由本 skill 内置的 `scripts/prof_compare/` 生成。
+纯集群输出、集群输出随附抽样卡、卡级 Prof 都可用同一工作流生成 `performance_report.html`。报告分别显示集群汇总和卡级证据的覆盖范围。有卡级数据时，P6a 将通信、计算和 Free 的定位结果写入「结论与建议」，`insight_bottlenecks.{json,md,html}` 提供配套证据和摘要。双卡比对子报告由本 skill 内置的 `scripts/prof_compare/` 生成。
 
 ## 独立运行
 
@@ -25,7 +25,7 @@ python scripts/run_workflow.py --input "<多卡 Prof 根目录>" --base-rank 0 -
 - Host 侧下发瓶颈：CANN API 汇总、Device 侧大块空闲时间归因（free_analysis）。
 - 出正式报告：训练/推理性能调优后需要一份可直接汇报的 HTML/MD 性能分析报告。
 - 数据已有 `cluster_analysis_output`：直接复用并做进阶分析与报告生成，不重复解析。
-- 分析需提供卡级 Prof 采集目录。已有 `cluster_analysis_output` 可随卡目录一同提供。
+- 已有 `cluster_analysis_output` 可单独提供，也可随卡级 Prof 一同提供。集群总览读取集群件内全部有效 Rank × Step，卡级定位与比对按实际提供的 Prof 执行。已有集群件的派生摘要与 CSV 写到报告目录的 `cluster_summary/`。
 
 ## 解决什么问题
 
@@ -166,4 +166,4 @@ flowchart TD
 - `references/msprof_cli.md` — msprof-analyze 原生 CLI 与 fallback 能力对照
 - `references/html_template_spec.md` — 最终 HTML 报告模板规范（可折叠、ECharts 懒初始化等）
 
-约束提示：单位由字段/schema 决定；step trace 为 μs，新表 ClusterCommunicationTime 和 TEXT communication.json 为 ms。报告先检查 workflow_status.json：退出 0 表示完整完成，2 为部分失败，1 为关键失败；recipe 缺采集能力记 unsupported、执行异常记 failed。缓存校验输入/参数/脚本指纹，旧中间件保存在 _history。cluster_analysis_output 仍生成在实际卡根目录，recipe 会写分析库；需要保留输入目录时在独立副本运行。advisor 的归一化结果由 fallback 生成。
+Step trace 为 μs，新表 ClusterCommunicationTime 和 TEXT communication.json 为 ms。报告阶段状态见 workflow_status.json，退出 0 为完整完成，2 为部分失败，1 为关键失败。recipe 缺采集能力记 unsupported，执行异常记 failed。缓存校验输入、参数和脚本指纹，旧中间件保存在 _history。缺集群件时在实际卡根生成，已有集群数据源以只读方式使用。
