@@ -126,7 +126,7 @@ SELECT COUNT(DISTINCT hostUid) FROM HostInfo;
 行为说明：
 - 提取器自动探测 msprof-analyze 可用性与数据前置条件；特性不可用时在 `advanced_analysis.features[].status` 标注原因（failed / not_available），不阻塞提取主流程
 - 工具输出缓存于 `<data-dir>/advanced_work/`，重复提取时默认复用（status=cached）；用 `--force-advanced` 忽略缓存重跑
-- 成功/缓存命中的 feature 会同步生成中文「分析与判断」，写入 `features[].analysis` 字段（由 `scripts/advanced_insights.py` 规则化生成），随单集群 JSON 落盘；HTML/MD 比对报告渲染时直接复用，保证口径一致
+- 成功或命中缓存的专项通过 `scripts/advanced_insights.py` 生成中文结论，写入单集群 JSON 的 `features[].analysis`。HTML 和 MD 使用同一模块生成或复用结论。
 
 内嵌进阶分析可选参数：
 
@@ -181,7 +181,7 @@ MD 文件必须包含以下章节：
    - **Rank 级差异走势**：同样支持多 Step、多指标与排序。五项指标可切换差值（B − A，ms）与变化率（(B − A) ÷ A，%），还可按该差异排序。任一侧缺值时断线，A 为零时变化率留空
    - 两张图悬浮显示该 Step 和 Rank 的 A/B 各指标值。万卡全览按屏幕像素保留各段峰谷，缩放、平移或输入 Rank 编号可查看逐卡原值
    - **劣化根因总结 & 行动建议**：P0/P1/P2 优先级问题列表
-   - **进阶分析章节**：`{{ADVANCED_ANALYSIS_HTML}}` 自动合并渲染两路结果——集群 A/B JSON 内嵌的 `advanced_analysis`（阶段 1 提取时已同步执行，同名 feature 按集群归属 A/B 对照展示）与 `--advanced` 外部 JSON（含双集群时间拆解对比）；两者皆无时显示引导卡；每个进阶 feature 卡片尾部渲染中文**「分析与判断」**块，A/B 对照展示时追加**「综合判断（基准 vs 对比）」**块（结论由 `scripts/advanced_insights.py` 规则化生成，优先复用单集群 JSON 内嵌 `analysis` 字段）
+   - **进阶分析章节**：`{{ADVANCED_ANALYSIS_HTML}}` 合并 A/B 内嵌 `advanced_analysis` 与 `--advanced` 外部 JSON。按集群展示同名专项，由 `scripts/advanced_insights.py` 提供中文「分析与判断」和 A/B「综合判断」，两路数据皆无时显示引导卡。
 3. **生成 HTML 和 MD 比对报告**（Markdown 链接到 HTML 的两张 Rank 图）：
    ```bash
    python scripts/generate_cluster_report.py --data-a <a.json> --data-b <b.json> --output compare.html
@@ -259,7 +259,7 @@ python scripts/generate_cluster_report.py --data-a <a.json> --data-b <b.json> --
 - 对 free_analysis / communication_bottleneck / cluster_time_compare_summary 按规则生成中文结论：首要成因与占比阈值（≥50% 高度集中 / ≥30% 主要成因）、Rank 影响面（≤4 局部 / >4 全局）、瓶颈算子集中度、慢卡集合比对（同一卡=硬件嫌疑 / 不重叠=调度负载）等
 - `zh_text()` 将工具原始英文原因/指标翻译为中文术语（短语级映射 → 全词映射 → 标识符保留原文）
 - `compare_insights()` 生成 A/B 对照的综合判断（双侧数据齐备才输出）
-- 单集群 feature 优先复用内嵌 `analysis` 字段（最多 8 条），缺失时按 data 规则即时计算
+- 空闲专项始终使用当前抽样规则。其余单集群专项优先复用内嵌 `analysis` 字段（最多 8 条），缺失时按数据即时计算。
 
 ### MD 比对报告生成脚本
 
@@ -301,14 +301,18 @@ python scripts/verify_extracted_metrics.py --data-a <a.json> [--data-b <b.json>]
 
 ## 注意事项
 
-- 原始数据单位为微秒（μs），展示时转换为毫秒（ms），保留 2 位小数
+- **展示单位**：Step、Rank 等总览耗时按毫秒（ms）展示。HCCL 微算子单次耗时为微秒量级，通信算子差异图与 MD 表以 μs 保留 3 位小数。HTML 按内嵌数据组的 `unit` 显示单位，旧报告数据缺字段时按 ms 保留 2 位。
+- **Step 配对**：只要两侧有同名 Step，Rank 图沿用按原编号匹配。在两侧均有数据且 Step 编号完全不重叠时，Rank 图和 MD 补充表按排序后的采集顺序对齐。单侧多余 Step 保留，缺测格留空。配对的 Step 并非同一迭代，结果仅用于形态对比，不能作为逐步性能结论。
+- **HCCL 算子匹配**：DB 提取按第一个 `__` 前的基名聚合 `hccl_op_name`（旧格式为 `op_name`），保留调用次数和总耗时。使用旧 JSON 时重新提取可获得基名聚合结果。详见 [DB 表结构](references/db_schema.md#clustercommunicationtime)。
+- **空闲抽样**：`free_analysis` 的 Rank 来自可分析的原始卡目录，报告用“至少 M 个 Rank”描述样本下限。可见 Rank 数不超过 16 时标注覆盖范围。两侧可见 Rank 数或片段数相差至少 2 倍时，仅比较各自样本内的成因分布，空闲总量不用于判断集群级劣化或改善。
+- **Windows 中文路径**：调用 `msprof-analyze` 时为非 ASCII 的输入、基准和输出目录临时创建 ASCII 目录联接（Junction）。调用结束后清理联接，创建失败时记录警告并使用原路径。
 - **Windows 下禁止内联 `python -c`**：PowerShell 的引号规则与 bash 不同，嵌套引号极易冲突报错。任何临时校验/计算逻辑必须落盘为独立 `.py` 文件再执行；常规校验优先使用 `scripts/verify_extracted_metrics.py`
 - **带宽解读纪律**：均值带宽（AVG(bandwidth)）对算子流量构成（包大小分布）敏感，跨集群比较时必须以**有效吞吐**（总传输量/总传输时间）为准；均值降而吞吐平 → 口径差异，均值与吞吐同降 → 真实劣化
 - **Total 汇总行**：DB 模式通信时间/带宽表中可能存在 Total 汇总行（如 `Total Op Info`），提取与算子级对比前必须过滤（提取器已内置过滤，报告生成器含防御性二次过滤）
-- **贡献度解读纪律**：贡献度 = ΔX/ΔStage 是"占 Stage 变化量的比例"，可超 100% 或为负（各分项方向相反、相互抵消），不是"占总时间比"；|ΔStage/Stage_A| < 1% 时贡献度无统计意义，报告已降级为 "—"，向用户解读时不得将门控值当作真实占比
-- **进阶分析流程**：free_analysis / communication_bottleneck 在提取单集群 JSON 时内嵌执行（默认开启，缓存于 `<data-dir>/advanced_work/`，比对前即已获得结果）；cluster_time_compare_summary 仅 DB 模式可用（需 ClusterTimeSummary 表，缺失时脚本自动补跑 cluster_time_summary），仅通过 run_advanced_analysis.py 提供；free_analysis / communication_bottleneck 走 `--export_type text` 输出 CSV；工具缺失或特性不可用时按 JSON 中的 status/reason 向用户说明，不要自行伪造分析结论
+- **贡献度与占比**：贡献度 = ΔX/ΔStage，可超 100% 或为负。|ΔStage/Stage_A| < 1% 时，整体状态为“无显著差异”，贡献度显示“—”。通信（含与计算重叠部分）不可与计算/空闲占比直接相加，可相加的负载占比依次为计算、未重叠通信和空闲。
+- **进阶分析流程**：单集群 CSV 专项默认随提取执行，默认工作目录为 `<data-dir>/advanced_work/`；双集群命令按角色及来源目录隔离缓存，`--force` 强制重跑。`cluster_time_compare_summary` 仅支持 DB，缺少 `ClusterTimeSummary` 时会补跑 `cluster_time_summary` 并向对应原始 DB 追加该表，写入会在日志和报告元信息中声明。命令的 `--dry-run` 只检查可用性。依据进阶分析 JSON 的状态与原因解释不可用或不可比的情形。
 - **全量中文输出**：比对报告（HTML/MD）与进阶分析的所有分析、成因、推断原因均以中文呈现；工具原始英文术语由 `advanced_insights.py` 的 `zh_text()` 映射为中文（短语级 → 全词级 → 标识符保留原文），报告中不得保留未翻译的英文结论
-- **分析与判断同口径**：单集群 JSON 内嵌 `features[].analysis`、HTML 报告「分析与判断」块、MD 报告分析判断三者同源（`advanced_insights.py`），报告仅渲染不伪造；结论为规则化输出（占比阈值 / Rank 影响面 / 慢卡集合比对），向用户解读时引用原始依据数据
+- **分析与判断同口径**：单集群 JSON、HTML 和 MD 共用 `advanced_insights.py`。渲染旧 JSON 时，空闲分析按当前抽样规则重新计算结论。向用户解读时引用原始依据数据。
 - 通信表可能为空（如 profiler_level 低于 Level1、单卡场景或未采集通信数据），报告中需标注"无通信数据"
 - 并行策略信息从 `cluster_base_info` 的 `algorithm`/`dp_size`/`pp_size`/`tp_size` 字段或 `profiler_metadata.json` 获取
 - 慢卡识别阈值：Stage 时间偏离所有 Rank 均值超过 10% 即标记为异常

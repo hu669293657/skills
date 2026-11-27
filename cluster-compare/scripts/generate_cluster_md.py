@@ -35,6 +35,7 @@ if _SCRIPT_DIR not in sys.path:
 
 # 复用 HTML 报告的指标计算与进阶分析合并逻辑（口径一致的关键）
 import generate_cluster_report as _rep
+from compare_metrics import COMM_DIFF_NOTE, COMM_DIFF_UNIT, communication_diff_display, ordinal_step_pairs
 
 try:
     import advanced_insights as _insights
@@ -177,6 +178,9 @@ def render_advanced_md(merged):
     if meta:
         lines.append(f"> 数据来源：{' · '.join(meta)}")
         lines.append("")
+    write_note = _rep.time_summary_write_note(clusters)
+    if write_note:
+        lines.extend([f"> {write_note}", ""])
     if not feats:
         lines.append("本次无进阶分析数据。默认情况下，提取器（cluster_data_extractor.py）生成单集群 JSON 时"
                      "会同步执行 free_analysis / communication_bottleneck 并嵌入 JSON 的 advanced_analysis "
@@ -253,10 +257,9 @@ def generate_md(data_a, data_b, advanced_json=None, top_ranks=None, html_link="c
     delta_compute = avg_b_compute - avg_a_compute
     delta_comm = avg_b_comm - avg_a_comm
     delta_free = avg_b_free - avg_a_free
-    stage_delta_pct = _rep.safe_div(delta_stage, avg_a_stage) * 100 if avg_a_stage else 0
+    stage_delta_pct, stage_significant, status_text, _ = _rep.stage_status(delta_stage, avg_a_stage)
 
     # 贡献度: Stage 差异不显著（<1%）时降级为 None
-    stage_significant = abs(stage_delta_pct) >= 1.0
     if stage_significant:
         compute_contrib = _rep.safe_div(delta_compute, delta_stage) * 100
         comm_contrib = _rep.safe_div(delta_comm, delta_stage) * 100
@@ -264,14 +267,10 @@ def generate_md(data_a, data_b, advanced_json=None, top_ranks=None, html_link="c
     else:
         compute_contrib = comm_contrib = free_contrib = None
 
-    total_a = avg_a_stage if avg_a_stage > 0 else 1
-    total_b = avg_b_stage if avg_b_stage > 0 else 1
-    a_comp_pct = round(_rep.safe_div(avg_a_compute, total_a) * 100, 1)
-    a_comm_pct = round(_rep.safe_div(avg_a_comm, total_a) * 100, 1)
-    a_free_pct = round(_rep.safe_div(avg_a_free, total_a) * 100, 1)
-    b_comp_pct = round(_rep.safe_div(avg_b_compute, total_b) * 100, 1)
-    b_comm_pct = round(_rep.safe_div(avg_b_comm, total_b) * 100, 1)
-    b_free_pct = round(_rep.safe_div(avg_b_free, total_b) * 100, 1)
+    a_comp_pct, a_comm_pct, a_free_pct, a_pure_comm_pct = _rep.load_shares(
+        avg_a_stage, avg_a_compute, avg_a_comm, avg_a_free, avg_a_overlap)
+    b_comp_pct, b_comm_pct, b_free_pct, b_pure_comm_pct = _rep.load_shares(
+        avg_b_stage, avg_b_compute, avg_b_comm, avg_b_free, avg_b_overlap)
 
     # 带宽: 均值带宽（KPI）+ 有效吞吐（跨带宽类型均值）+ 逐类型判定
     bwa = data_a.get("comm_bandwidth", [])
@@ -295,16 +294,6 @@ def generate_md(data_a, data_b, advanced_json=None, top_ranks=None, html_link="c
         verdict = _rep.classify_bw_change(avg_drop, eff_drop) if (ea and eb) else "none"
         bw_type_verdicts.append((t, avg_drop, eff_drop, verdict))
     bw_verdict = min((v[3] for v in bw_type_verdicts), key=lambda x: rank_order[x]) if bw_type_verdicts else "none"
-
-    # 整体状态
-    if stage_delta_pct > 10:
-        status_text = "严重劣化"
-    elif stage_delta_pct > 5:
-        status_text = "中度劣化"
-    elif stage_delta_pct > 0:
-        status_text = "轻微劣化"
-    else:
-        status_text = "性能改善"
 
     # 诊断摘要
     diagnosis = (f"对比集群 B 的 Stage 总耗时{'增加' if delta_stage > 0 else '减少'} "
@@ -382,12 +371,15 @@ def generate_md(data_a, data_b, advanced_json=None, top_ranks=None, html_link="c
          f"{_rep.fmt_signed(_rep.us_to_ms(delta_comm))}", f"贡献度 {contrib_s(comm_contrib)}"],
         ["空闲均值 (ms)", _rep.us_to_ms(avg_a_free), _rep.us_to_ms(avg_b_free),
          f"{_rep.fmt_signed(_rep.us_to_ms(delta_free))}", f"贡献度 {contrib_s(free_contrib)}"],
-        ["计算/通信/空闲占比 (A→B)", f"计算 {a_comp_pct}% · 通信 {a_comm_pct}% · 空闲 {a_free_pct}%",
+        ["计算/通信（含重叠）/空闲占比", f"计算 {a_comp_pct}% · 通信 {a_comm_pct}% · 空闲 {a_free_pct}%",
          f"计算 {b_comp_pct}% · 通信 {b_comm_pct}% · 空闲 {b_free_pct}%", "—", "负载构成迁移"],
+        ["可相加的负载占比", _rep.additive_load_text(a_comp_pct, a_pure_comm_pct, a_free_pct),
+         _rep.additive_load_text(b_comp_pct, b_pure_comm_pct, b_free_pct), "—", "按未重叠通信计"],
         ["均值带宽 (GB/s)", bw_a_val, bw_b_val, f"{bw_delta_pct:+.1f}%", "对流量构成敏感，仅参考"],
         ["有效吞吐 (GB/s)", eff_a_val, eff_b_val, f"{eff_delta_pct:+.1f}%", BW_VERDICT_TEXT.get(bw_verdict, "")],
     ]
     L.append(md_table(["指标", "集群A（基准）", "集群B（对比）", "变化", "备注"], kpi_rows))
+    L.extend(["", _rep.LOAD_SHARE_NOTE])
     if bw_type_verdicts:
         L.append("")
         L.append("带宽逐类型判定：")
@@ -445,21 +437,28 @@ def generate_md(data_a, data_b, advanced_json=None, top_ranks=None, html_link="c
     # 五、Step 级耗时对比
     L.append(f"## 五、Step 级耗时对比（ms，共 {len(steps)} 个 Step）")
     L.append("")
-    step_rows = []
-    for s in steps:
-        va = (sa.get(s) or {}).get("avg_stage")
-        vb = (sb.get(s) or {}).get("avg_stage")
-        ta = _rep.us_to_ms(va) if va is not None else "—"
-        tb = _rep.us_to_ms(vb) if vb is not None else "—"
-        if va is not None and vb is not None:
-            d = _rep.us_to_ms(vb - va)
-            p = _rep.safe_div(vb - va, va) * 100 if va else 0
-            dt, pt = _rep.fmt_signed(d), f"{_rep.fmt_signed(round(p, 1))}%"
-        else:
-            dt = pt = "—"
-        step_rows.append([s, ta, tb, dt, pt])
-    L.append(md_table(["Step", "集群A Stage", "集群B Stage", "差值", "变化"], step_rows))
+    def step_rows(pairs):
+        for label, step_a, step_b in pairs:
+            va = (sa.get(step_a) or {}).get("avg_stage")
+            vb = (sb.get(step_b) or {}).get("avg_stage")
+            ta = _rep.us_to_ms(va) if va is not None else "—"
+            tb = _rep.us_to_ms(vb) if vb is not None else "—"
+            if va is not None and vb is not None:
+                d = _rep.us_to_ms(vb - va)
+                p = _rep.safe_div(vb - va, va) * 100 if va else 0
+                dt, pt = _rep.fmt_signed(d), f"{_rep.fmt_signed(round(p, 1))}%"
+            else:
+                dt = pt = "—"
+            yield [label, ta, tb, dt, pt]
+
+    L.append(md_table(["Step", "集群A Stage", "集群B Stage", "差值", "变化"],
+                      list(step_rows((step, step, step) for step in steps))))
     L.append("")
+    pairs, note = ordinal_step_pairs(sa, sb)
+    if pairs:
+        L.extend(["### 按采集顺序对齐的 Step", "", note, "",
+                  md_table(["对齐", "集群A Stage (ms)", "集群B Stage (ms)", "差值 (ms)", "变化"],
+                           list(step_rows(pairs))), ""])
 
     # 六、Rank 级走势
     L.append("## 六、Rank 级耗时与差异")
@@ -495,15 +494,16 @@ def generate_md(data_a, data_b, advanced_json=None, top_ranks=None, html_link="c
         L.append("")
 
     # 七、通信算子差异
-    groups, notes = _rep.communication_top_differences(data_a, data_b)
-    L.extend(["## 七、各通信类型的算子耗时差异 Top 10（ms）", "",
-              "按同名算子的平均耗时差（B − A）降序排列。", ""])
+    groups, notes = communication_diff_display(data_a, data_b)
+    L.extend([f"## 七、各通信类型的算子耗时差异 Top 10（{COMM_DIFF_UNIT}）", "",
+              f"按同名算子的平均耗时差（B − A）降序排列。{COMM_DIFF_NOTE}", ""])
     for note in notes:
         L.extend([note, ""])
     for kind, operators in groups.items():
         L.extend([f"### {kind}", "",
-                  md_table(["通信算子", "集群A 均值", "集群B 均值", "差值"],
-                           [[name, f"{a:.6g}", f"{b:.6g}", f"{delta:+.6g}"] for name, a, b, delta in operators]), ""])
+                  md_table(["通信算子", f"集群A 均值 ({COMM_DIFF_UNIT})", f"集群B 均值 ({COMM_DIFF_UNIT})",
+                            f"差值 ({COMM_DIFF_UNIT})"],
+                           [[name, f"{a:.3f}", f"{b:.3f}", f"{delta:+.3f}"] for name, a, b, delta in operators]), ""])
     if not groups:
         L.extend(["暂无两侧均有耗时的通信算子。", ""])
 

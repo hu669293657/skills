@@ -150,6 +150,12 @@ def quote_field(field_name):
     return field_name
 
 
+def hccl_base_name(column):
+    """调用点后缀随采集而变，在 SQLite 中按基名聚合。"""
+    return (f"CASE WHEN instr({column}, '__') > 0 "
+            f"THEN substr({column}, 1, instr({column}, '__') - 1) ELSE {column} END")
+
+
 def query_to_dicts(conn, sql, params=None):
     cur = conn.cursor()
     if params:
@@ -237,10 +243,12 @@ def extract_db_old(db_path):
 
     # communication_time_info
     if "communication_time_info" in tables:
+        name = hccl_base_name("op_name")
         rows = query_to_dicts(conn,
-            "SELECT op_name, AVG(elapse_time) as avg_elapsed, AVG(transit_time) as avg_transit, "
-            "AVG(wait_time) as avg_wait, AVG(synchronization_time) as avg_sync "
-            "FROM communication_time_info GROUP BY op_name ORDER BY avg_elapsed DESC, op_name")
+            f"SELECT {name} AS op_name, COUNT(*) AS cnt, AVG(elapse_time) AS avg_elapsed, "
+            "AVG(transit_time) AS avg_transit, AVG(wait_time) AS avg_wait, "
+            "AVG(synchronization_time) AS avg_sync, SUM(elapse_time) AS sum_elapsed "
+            f"FROM communication_time_info GROUP BY {name} ORDER BY avg_elapsed DESC, op_name")
         # 修复: 过滤 Total 汇总行（非真实算子）
         rows = filter_total_ops(rows, "op_name")
         if rows:
@@ -329,10 +337,12 @@ def extract_db_new(db_path):
 
     # ClusterCommunicationTime
     if "ClusterCommunicationTime" in tables:
+        name = hccl_base_name("hccl_op_name")
         rows = query_to_dicts(conn,
-            "SELECT hccl_op_name, AVG(elapsed_time) as avg_elapsed, AVG(transit_time) as avg_transit, "
-            "AVG(wait_time) as avg_wait, AVG(synchronization_time) as avg_sync, AVG(idle_time) as avg_idle "
-            "FROM ClusterCommunicationTime GROUP BY hccl_op_name ORDER BY avg_elapsed DESC, hccl_op_name")
+            f"SELECT {name} AS hccl_op_name, COUNT(*) AS cnt, AVG(elapsed_time) AS avg_elapsed, "
+            "AVG(transit_time) AS avg_transit, AVG(wait_time) AS avg_wait, "
+            "AVG(synchronization_time) AS avg_sync, AVG(idle_time) AS avg_idle, SUM(elapsed_time) AS sum_elapsed "
+            f"FROM ClusterCommunicationTime GROUP BY {name} ORDER BY avg_elapsed DESC, hccl_op_name")
         # 修复: 过滤 Total 汇总行（非真实算子）
         rows = filter_total_ops(rows, "hccl_op_name")
         if rows:

@@ -8,7 +8,13 @@
   const numberFormat = new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 6});
   const format = (value, signed = false) => Number.isFinite(value)
     ? (signed && value > 0 ? "+" : "") + numberFormat.format(value) : "—";
-  const stepLabel = step => payload.usesSummary ? step.name : "Step " + step.name;
+  const stepLabel = step => payload.usesSummary || payload.pairing === "ordinal" ? step.name : "Step " + step.name;
+  if (payload.pairingNote) {
+    for (const node of document.querySelectorAll('[data-role="pairing-note"]')) {
+      node.textContent = payload.pairingNote;
+      node.hidden = false;
+    }
+  }
 
   function rankOffsets(step) {
     if (!step.offsets) {

@@ -1,5 +1,6 @@
 """Shared data preparation for the cluster comparison reports."""
 from collections import defaultdict
+from itertools import zip_longest
 import json
 import math
 import re
@@ -7,6 +8,19 @@ import re
 
 def label_order(label):
     return (0, int(label), label) if label.isdecimal() else (1, label.casefold(), label)
+
+
+def ordinal_step_pairs(a, b):
+    """仅在两侧有 Step 且编号完全不重叠时按采集顺序对齐。"""
+    if not a or not b or a.keys() & b.keys():
+        return [], ""
+    a_order, b_order = (sorted(steps, key=label_order) for steps in (a, b))
+    pairs = [(f"对齐{i}：A {sa if sa is not None else '—'} ↔ B {sb if sb is not None else '—'}", sa, sb)
+             for i, (sa, sb) in enumerate(zip_longest(a_order, b_order), 1)]
+    note = (f"两侧采集的 Step 编号不重叠（基准 A：{'、'.join(a_order)}；对比 B：{'、'.join(b_order)}）。"
+            "按采集顺序对齐（A 第 i 个 Step ↔ B 第 i 个 Step），并据此计算 B − A。"
+            "配对的 Step 并非同一迭代，结果仅用于形态对比，不能作为逐步性能结论。")
+    return pairs, note
 
 
 def finite_number(value):
@@ -88,6 +102,10 @@ def rank_chart_data(data_a, data_b):
             for rank, row in data.get("rank_summary", {}).items()
         }} for data in clusters)
 
+    pairs, pairing_note = ordinal_step_pairs(a, b)
+    if not pairs:
+        pairs = [(step, step, step) for step in sorted(a.keys() | b.keys(), key=label_order)]
+
     ranks = sorted({rank for cluster in (a, b) for rows in cluster.values() for rank in rows}, key=label_order)
     rank_index = {rank: index for index, rank in enumerate(ranks)}
 
@@ -100,8 +118,9 @@ def rank_chart_data(data_a, data_b):
 
     return {
         "ranks": ranks,
-        "steps": [[step, pack(a.get(step, {})), pack(b.get(step, {}))]
-                  for step in sorted(a.keys() | b.keys(), key=label_order)],
+        "steps": [[label, pack(a.get(sa, {})), pack(b.get(sb, {}))] for label, sa, sb in pairs],
+        "pairing": "ordinal" if pairing_note else None,
+        "pairingNote": pairing_note,
         "summaryOnly": summary_only,
         "usesSummary": use_summary,
     }
@@ -152,6 +171,16 @@ def communication_top_differences(data_a, data_b):
     if partial:
         notes.append(f"集群 {'、'.join(partial)} 的旧提取结果可能只含全局 Top 20，重新提取后可获得完整排名。")
     return top, notes
+
+
+COMM_DIFF_UNIT = "μs"
+COMM_DIFF_NOTE = "HCCL 微算子单次耗时为微秒量级，平均耗时与差值以 μs 展示。"
+
+
+def communication_diff_display(data_a, data_b):
+    groups, notes = communication_top_differences(data_a, data_b)
+    return {kind: [(name, *(round(value * 1000, 3) or 0.0 for value in (a, b, delta)))
+                   for name, a, b, delta in rows] for kind, rows in groups.items()}, notes
 
 
 def inline_json(data):

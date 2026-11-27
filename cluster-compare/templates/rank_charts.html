@@ -131,11 +131,13 @@
 
 <section id="rank-timing" class="card rank-panel">
   <h3>Rank 级两集群耗时走势</h3>
-  <p class="rank-note">同色代表同一 Step 和指标。实线为基准集群 A，虚线为对比集群 B。总耗时取 Stage，纯计算取计算时间减去通算重合。</p>
+  <p class="rank-note">同色代表同一组选定 Step 和指标。实线为基准集群 A，虚线为对比集群 B。总耗时取 Stage，纯计算取计算时间减去通算重合。</p>
+  <p class="rank-note" data-role="pairing-note" hidden></p>
 </section>
 <section id="rank-difference" class="card rank-panel">
   <h3>Rank 级耗时差异走势</h3>
-  <p class="rank-note">按同一 Step、同一 Rank 比较。差值为 B − A，变化率为 (B − A) ÷ A。单侧缺测时留空，A 为零时变化率留空。</p>
+  <p class="rank-note">在所选 Step 组内按同一 Rank 比较。差值为 B − A，变化率为 (B − A) ÷ A。单侧缺测时留空，A 为零时变化率留空。</p>
+  <p class="rank-note" data-role="pairing-note" hidden></p>
 </section>
 <template id="rank-chart-controls">
   <p class="rank-note" data-role="source-note" hidden></p>

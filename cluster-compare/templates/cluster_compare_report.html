@@ -104,12 +104,9 @@ table :is(th, td) { overflow-wrap: anywhere; }
     <h1 class="text-3xl md:text-4xl font-bold bg-gradient-to-r from-red-400 to-orange-400 text-gradient">集群劣化根因分析报告</h1>
     <p class="text-slate-400 mt-2 text-sm md:text-base">对比分析：基准集群 (A) vs 对比集群 (B) 的性能瓶颈诊断</p>
   </div>
-  <div class="mt-4 md:mt-0 flex items-center space-x-2 bg-red-900/30 text-red-400 px-4 py-2 rounded-full border border-red-800">
-    <span class="relative flex h-3 w-3">
-      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-      <span class="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
-    </span>
-    <span class="font-semibold text-sm">{{STATUS_TEXT}}</span>
+  <div class="mt-4 md:mt-0 flex items-center space-x-2 bg-slate-800 {{STAGE_DELTA_COLOR}} px-4 py-2 rounded-full border border-current">
+    <span class="inline-flex rounded-full h-3 w-3 bg-current" aria-hidden="true"></span>
+    <span class="font-semibold text-sm">整体状态：{{STATUS_TEXT}}</span>
   </div>
 </header>
 <div class="meta-line -mt-4 mb-2"><b>A</b> {{PATH_A}} &nbsp;·&nbsp; <b>B</b> {{PATH_B}} &nbsp;·&nbsp; <b>生成时间</b> {{GENERATE_TIME}}</div>
@@ -191,6 +188,8 @@ table :is(th, td) { overflow-wrap: anywhere; }
 <div id="sec-load" class="grid grid-cols-1 lg:grid-cols-3 gap-6">
   <div class="card p-6 lg:col-span-2">
     <h3 class="text-lg font-semibold text-slate-200 mb-4">负载类型转换：{{LOAD_TYPE_TEXT}}</h3>
+    <p class="text-sm text-slate-400 mb-2">{{LOAD_SHARE_NOTE}}</p>
+    <p class="text-sm text-slate-400">基准集群 A：{{LOAD_SHARE_A}}<br>对比集群 B：{{LOAD_SHARE_B}}</p>
     <div id="chart-distribution" class="w-full h-72"></div>
   </div>
   <div class="card p-6 bg-gradient-to-br from-slate-800 to-slate-900 flex flex-col justify-center">
@@ -244,9 +243,15 @@ function initCommDiffCharts() {
   var groups;
   try { groups = JSON.parse(holder.textContent); } catch (e) { return; }
   var charts = [];
-  var fmt = function (v) { return Number(v).toFixed(2); };
+  var unit = (groups[0] && groups[0].unit) || 'ms';
 
   function render(group) {
+    var u = group.unit || unit;
+    var digits = u === 'μs' ? 3 : 2;
+    var fmt = function (v) {
+      var formatted = Number(v).toFixed(digits);
+      return Number(formatted) === 0 ? (0).toFixed(digits) : formatted;
+    };
     var el = document.getElementById(group.id);
     if (!el || el.getAttribute('data-rendered')) return;
     el.setAttribute('data-rendered', '1');
@@ -264,14 +269,14 @@ function initCommDiffCharts() {
         trigger: 'axis', axisPointer: { type: 'shadow' },
         formatter: function (ps) {
           var r = rows[ps[0].dataIndex];
-          return '<b>' + r.name + '</b><br/>A: ' + fmt(r.a) + ' ms<br/>B: ' + fmt(r.b) +
-                 ' ms<br/>差值: ' + (r.delta > 0 ? '+' : '') + fmt(r.delta) + ' ms';
+          return '<b>' + echarts.format.encodeHTML(r.name) + '</b><br/>A：' + fmt(r.a) + ' ' + u +
+                 '<br/>B：' + fmt(r.b) + ' ' + u + '<br/>差值：' + (r.delta > 0 ? '+' : '') + fmt(r.delta) + ' ' + u;
         }
       },
       xAxis: {
-        type: 'value', name: 'Δ (B − A) / ms', nameLocation: 'end',
+        type: 'value', name: 'Δ (B − A) / ' + u, nameLocation: 'end',
         nameTextStyle: { color: '#94a3b8', fontSize: 11, padding: [0, 0, 0, 40] },
-        axisLabel: { color: '#94a3b8', fontSize: 11 },
+        axisLabel: { color: '#94a3b8', fontSize: 11, formatter: fmt },
         splitLine: { lineStyle: { color: '#334155', type: 'dashed' } }
       },
       yAxis: {
@@ -287,7 +292,7 @@ function initCommDiffCharts() {
             value: r.delta,
             itemStyle: { color: slower ? '#f87171' : '#34d399', borderRadius: slower ? [0, 4, 4, 0] : [4, 0, 0, 4] },
             label: { show: true, position: slower ? 'right' : 'left', color: '#e2e8f0', fontSize: 11,
-                     formatter: function (p) { return (p.value > 0 ? '+' : '') + fmt(p.value); } }
+                     formatter: function (p) { return (p.value > 0 ? '+' : '') + fmt(p.value) + ' ' + u; } }
           };
         }),
         markLine: { silent: true, symbol: 'none', data: [{ xAxis: 0 }],
@@ -356,11 +361,11 @@ if (bwHasData) {
 var chartDist = echarts.init(document.getElementById('chart-distribution'));
 chartDist.setOption({
   tooltip: { trigger: 'item', formatter: '{a} <br/>{b}: {c}%' },
-  legend: { bottom: 0, textStyle: { color: colorText }, data: ['计算时间','通信时间','空闲时间'] },
+  legend: { bottom: 0, textStyle: { color: colorText }, data: ['计算时间','未重叠通信时间','空闲时间'] },
   color: ['#8b5cf6', '#f59e0b', '#64748b'],
   series: [
-    { name: '基准集群A占比', type: 'pie', radius: ['40%','70%'], center: ['25%','45%'], itemStyle: { borderRadius: 5, borderColor: '#1e293b', borderWidth: 2 }, label: { show: true, formatter: '{b}\n{d}%', color: '#cbd5e1', fontSize: 11 }, data: [{value:{{A_PIE_COMPUTE_PCT}}, name:'计算时间'},{value:{{A_PIE_COMM_PCT}}, name:'通信时间'},{value:{{A_PIE_FREE_PCT}}, name:'空闲时间'}] },
-    { name: '对比集群B占比', type: 'pie', radius: ['40%','70%'], center: ['75%','45%'], itemStyle: { borderRadius: 5, borderColor: '#1e293b', borderWidth: 2 }, label: { show: true, formatter: '{b}\n{d}%', color: '#cbd5e1', fontSize: 11 }, data: [{value:{{B_PIE_COMPUTE_PCT}}, name:'计算时间'},{value:{{B_PIE_COMM_PCT}}, name:'通信时间'},{value:{{B_PIE_FREE_PCT}}, name:'空闲时间'}] }
+    { name: '基准集群A占比', type: 'pie', radius: ['40%','70%'], center: ['25%','45%'], itemStyle: { borderRadius: 5, borderColor: '#1e293b', borderWidth: 2 }, label: { show: true, formatter: '{b}\n{d}%', color: '#cbd5e1', fontSize: 11 }, data: [{value:{{A_PIE_COMPUTE_PCT}}, name:'计算时间'},{value:{{A_PIE_COMM_PCT}}, name:'未重叠通信时间'},{value:{{A_PIE_FREE_PCT}}, name:'空闲时间'}] },
+    { name: '对比集群B占比', type: 'pie', radius: ['40%','70%'], center: ['75%','45%'], itemStyle: { borderRadius: 5, borderColor: '#1e293b', borderWidth: 2 }, label: { show: true, formatter: '{b}\n{d}%', color: '#cbd5e1', fontSize: 11 }, data: [{value:{{B_PIE_COMPUTE_PCT}}, name:'计算时间'},{value:{{B_PIE_COMM_PCT}}, name:'未重叠通信时间'},{value:{{B_PIE_FREE_PCT}}, name:'空闲时间'}] }
   ],
   graphic: [
     { type: 'text', left: '22%', top: '42%', textAlign: 'center', style: { text: '基准A', fill: '#34d399', font: 'bold 14px Inter' } },

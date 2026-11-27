@@ -134,6 +134,8 @@ Step 级别时间统计，每个 rank 每个 step 一行。
 
 ### ClusterCommunicationTime
 
+`hccl_op_name` 可能含随采集变化的调用点后缀，如 `hcom_allReduce__895_0_1`。跨集群比较前取第一个 `__` 之前的基名，在 SQLite 中直接聚合。旧格式 `communication_time_info.op_name` 使用相同规则。提取结果保留 `cnt`（调用次数）和 `sum_elapsed`（总耗时，μs），均值按各原始调用计算。聚合后过滤 `Total` 汇总行。
+
 | 字段名 | 类型 | 说明 |
 |--------|------|------|
 | step | TEXT | Step 名称 |

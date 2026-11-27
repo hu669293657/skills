@@ -121,13 +121,28 @@ def _label_of(feat):
     return None
 
 
+def _ranks_of(data):
+    ranks = set()
+    for row in data.get("reasons") or data.get("items") or []:
+        ranks.update(str(rank) for rank in (row.get("sample_ranks") or []) if rank not in (None, "-", ""))
+        for key in ("rank", "slow_rank"):
+            rank = row.get(key)
+            if rank not in (None, "-", ""):
+                ranks.add(str(rank))
+    return ranks
+
+
 def free_insights(data, label=None):
     """空闲时间成因聚合 → 中文结论列表。"""
     out = []
+    ranks = len(_ranks_of(data))
+    if ranks <= 16:
+        out.append(f"⚠️ 覆盖范围提示：本次 free_analysis 基于 {data.get('rows_total', 0)} 条空闲片段"
+                   f"（来自至少 {ranks} 个 Rank 的原始数据），属抽样结果，不代表全集群空闲水平。")
     total = float(data.get("total_ms") or 0)
     reasons = data.get("reasons") or []
     if not reasons or total <= 0:
-        return ["未采集到空闲片段，无法给出成因判断。"]
+        return out + ["未采集到空闲片段，无法给出成因判断。"]
     top = reasons[0]
     tr = zh_text(top.get("reason", ""))
     pct = float(top.get("pct") or 0)
@@ -150,7 +165,7 @@ def free_insights(data, label=None):
             out.append(f"判断：该成因仅影响约 {rc} 个 Rank（{top.get('sample_ranks', [])[:8]}），"
                        "指向个体慢卡或局部瓶颈，优先核对该卡链路与负载")
         else:
-            out.append(f"判断：该成因波及约 {rc} 个 Rank，为全局性现象，"
+            out.append(f"判断：抽样中在 {rc} 个 Rank 观察到该成因，"
                        "优先排查 Host 下发节奏、同步策略与通信对齐")
     return out
 
@@ -247,6 +262,16 @@ def time_cmp_insights(data):
 # ==================== A/B 对照综合判断 ====================
 
 def free_compare(data_a, data_b):
+    nra, nrb = (len(_ranks_of(data)) for data in (data_a, data_b))
+    rows_a, rows_b = (int(data.get("rows_total") or 0) for data in (data_a, data_b))
+
+    def imbalanced(a, b):
+        return a != b and max(a, b) >= 2 * min(a, b)
+
+    if imbalanced(nra, nrb) or imbalanced(rows_a, rows_b):
+        return [f"⚠️ 口径提示：两侧 free_analysis 抽样规模不同"
+                f"（基准 {rows_a} 条片段，至少 {nra} 个 Rank；对比 {rows_b} 条片段，至少 {nrb} 个 Rank）。"
+                "空闲总量受抽样规模影响，无法据此判断集群级劣化或改善，成因分布仅在各自抽样范围内有效。"]
     out = []
     ta = float(data_a.get("total_ms") or 0)
     tb = float(data_b.get("total_ms") or 0)
@@ -260,7 +285,7 @@ def free_compare(data_a, data_b):
     if ra and rb:
         ta_r, tb_r = zh_text(ra[0].get("reason", "")), zh_text(rb[0].get("reason", ""))
         if ta_r == tb_r:
-            out.append(f"判断：两侧首要成因一致（{ta_r}），说明瓶颈类型未变、程度加深，"
+            out.append(f"判断：两侧抽样中的首要成因一致（{ta_r}），"
                        "优先对比该成因的耗时与频次差异")
         else:
             out.append(f"判断：首要成因发生迁移（基准：{ta_r} → 对比：{tb_r}），"
@@ -300,10 +325,7 @@ def comm_bn_compare(data_a, data_b):
 # ==================== 统一入口 ====================
 
 def feature_insights(feat):
-    """单 feature 中文分析判断: 优先内嵌 analysis 字段, 否则按数据规则计算。"""
-    a = feat.get("analysis")
-    if isinstance(a, list) and a:
-        return [str(x) for x in a][:8]
+    """空闲分析使用当前抽样规则，其他特性优先使用内嵌结论。"""
     if feat.get("status") not in ("success", "cached"):
         return []
     data = feat.get("data") or {}
@@ -312,6 +334,9 @@ def feature_insights(feat):
     try:
         if name == FEAT_NAME_FREE:
             return free_insights(data, label)
+        a = feat.get("analysis")
+        if isinstance(a, list) and a:
+            return [str(x) for x in a][:8]
         if name == FEAT_NAME_COMM_BN:
             return comm_bn_insights(data, label)
         if name == FEAT_NAME_TIME_CMP:

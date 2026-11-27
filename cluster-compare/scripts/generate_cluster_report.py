@@ -29,7 +29,7 @@ try:
 except Exception:
     _insights = None
 
-from compare_metrics import communication_top_differences, inline_json, label_order, rank_chart_data
+from compare_metrics import COMM_DIFF_NOTE, COMM_DIFF_UNIT, communication_diff_display, inline_json, label_order, rank_chart_data
 
 US_TO_MS = 1000.0
 
@@ -54,6 +54,32 @@ def fmt_signed(val):
 FEAT_NAME_TIME_CMP = "cluster_time_compare_summary"
 FEAT_NAME_FREE = "free_analysis"
 FEAT_NAME_COMM_BN = "communication_bottleneck"
+
+LOAD_SHARE_NOTE = "通信（含与计算重叠部分）不可与计算/空闲占比直接相加。"
+
+
+def stage_status(delta, baseline):
+    pct = delta / baseline * 100 if baseline else 0
+    significant = abs(pct) >= 1.0
+    if not significant:
+        return pct, significant, "无显著差异", "text-slate-400"
+    if pct > 10:
+        return pct, significant, "严重劣化", "text-red-400"
+    if pct > 5:
+        return pct, significant, "中度劣化", "text-orange-400"
+    if pct > 0:
+        return pct, significant, "轻微劣化", "text-orange-400"
+    return pct, significant, "性能改善", "text-emerald-400"
+
+
+def load_shares(stage, compute, comm, free, overlap):
+    total = stage if stage > 0 else 1
+    return tuple(round(safe_div(value, total) * 100, 1)
+                 for value in (compute, comm, free, comm - overlap))
+
+
+def additive_load_text(compute, nonoverlapping_comm, free):
+    return f"计算 {compute}% · 未重叠通信 {nonoverlapping_comm}% · 空闲 {free}%"
 
 
 def contrib_kpi(contrib, delta):
@@ -311,6 +337,14 @@ def _render_feature_section(feat, badge_map, show_desc=True):
     return head, body
 
 
+def time_summary_write_note(clusters):
+    written = [tag for tag in ("A", "B") if (clusters.get(tag) or {}).get("time_summary_added")]
+    if not written:
+        return ""
+    target = "两侧" if len(written) == 2 else f"集群 {written[0]} 的"
+    return f"已向{target} DB 追加 ClusterTimeSummary 表。"
+
+
 def render_advanced_html(advanced):
     """渲染进阶分析 JSON 为 HTML 区块（支持同 feature 的 A/B 双卡对照）。
 
@@ -393,7 +427,10 @@ def render_advanced_html(advanced):
         c = clusters.get(key) or {}
         if c.get("data_dir"):
             meta.append(f"集群{key} {os.path.basename(str(c['data_dir']).rstrip(chr(92)).rstrip('/'))}")
-    meta_html = f'<p class="text-xs text-slate-600 mt-3">{" · ".join(meta)}</p>' if meta else ""
+    meta_html = f'<p class="text-xs text-slate-400 mt-3">{escape(" · ".join(meta))}</p>' if meta else ""
+    write_note = time_summary_write_note(clusters)
+    if write_note:
+        meta_html += f'<p class="text-xs text-amber-300 mt-2">{escape(write_note)}</p>'
     return ('<div class="mb-8"><h3 class="text-xl font-bold text-white mb-1">🔬 进阶分析（msprof-analyze -m 专项）</h3>'
             f'<p class="text-sm text-slate-500 mb-4">基础耗时比对之外的专项深度分析结论（含提取阶段内嵌的单集群结果与双集群时间拆解对比）</p>{blocks}{meta_html}</div>')
 
@@ -405,9 +442,10 @@ def render_communication_differences(data_a, data_b):
     Python 侧只输出分组数据 JSON（#comm-diff-data）与折叠面板容器；图表在面板
     展开时惰性初始化，避免隐藏容器宽度为 0 导致绘制异常。
     """
-    groups, notes = communication_top_differences(data_a, data_b)
+    groups, notes = communication_diff_display(data_a, data_b)
     result = ['<p class="comm-diff-note">按同名算子的平均耗时差（B − A）降序排列：'
-              '正值（红）表示 B 更慢，负值（绿）表示 B 更快；条长按该类型内最大差值缩放。</p>']
+              '正值（红）表示 B 更慢，负值（绿）表示 B 更快；条长按该类型内最大差值缩放。'
+              f'{COMM_DIFF_NOTE}</p>']
     result.extend(f'<p class="comm-diff-note">{escape(note)}</p>' for note in notes)
     if not groups:
         result.append('<p class="comm-diff-note">暂无两侧均有耗时的通信算子。</p>')
@@ -418,7 +456,7 @@ def render_communication_differences(data_a, data_b):
                       f'{" open" if index == 0 else ""}>'
                       f'<summary>{escape(kind)} <span>· {len(operators)} 个算子</span></summary>'
                       f'<div class="comm-chart" id="{chart_id}"></div></details>')
-        payload.append({"id": chart_id, "kind": kind, "rows": [
+        payload.append({"id": chart_id, "kind": kind, "unit": COMM_DIFF_UNIT, "rows": [
             {"name": name, "a": a, "b": b, "delta": delta}
             for name, a, b, delta in operators]})
     result.append(f'<script id="comm-diff-data" type="application/json">'
@@ -452,12 +490,11 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
     delta_comm = avg_b_comm - avg_a_comm
     delta_free = avg_b_free - avg_a_free
 
-    stage_delta_pct = safe_div(delta_stage, avg_a_stage) * 100 if avg_a_stage else 0
+    stage_delta_pct, stage_significant, status_text, stage_delta_color = stage_status(delta_stage, avg_a_stage)
 
     # 修复: 贡献度 = ΔX / ΔStage 仅在 Stage 差异显著（|增幅| >= 1%）时才有统计意义。
     # ΔStage 趋近 0 时该比值会爆炸（如 368.5% / -123.4%），此时各分项变化互相抵消，
     # 百分比贡献度不再可解释，降级为 None（报告中展示 "—" 并说明原因）。
-    stage_significant = abs(stage_delta_pct) >= 1.0
     if stage_significant:
         compute_contrib = safe_div(delta_compute, delta_stage) * 100
         comm_contrib = safe_div(delta_comm, delta_stage) * 100
@@ -468,14 +505,10 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
         free_contrib = None
 
     # 占比
-    total_a = avg_a_stage if avg_a_stage > 0 else 1
-    total_b = avg_b_stage if avg_b_stage > 0 else 1
-    a_comp_pct = round(safe_div(avg_a_compute, total_a) * 100, 1)
-    a_comm_pct = round(safe_div(avg_a_comm, total_a) * 100, 1)
-    a_free_pct = round(safe_div(avg_a_free, total_a) * 100, 1)
-    b_comp_pct = round(safe_div(avg_b_compute, total_b) * 100, 1)
-    b_comm_pct = round(safe_div(avg_b_comm, total_b) * 100, 1)
-    b_free_pct = round(safe_div(avg_b_free, total_b) * 100, 1)
+    a_comp_pct, a_comm_pct, a_free_pct, a_pure_comm_pct = load_shares(
+        avg_a_stage, avg_a_compute, avg_a_comm, avg_a_free, avg_a_overlap)
+    b_comp_pct, b_comm_pct, b_free_pct, b_pure_comm_pct = load_shares(
+        avg_b_stage, avg_b_compute, avg_b_comm, avg_b_free, avg_b_overlap)
 
     bwa = data_a.get("comm_bandwidth", [])
     bwb = data_b.get("comm_bandwidth", [])
@@ -510,20 +543,6 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
     }
     bw_verdict_color, bw_verdict_text = bw_verdict_map.get(bw_verdict, bw_verdict_map["none"])
 
-    # 状态文字
-    if stage_delta_pct > 10:
-        status_text = "严重劣化"
-        stage_delta_color = "text-red-400"
-    elif stage_delta_pct > 5:
-        status_text = "中度劣化"
-        stage_delta_color = "text-orange-400"
-    elif stage_delta_pct > 0:
-        status_text = "轻微劣化"
-        stage_delta_color = "text-orange-400"
-    else:
-        status_text = "性能改善"
-        stage_delta_color = "text-emerald-400"
-
     # 修复: KPI 颜色按有效吞吐判定（均值带宽受流量构成影响，不作劣化依据）
     if bw_verdict == "real_severe":
         bw_delta_color = "text-red-400"
@@ -533,7 +552,7 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
         bw_delta_color = "text-emerald-400"
     else:
         bw_delta_color = "text-emerald-400" if bw_delta_pct >= 0 else "text-orange-400"
-    load_type_text = f"计算 {a_comp_pct}% → {b_comp_pct}% | 通信 {a_comm_pct}% → {b_comm_pct}%"
+    load_type_text = f"计算 {a_comp_pct}% → {b_comp_pct}% | 通信（含重叠）{a_comm_pct}% → {b_comm_pct}%"
 
     # 诊断摘要
     diagnosis = (f"对比集群 B 的 Stage 总耗时{'增加' if delta_stage > 0 else '减少'} "
@@ -560,7 +579,7 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
         "{{STEP_A}}": str(len(sa)), "{{STEP_B}}": str(len(sb)),
         "{{STAGE_A_MS}}": str(us_to_ms(avg_a_stage)), "{{STAGE_B_MS}}": str(us_to_ms(avg_b_stage)),
         "{{STAGE_DELTA_PERCENT}}": str(round(abs(stage_delta_pct), 1)),
-        "{{STAGE_DELTA_SIGN}}": "+" if stage_delta_pct >= 0 else "",
+        "{{STAGE_DELTA_SIGN}}": "+" if stage_delta_pct >= 0 else "−",
         "{{STAGE_DELTA_COLOR}}": stage_delta_color,
         # 修复: 差值符号不再丢失（负值正确显示 "-"）
         "{{DELTA_COMPUTE_MS}}": str(us_to_ms(abs(delta_compute))),
@@ -595,11 +614,14 @@ def generate_compare_report(data_a, data_b, template_path, output_path, advanced
             else '<div class="text-xs text-slate-500">无逐类型带宽数据</div>'),
         "{{DIAGNOSIS_TEXT}}": diagnosis,
         "{{LOAD_TYPE_TEXT}}": load_type_text,
+        "{{LOAD_SHARE_NOTE}}": LOAD_SHARE_NOTE,
+        "{{LOAD_SHARE_A}}": additive_load_text(a_comp_pct, a_pure_comm_pct, a_free_pct),
+        "{{LOAD_SHARE_B}}": additive_load_text(b_comp_pct, b_pure_comm_pct, b_free_pct),
         "{{STEP_LABELS}}": inline_json(steps),
         "{{A_STAGE_BAR}}": json.dumps([us_to_ms(sa.get(s, {"avg_stage": 0})["avg_stage"]) for s in steps]),
         "{{B_STAGE_BAR}}": json.dumps([us_to_ms(sb.get(s, {"avg_stage": 0})["avg_stage"]) for s in steps]),
-        "{{A_PIE_COMPUTE_PCT}}": str(a_comp_pct), "{{A_PIE_COMM_PCT}}": str(a_comm_pct), "{{A_PIE_FREE_PCT}}": str(a_free_pct),
-        "{{B_PIE_COMPUTE_PCT}}": str(b_comp_pct), "{{B_PIE_COMM_PCT}}": str(b_comm_pct), "{{B_PIE_FREE_PCT}}": str(b_free_pct),
+        "{{A_PIE_COMPUTE_PCT}}": str(a_comp_pct), "{{A_PIE_COMM_PCT}}": str(a_pure_comm_pct), "{{A_PIE_FREE_PCT}}": str(a_free_pct),
+        "{{B_PIE_COMPUTE_PCT}}": str(b_comp_pct), "{{B_PIE_COMM_PCT}}": str(b_pure_comm_pct), "{{B_PIE_FREE_PCT}}": str(b_free_pct),
     }
 
     # 关键定位点（contrib 可能为 None: Stage 差异不显著时降级，仅展示绝对变化）
