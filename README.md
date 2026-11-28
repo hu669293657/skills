@@ -1,153 +1,145 @@
-# Skills
+<div align="center">
 
-个人技能集合，涵盖 vLLM-Ascend 性能调优、Prof 性能分析与比对、现网故障取证、Host 侧瓶颈定位、环境/硬件诊断等场景。
+<img src="docs/assets/hero.svg" alt="AI Infra Skills — Agent-powered performance analysis" width="100%">
 
-每个 skill 目录下均有 `SKILL.md`（Agent 执行定义，frontmatter 的 `description` 决定路由）与 `README.md`（人类可读说明：应用场景、解决的问题、输入及获取方式、输出、流程图、示例提示词）。
+# AI Infra Skills
 
-## 仓库结构
+**AI 智能性能分析技能集**
 
+面向 AI 训练与推理的性能分析、差异归因、故障诊断与优化工作流。
+
+[![Skills](https://img.shields.io/badge/Skills-8-0891b2?style=flat-square)](#技能目录)
+[![Ascend](https://img.shields.io/badge/Ascend-NPU-0e7490?style=flat-square)](#核心性能分析)
+[![Profiling](https://img.shields.io/badge/Profiling-NPU%20%2F%20GPU-2563eb?style=flat-square)](#核心性能分析)
+[![Reports](https://img.shields.io/badge/Reports-HTML%20%2F%20Excel-0f766e?style=flat-square)](#报告与交付)
+
+[快速开始](#快速开始) · [核心性能分析](#核心性能分析) · [技能目录](#技能目录) · [报告与交付](#报告与交付) · [English](README_EN.md)
+
+</div>
+
+## 为什么使用 AI Infra Skills
+
+**让 Agent 执行标准化的性能分析流程，而不仅是给出泛化的优化建议。**
+
+面对训练变慢、通信劣化、GPU → NPU 迁移或推理吞吐不足，不再从大量日志和 Profiling 文件手动拼接分析过程。选择合适的 Skill，提供数据与目标，让 Agent 按定义的工作流执行分析、提取证据并生成交付物。
+
+| 从 | 到 |
+| :--- | :--- |
+| 手工逐卡排查、反复运行分析命令 | 自动化数据识别、异常 Rank 定位及工作流编排 |
+| 仅知道端到端耗时发生变化 | 拆解计算、通信、调度等维度，分析差异贡献 |
+| 难以找到具体算子或 Kernel | 从总体指标逐步下钻到热点与执行明细 |
+| 人工整理分析材料 | HTML、Markdown、Excel 等结构化交付（视 Skill 而定） |
+| 依赖个人经验判断 | 可复用的方法、明确的数据证据与分析边界 |
+
+## 核心性能分析
+
+<img src="docs/assets/workflow.svg" alt="性能分析能力：输入、全景分析、差异归因、微观下钻、报告交付" width="100%">
+
+以上为能力层次示意，并非强制执行顺序。根据输入和问题选用一个或多个 Skill。
+
+<table>
+<tr>
+<td width="33%" valign="top"><h3><a href="cluster-analysis/README.md">cluster-analysis</a></h3><b>性能全景分析</b><p>一份 Prof，自动识别慢卡、计算、通信与 Host 瓶颈。</p><p><b>输入：</b>单份昇腾 Prof / 集群分析输出</p><p><b>产出：</b>HTML · MD · CSV · Excel</p><a href="cluster-analysis/README.md">查看使用指南 →</a></td>
+<td width="33%" valign="top"><h3><a href="cluster-compare/README.md">cluster-compare</a></h3><b>双集群劣化归因</b><p>两份集群数据，拆解差异、判断通信带宽与异常 Rank。</p><p><b>输入：</b>两份昇腾集群数据</p><p><b>产出：</b>HTML · MD</p><a href="cluster-compare/README.md">查看使用指南 →</a></td>
+<td width="33%" valign="top"><h3><a href="prof-compare/README.md">prof-compare</a></h3><b>单卡精细化比对</b><p>NPU/GPU 或 NPU/NPU 比对，下钻算子、Kernel、Shape 和单次执行。</p><p><b>输入：</b>两份单卡 Prof / compare XLSX</p><p><b>产出：</b>HTML · 中文 Excel · JSON · CSV</p><a href="prof-compare/README.md">查看使用指南 →</a></td>
+</tr>
+</table>
+
+- **cluster-analysis：哪里慢？** 支持单卡、多卡与已有集群输出，包含 23 个正式 recipe 和 1 个扩展 recipe；根据实际数据覆盖生成统一 `performance_report.html`。内置 fallback 有明确前置条件，不承诺与原生 CLI 全部能力等价。
+- **cluster-compare：为什么变慢？** 比较两个昇腾集群的 Step、Rank、计算、通信、空闲及带宽，输出贡献度归因与分级行动建议。
+- **prof-compare：具体慢在哪个算子？** 支持 NPU/GPU 与 NPU/NPU 单卡比对；原始明细可用时支持 Host/Device Top 15 及单次执行 47 项字段展示。
+
+## 快速开始
+
+### 1. 获取技能
+
+```bash
+git clone https://github.com/hu669293657/skills.git
+cd skills
 ```
-skills/
-├── ascend-dump-analyzer/     # 昇腾环境信息采集与分析（环境体检/配置漂移）
-├── issue-analyzer/           # 现网故障日志取证分析（报错/中断，非性能问题）
-├── cluster-analysis/         # 单份 Prof 性能一站式分析（含 vendor 子技能）
-├── cluster-compare/          # 两集群/多卡 Prof 比对与劣化归因
-├── prof-compare/             # 两份单卡 Prof 细粒度比对（中文报告）
-├── cpu-host-performance/     # HostBound 定位（ftrace 采集 + 证据化诊断）
-├── ibmc-analyzer/            # iBMC 服务器硬件健康分析
-└── vllm-ascend-tuning/       # vLLM-Ascend 全链路性能调优
+
+### 2. 交给 Agent
+
+让支持本地文件与命令执行的 Agent 读取对应目录中的 `SKILL.md`，按其步骤执行。也可依照所用 Agent 的技能安装规则导入**完整 Skill 目录**（保留 scripts、references 等文件）。本仓库没有统一安装器；各 Agent 的发现机制、权限和依赖以实际环境为准。
+
+例如：
+
+```text
+使用 cluster-analysis 分析 ./prof_data，找出主要性能瓶颈、异常 Rank 及证据，生成完整 HTML 报告。
 ```
 
-## 路由决策（先分类，再选技能）
-
-1. **性能问题还是故障问题？**
-   - 报错、中断、拉起失败、hang 死等故障类问题 → `issue-analyzer`（日志取证）
-   - 性能慢、吞吐低、瓶颈定位 → 进入第 2 步
-2. **性能分析有几份数据？**
-   - 一份 Prof 数据 → `cluster-analysis`
-   - 两份数据对比 → 先判断规模：
-     - 多卡/集群级 → `cluster-compare`
-     - 单卡/单机 → `prof-compare`
-3. **Prof 分析怀疑点不在算子层？**
-   - 怀疑 Host/CPU 拖慢 NPU/GPU → `cpu-host-performance`
-   - 硬件层（BMC/电源/温度/ECC） → `ibmc-analyzer`
-   - 环境配置漂移 → `ascend-dump-analyzer`
-4. **推理服务调优**（并行策略/编译/量化/基准测试） → `vllm-ascend-tuning`
-
-## Skills 总览
-
-### 1. ascend-dump-analyzer
-
-**Ascend NPU 环境信息采集与分析工具**（[README](ascend-dump-analyzer/README.md)）
-
-采集 Ascend 服务器的环境信息（系统、驱动、CANN、环境变量、网络、权重等），生成结构化分析报告，支持多环境对比。
-
-- **采集**：零依赖单文件脚本，可在任意 Ascend 服务器上运行
-- **单环境分析**：系统健康检查、组件版本校验、关键环境变量检测、网络状态诊断
-- **环境对比**：对比两个或多个 dump JSON，识别配置漂移
-- **报告**：按单份分析或多份比对的 HTML 模板生成完整报告，另附 Markdown 摘要
-
-分发时复制 `ascend-dump-analyzer/`。维护者在仓库根目录运行 `python -m unittest discover -s tests/ascend-dump-analyzer`。
-
-### 2. issue-analyzer
-
-**现网问题日志取证分析工具**（[README](issue-analyzer/README.md)）
-
-从 plog/slog/host/device/framework 等现网日志中构建证据链，定位训练/推理中断、算子报错、环境异常的根因（故障类问题，非性能分析）。
-
-- **日志分诊**：按问题类型自动分诊并提取关键错误
-- **证据链**：所有结论附日志原文与来源文件，杜绝臆测
-- **可回验**：每条结论附回验命令
-- **输出**：Markdown 分析报告（含时间线与处置建议）
-
-### 3. cluster-analysis
-
-**昇腾 NPU 训练性能一站式分析技能**（[README](cluster-analysis/README.md)）
-
-面向单份 Prof 数据（单卡或多卡）的一站式性能分析与瓶颈定位，兼容 msprof-analyze 全部能力：原生 CLI 已安装则优先调用，未安装则使用内置 fallback 脚本（能力等价）。
-
-- **输入自动识别**：单卡/多卡、DB/TEXT 格式、PyTorch/MindSpore 框架，缺失 `cluster_analysis_output` 时自动生成
-- **流水线执行**：八阶段流水线（P0–P7），支持 `run_workflow.py` 一键编排与端到端验收
-- **进阶分析**：五大类 23 正式 + 1 扩展 recipe 全量执行，含 Advisor 诊断与能力矩阵
-- **对比能力**：泳道算子统计与跨卡比对、通信占比最大/最小卡对比（经 vendor_bridge 调用 vendor 子技能）
-- **HTML 报告**：左侧固定导航、分区可折叠、vendor 子报告 iframe 内嵌的完整报告
-
-### 4. cluster-compare
-
-**昇腾集群比对分析技能**（[README](cluster-compare/README.md)）
-
-专注比对两个集群（多卡）的 profiling 数据（DB 或 TEXT 格式），定位性能差异并输出劣化归因 HTML 报告。
-
-- **数据准备**：无现成 `cluster_analysis_output` 时，自动安装并调用 `msprof-analyze cluster` 生成
-- **比对维度**：Step 耗时拆解、通信算子耗时、通信带宽、通信矩阵
-- **输出**：劣化归因 HTML/MD 对比报告
-
-### 5. prof-compare
-
-**双 Prof 数据比对与中文报告生成技能**（[README](prof-compare/README.md)）
-
-比对两份单卡 Prof 数据集（GPU vs NPU / NPU vs NPU / 调优前后），自动检测并安装 msprof-analyze，支持直比与 xlsx 解析两种工作模式。
-
-- **模式一（直比）**：提供两个 Prof 路径，自动调用 compare 生成比对 xlsx 后进入分析
-- **模式二（xlsx 分析）**：直接解析已有的 `performance_comparison_result_*.xlsx`
-- **多格式输出**：JSON（结构化）+ HTML 报告（改善亮点/劣化风险）+ 中文 xlsx 与 CSV
-
-### 6. cpu-host-performance
-
-**Linux ftrace CPU Host 性能自动化分析**（[README](cpu-host-performance/README.md)）
-
-面向训练/推理场景的 Host 侧 CPU 根因自动化分析：解析 ftrace/trace-cmd 采集数据，自动计算调度延迟、IRQ/SoftIRQ、CPU 利用率/频率等指标，输出全中文诊断报告（Markdown + 离线 HTML）。
-
-- **多格式健壮解析**：tar.gz / zip / 目录 / 裸 ftrace 文本 / trace-cmd report / Chrome Tracing / Perfetto JSON
-- **组合式诊断**：拒绝"单指标定罪"，10 类具体诊断 + 证据不足兜底，每条结论带置信度
-- **现场采集**：`scripts/cpu_trace_collect.sh` 客户侧一键采集，不联网、不装包、结束自动恢复 tracing 配置
-- **运行**：`python3 -m analyzer analyze <输入路径> --output-dir <输出目录>`（在 skill 根目录）
-
-### 7. ibmc-analyzer
-
-**iBMC 服务器日志分析与故障定位工具**（[README](ibmc-analyzer/README.md)）
-
-基于 iBMC 一键收集 (dump_info) 日志，进行故障根因定位、性能瓶颈排查和集群硬件配置一致性校验。
-
-- **故障定位**：分析 MCE/PCIe 错误、内核 Panic，区分软件与硬件故障
-- **性能排查**：检查 BIOS/OS 参数、降频诊断、温度异常分析
-- **集群对比**：多节点配置 Diff，识别网卡固件、PCIe 带宽等木桶效应
-- **输出**：结构化 JSON + HTML 诊断报告（单机深度分析 + 多机集群对比）
-
-### 8. vllm-ascend-tuning
-
-**vLLM-Ascend 全链路性能调优技能**（[README](vllm-ascend-tuning/README.md)）
-
-提供从并行策略到模型推理的全链路优化工作流（Phase 0–11），包含主流模型的已验证 YAML 基准配置库。
-
-- **覆盖模型**：DeepSeek-V3/V3.1/V3.2、Qwen3/3.5 全系列、GLM-4/5.1、Kimi-K2.5、MiniMax-M2.5 等
-- **调优阶段**：并行策略 → 编译优化 → OS 调优 → torch_npu → CANN/HCCL → vLLM 参数 → Speculative Decoding → 量化 → PD 分离 → 基准测试
-- **快速模板**：内置低延迟 (TPOT ~20ms) 和高吞吐 (TPOT ~50ms) 两套快速配置模板
-- **参考文档**：包含 parallel_strategy、graph_mode、quantization、speculative_decoding 等 17 篇技术文档
-
-## 技能选型速查
-
-| 你想做什么 | 推荐技能 |
-|-----------|---------|
-| 体检/比对服务器环境、排查配置漂移 | ascend-dump-analyzer |
-| 现网报错/中断/拉起失败等故障排查（非性能） | issue-analyzer |
-| 分析一份 Prof 数据的性能/瓶颈/慢卡 | cluster-analysis |
-| 对比两个集群或多卡 Prof 数据 | cluster-compare |
-| 对比两份单卡 Prof（GPU vs NPU / 调优前后） | prof-compare |
-| 怀疑 Host/CPU 拖慢 NPU/GPU（ftrace 采集与诊断） | cpu-host-performance |
-| 判断服务器/BMC 硬件健康 | ibmc-analyzer |
-| 端到端 vLLM-Ascend 调优 | vllm-ascend-tuning |
-
-## 同步方式
-
-```powershell
-cd D:\skills
-
-# 本地改动推送到远程
-git add -A
-git commit -m "描述改动"
-git push
-
-# 拉取远程更新到本地
-git pull
+```text
+使用 cluster-compare 对比 ./baseline 和 ./current，以 baseline 为基准，分析劣化贡献度、通信带宽与异常 Rank，生成 HTML 和 MD 报告。
 ```
+
+```text
+使用 prof-compare 对比 ./gpu_prof 和 ./npu_prof，以 GPU 为基准，分析总体差异和劣化 Top 算子，生成 HTML 与中文 Excel 报告。
+```
+
+替换为实际数据路径。执行前阅读对应 Skill 的输入要求、依赖、权限及数据覆盖说明。
+
+### 3. 不依赖 Agent 的示例
+
+以 cluster-analysis 为例，在仓库根目录：
+
+```bash
+cd cluster-analysis
+python scripts/run_workflow.py --input "/path/to/prof_data" --no-native
+```
+
+满足输入与 Python 依赖条件时，可通过内置工作流生成报告，默认总报告为数据根目录下 `cluster_analysis_mw/performance_report.html`。其他 Skill 的独立运行方式以各自 README 为准。
+
+## 技能目录
+
+| Skill | 适用场景 | 主要输入 | 交付物 |
+| :--- | :--- | :--- | :--- |
+| [cluster-analysis](cluster-analysis/README.md) | 性能全景分析 | 单份昇腾 Prof / 集群分析输出 | HTML · MD · CSV · Excel |
+| [cluster-compare](cluster-compare/README.md) | 双集群劣化归因 | 两份昇腾集群数据 | HTML · MD |
+| [prof-compare](prof-compare/README.md) | 单卡精细化比对 | 两份单卡 Prof / compare XLSX | HTML · 中文 Excel · JSON · CSV |
+| [cpu-host-performance](cpu-host-performance/README.md) | HostBound 与 CPU 诊断 | ftrace / CPU 采集包 | HTML · MD · 绑核建议 |
+| [vllm-ascend-tuning](vllm-ascend-tuning/README.md) | 推理全链路调优 | 模型、硬件、配置及测试目标 | YAML · 调优配置 · 基准结果 |
+| [ascend-dump-analyzer](ascend-dump-analyzer/README.md) | 环境与版本配套 | 环境 dump / 版本清单 | HTML · MD |
+| [issue-analyzer](issue-analyzer/README.md) | 故障日志取证 | 现网日志及问题描述 | MD · 错误摘要 |
+| [ibmc-analyzer](ibmc-analyzer/README.md) | 硬件健康诊断 | iBMC dump_info / 日志包 | HTML · JSON |
+
+<details>
+<summary><b>按问题选型</b></summary>
+
+- 一份性能数据，不知道哪里慢 → [cluster-analysis](cluster-analysis/README.md)
+- 两个昇腾集群性能差异 → [cluster-compare](cluster-compare/README.md)
+- GPU/NPU 或两份单卡 Prof 对比 → [prof-compare](prof-compare/README.md)
+- 怀疑 Host/CPU 或绑核问题 → [cpu-host-performance](cpu-host-performance/README.md)
+- 推理吞吐、TTFT、TPOT 调优 → [vllm-ascend-tuning](vllm-ascend-tuning/README.md)
+- 配置漂移或版本配套 → [ascend-dump-analyzer](ascend-dump-analyzer/README.md)
+- 报错、中断或 hang → [issue-analyzer](issue-analyzer/README.md)
+- 服务器硬件异常 → [ibmc-analyzer](ibmc-analyzer/README.md)
+
+</details>
+
+## 报告与交付
+
+| 报告 | 输出内容 | 使用指南 |
+| :--- | :--- | :--- |
+| `performance_report.html` | 集群全景、Rank 趋势、瓶颈证据、建议和可用的双卡比对 | [查看](cluster-analysis/README.md) |
+| `cluster_compare_report.html` / `.md` | 双集群差异、劣化归因、带宽判定与分级建议 | [查看](cluster-compare/README.md) |
+| `compare_analysis_report.html` / 中文 Excel | 总体指标、热点、算子与 Kernel 差异 | [查看](prof-compare/README.md) |
+| Host、环境、硬件诊断报告 | CPU/NUMA/IRQ、版本配套、硬件健康等证据 | [Host](cpu-host-performance/README.md) · [环境](ascend-dump-analyzer/README.md) · [硬件](ibmc-analyzer/README.md) |
+
+公开演示报告与可复现性能基准尚未发布。报告实际覆盖取决于采集数据、设备、框架版本和工具依赖，不以示意图作为实测证据。
+
+## 使用边界与反馈
+
+- 单集群与双集群分析当前主要面向昇腾；跨 GPU/NPU 的单卡比对由 prof-compare 提供。
+- 各 Skill 的 `SKILL.md` 与独立 README 是执行定义和技术说明的入口；缺失数据可能导致部分分析不可用。
+- 安装依赖、远程访问、绑核或修改服务配置前，请核对权限与影响；生产变更应经过审批、验证及回滚评估。
+- 不要公开上传含客户信息、凭据或其他敏感内容的日志、Prof 和报告。仓库当前未提供根级 LICENSE，请在再分发前确认授权及第三方组件条款。
+
+欢迎通过 [Issues](https://github.com/hu669293657/skills/issues) 提交问题与建议。建议提供 Skill 名称、版本/提交、脱敏输入结构、实际结果和预期结果。
+
+<div align="center">
+
+如果这些 Skill 对你的性能分析工作有帮助，欢迎 Star ⭐ 支持项目。
+
+**AI Infra Skills · 从性能数据到可行动的洞察**
+
+</div>
